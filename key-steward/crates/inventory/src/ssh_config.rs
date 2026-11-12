@@ -199,10 +199,10 @@ fn collect(
                 }
             }
             "match" => {
-                if args
-                    .iter()
-                    .any(|a| a.trim_start_matches('!').eq_ignore_ascii_case("exec"))
-                {
+                // Any "exec" on a Match line counts: ssh also takes
+                // `exec="cmd"`, `"exec"` and `!exec`. Erring on the safe side
+                // is fine here; it only means asking the user.
+                if line.to_ascii_lowercase().contains("exec") {
                     scan.runs_commands.push(format!(
                         "Match exec in {} line {}",
                         path.display(),
@@ -296,9 +296,12 @@ fn split_line(line: &str) -> Option<(String, Vec<String>)> {
 /// paths are under `<home>/.ssh/` (ssh_config(5), user config). `*`, `?`
 /// and `[...]` work in the last path component. Missing files are skipped,
 /// as ssh does. `None` if we cannot list the files (a glob in a directory
-/// name, or a `~user` path); the caller must then assume the worst.
+/// name, `${VAR}`, a `%` token or a `~user` path); the caller must then
+/// assume the worst. `~/` is `home`, which must be the passwd home.
 fn include_files(arg: &str, home: &Path) -> Option<Vec<PathBuf>> {
-    if arg.starts_with('~') && !arg.starts_with("~/") {
+    // ssh expands `${VAR}`, `%` tokens and `~user` in Include paths; we do
+    // not, so we cannot know which files it reads.
+    if arg.contains(['$', '%']) || (arg.starts_with('~') && !arg.starts_with("~/")) {
         return None;
     }
     let path = if let Some(rest) = arg.strip_prefix("~/") {
@@ -800,10 +803,28 @@ mod tests {
         assert!(!marker.exists(), "ssh -G ran the Match exec command");
         assert!(store.list().unwrap().is_empty());
 
-        // `!exec` is a command too.
-        let cfg2 = f.home.join(".ssh/config_notexec");
-        fs::write(&cfg2, "Match !exec \"true\" host x\n").unwrap();
-        assert_eq!(scan_config(&cfg2, &f.home).unwrap().runs_commands.len(), 1);
+        // Other spellings ssh accepts (re-review, OpenSSH 10.5p1 ran all).
+        for (i, line) in [
+            "Match !exec \"true\" host x",
+            "Match exec=\"true\"",
+            "Match \"exec\" \"true\"",
+            "Match\texec\t\"true\"",
+            "Match final exec \"true\"",
+            "Match tagged t exec \"true\"",
+            "Match exec \"true\"\r",
+            "MATCH EXEC true",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let cfg2 = f.home.join(format!(".ssh/config_exec_{i}"));
+            fs::write(&cfg2, format!("{line}\n  User x\n")).unwrap();
+            assert_eq!(
+                scan_config(&cfg2, &f.home).unwrap().runs_commands.len(),
+                1,
+                "{line:?}"
+            );
+        }
     }
 
     #[test]
@@ -846,14 +867,16 @@ mod tests {
         fs::write(
             &cfg,
             format!(
-                "Include {}/*/x\nInclude ~other/cfg\nHost a\n",
+                "Include {}/*/x\nInclude ~other/cfg\nInclude ${{XINC}}\n\
+                 Include {}/%u_inc\nHost a\n",
+                f.home.display(),
                 f.home.display()
             ),
         )
         .unwrap();
         let scan = scan_config(&cfg, &f.home).unwrap();
         assert_eq!(scan.aliases, vec!["a"]);
-        assert_eq!(scan.runs_commands.len(), 2, "{:?}", scan.runs_commands);
+        assert_eq!(scan.runs_commands.len(), 4, "{:?}", scan.runs_commands);
         let mut store = Store::open_in_memory().unwrap();
         let opts = ImportOptions::new(&cfg, &f.home);
         assert!(matches!(
