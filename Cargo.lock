@@ -2692,7 +2692,11 @@ name = "resolver"
 version = "0.1.0"
 dependencies = [
  "identity-core",
+ "reqwest",
  "thiserror 2.0.21",
+ "tokio",
+ "url",
+ "wiremock",
 ]
 
 [[package]]
