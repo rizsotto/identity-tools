@@ -346,6 +346,8 @@ name = "crypto"
 version = "0.1.0"
 dependencies = [
  "age",
+ "gpgme",
+ "gpgme-sys",
  "identity-core",
  "tempfile",
  "thiserror 2.0.21",
@@ -929,7 +931,6 @@ dependencies = [
  "base64ct",
  "bech32 0.12.0",
  "gpgme",
- "gpgme-sys",
  "ssh-key",
  "tempfile",
  "thiserror 2.0.21",

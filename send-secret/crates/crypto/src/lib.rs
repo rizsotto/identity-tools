@@ -5,6 +5,7 @@ mod detect;
 mod error;
 mod facade;
 mod plan;
+mod recipient_file;
 mod self_identity;
 
 pub use age_backend::{AgeKey, SkipReason, Skipped, age_key};
@@ -15,6 +16,7 @@ pub use plan::{
     MessagePlan, OpenPgpCert, OpenPgpSelf, Person, Recipient, SELF_LABEL, SelfNote, Sender, plan,
     self_plan,
 };
+pub use recipient_file::{RecipientFile, RecipientFileError};
 pub use self_identity::{SelfIdentity, self_identity_path};
 
 /// The two message formats (SPEC section 4).

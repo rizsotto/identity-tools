@@ -92,6 +92,7 @@ Today, GNOME's key app (Seahorse) is barely maintained and has no rotation workf
 
 ### Functional
 - **FR-1** Key list: name/comment, type, bits/curve, fingerprint, created, expiry, number of locations, warnings.
+  SSH keys have no creation time. For them, "created" is the file date: the modification time of the private key file, else of the `.pub` file, labeled as the file date (`identity_core::scan_ssh_dir`, M1 T04).
 - **FR-2** Location model: each location has a kind, a target, the key it holds, a status (`verified`, `unverified`, `missing`, `error`) and a `last_checked` time.
 - **FR-3** SSH server check: run `ssh -o BatchMode=yes -o IdentitiesOnly=yes -i <key> -o ConnectTimeout=10 <host> true`. Exit code 0 means verified. Never ask for passwords in batch mode.
 - **FR-4** Forge check: list keys through the API and compare fingerprints.
@@ -259,6 +260,7 @@ Respect a non-default `AuthorizedKeysFile` only if the user configures it (v1: s
 - **S-5** Use `ssh -o BatchMode=yes` for checks. Never accept new host keys silently: if a host key is unknown, ask the user to connect once in a terminal, or show the fingerprint and ask.
 - **S-6** Remote scripts are static files in the repo. User data reaches them only through stdin, never by string interpolation in a command line.
 - **S-7** Every workflow shows a dry-run first. The user confirms before any change.
+- **S-8** The local database stores configuration and references only: locations, their settings and status, check results, the rotation journal, and keys by fingerprint. It never stores key material (public or private) and never tokens. Keys are always read from their source (`~/.ssh`, GnuPG, the forge). The database file is 0600 in a 0700 dir.
 
 ---
 
