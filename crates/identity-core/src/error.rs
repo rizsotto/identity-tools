@@ -46,12 +46,30 @@ pub enum GpgError {
     /// A home dir path with a NUL byte.
     #[error("unsafe GnuPG home dir path")]
     UnsafePath,
-    #[error("cannot read the GnuPG config: {0}")]
+    /// Reading gpg.conf, or the throwaway home of [`crate::Gpg::split_keys`].
+    #[error("GnuPG file error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("not a full OpenPGP fingerprint")]
+    BadFingerprint,
+    #[error("no such key in the keyring")]
+    KeyNotFound,
+    #[error("more than {limit} keys")]
+    TooManyKeys { limit: usize },
+    #[error("a key has more than {limit} {what}")]
+    TooComplex { what: &'static str, limit: usize },
 }
 
 impl From<gpgme::Error> for GpgError {
     fn from(e: gpgme::Error) -> Self {
         GpgError::Gpgme(e.to_string())
     }
+}
+
+/// Why WKD URLs cannot be built for an address. Fixed text, never the input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum WkdError {
+    #[error("not an email address")]
+    NotAnAddress,
+    #[error("the address's domain is not a plain ASCII host name")]
+    BadDomain,
 }

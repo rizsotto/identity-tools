@@ -1,5 +1,6 @@
 //! Checks that every fixture made by `send-secret/tests/fixtures/gen.sh`
-//! exists, has the right type, and holds only fake example.org identities.
+//! exists, has the right type, and holds only fake example.org and
+//! example.net identities.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -65,6 +66,18 @@ const FILES: &[&str] = &[
     "ciphertext/openpgp-binary.gpg",
     "ciphertext/age-armored.age",
     "ciphertext/age-binary.age",
+    "openpgp/alice-new.asc",
+    "openpgp/alice-new.sec.asc",
+    "openpgp/mallory-other.asc",
+    "openpgp/olivia-two-uids.asc",
+    "openpgp/rita-revoked-uid.asc",
+    "openpgp/eve-expired.asc",
+    "openpgp/alice.gpg",
+    "openpgp/alice-mallory.gpg",
+    "../mock-sources/github-empty.gpg",
+    "../mock-sources/junk.bin",
+    "../mock-sources/not-found.html",
+    "../mock-sources/broken-armor.asc",
 ];
 
 #[test]
@@ -288,4 +301,168 @@ fn sample_ciphertexts_have_expected_headers() {
     assert!(head("ciphertext/age-binary.age").starts_with(b"age-encryption.org/v1\n"));
     // Binary OpenPGP starts with a packet tag byte (bit 7 set).
     assert_ne!(head("ciphertext/openpgp-binary.gpg")[0] & 0x80, 0);
+}
+
+/// `gpg --show-keys --with-colons` records of a fixture, in a temp home.
+fn show_keys(rel: &str, home: &Path) -> Vec<Vec<String>> {
+    let path = fixtures().join(rel);
+    run(
+        Command::new("gpg")
+            .args(["--batch", "--with-colons", "--show-keys"])
+            .arg(&path),
+        home,
+    )
+    .lines()
+    .map(|l| l.split(':').map(str::to_string).collect())
+    .collect()
+}
+
+fn primary_fprs(recs: &[Vec<String>]) -> Vec<String> {
+    // The fpr record right after each pub (or sec) record.
+    recs.windows(2)
+        .filter(|w| (w[0][0] == "pub" || w[0][0] == "sec") && w[1][0] == "fpr")
+        .map(|w| w[1][9].clone())
+        .collect()
+}
+
+/// (validity, user ID) of every uid record.
+fn uids(recs: &[Vec<String>]) -> Vec<(String, String)> {
+    recs.iter()
+        .filter(|r| r[0] == "uid")
+        .map(|r| (r[1].clone(), r[9].clone()))
+        .collect()
+}
+
+#[test]
+fn m2_openpgp_fixtures_have_expected_user_ids() {
+    let ok = |uid: &str| ("-".to_string(), uid.to_string());
+    let cases: [(&str, Vec<(String, String)>); 5] = [
+        (
+            "openpgp/alice-new.asc",
+            vec![ok("Alice-new Example (test fixture) <alice@example.org>")],
+        ),
+        (
+            "openpgp/mallory-other.asc",
+            vec![ok("Mallory Example (test fixture) <mallory@example.net>")],
+        ),
+        (
+            "openpgp/olivia-two-uids.asc",
+            vec![
+                ok("Olivia Example (test fixture) <olivia@example.org>"),
+                ok("Olivia Example (test fixture) <olivia@example.net>"),
+            ],
+        ),
+        (
+            "openpgp/rita-revoked-uid.asc",
+            vec![
+                ok("Rita Example (test fixture) <rita@example.net>"),
+                (
+                    "r".to_string(),
+                    "Rita Example (test fixture) <rita@example.org>".to_string(),
+                ),
+            ],
+        ),
+        (
+            "openpgp/eve-expired.asc",
+            vec![ok("Eve Example (test fixture) <eve@example.org>")],
+        ),
+    ];
+    let home = temp_home();
+    for (file, expected) in cases {
+        let recs = show_keys(file, home.path());
+        assert_eq!(primary_fprs(&recs).len(), 1, "{file}: one key");
+        assert_eq!(uids(&recs), expected, "{file}");
+        let prim = recs.iter().find(|r| r[0] == "pub").unwrap();
+        assert_eq!(prim[16], "ed25519", "{file} primary");
+        assert_eq!(prim[1], "-", "{file} primary validity");
+        let sub = recs.iter().find(|r| r[0] == "sub").unwrap();
+        assert_eq!(sub[16], "cv25519", "{file} subkey");
+        assert!(sub[11].contains('e'), "{file} subkey usage");
+    }
+}
+
+#[test]
+fn alice_new_is_another_key_for_alice() {
+    let home = temp_home();
+    let alice = primary_fprs(&show_keys("openpgp/alice.asc", home.path()));
+    let new = primary_fprs(&show_keys("openpgp/alice-new.asc", home.path()));
+    let new_sec = primary_fprs(&show_keys("openpgp/alice-new.sec.asc", home.path()));
+    assert_eq!(new.len(), 1);
+    assert_ne!(alice, new);
+    assert_eq!(new, new_sec);
+}
+
+#[test]
+fn eve_encryption_subkey_is_expired() {
+    let home = temp_home();
+    let recs = show_keys("openpgp/eve-expired.asc", home.path());
+    let prim = recs.iter().find(|r| r[0] == "pub").unwrap();
+    // Made with the clock at 2020-01-01, primary never expires.
+    assert_eq!(prim[5], "1577836800");
+    assert_eq!(prim[6], "");
+    assert!(!prim[11].contains('E'), "key as a whole cannot encrypt");
+    let sub = recs.iter().find(|r| r[0] == "sub").unwrap();
+    assert_eq!(sub[1], "e", "subkey expired");
+    assert_eq!(sub[6], "1577923200", "subkey expired 2020-01-02");
+}
+
+#[test]
+fn binary_exports_hold_the_right_keys() {
+    let home = temp_home();
+    let alice = primary_fprs(&show_keys("openpgp/alice.asc", home.path()));
+    let mallory = primary_fprs(&show_keys("openpgp/mallory-other.asc", home.path()));
+    for (file, expected) in [
+        ("openpgp/alice.gpg", alice.clone()),
+        ("openpgp/alice-mallory.gpg", [alice, mallory].concat()),
+    ] {
+        let bytes = fs::read(fixtures().join(file)).unwrap();
+        // Binary OpenPGP starts with a packet tag byte (bit 7 set).
+        assert_ne!(bytes[0] & 0x80, 0, "{file} is binary");
+        assert_eq!(
+            primary_fprs(&show_keys(file, home.path())),
+            expected,
+            "{file}"
+        );
+    }
+}
+
+#[test]
+fn github_empty_gpg_is_exact_and_has_no_key() {
+    // GitHub's answer for a user with no key, SPEC 15 (live check
+    // 2026-11-12): 125 bytes, no newline at the end.
+    let expected = "-----BEGIN PGP PUBLIC KEY BLOCK-----\n\
+                    Note: This user hasn't uploaded any GPG keys.\n\
+                    \n\
+                    \n\
+                    =twTO\n\
+                    -----END PGP PUBLIC KEY BLOCK-----";
+    let bytes = fs::read(fixtures().join("../mock-sources/github-empty.gpg")).unwrap();
+    assert_eq!(bytes.len(), 125);
+    assert_eq!(bytes, expected.as_bytes());
+    let home = temp_home();
+    assert!(primary_fprs(&show_keys("../mock-sources/github-empty.gpg", home.path())).is_empty());
+}
+
+#[test]
+fn junk_mock_sources_hold_no_key() {
+    let home = temp_home();
+    for rel in [
+        "../mock-sources/junk.bin",
+        "../mock-sources/not-found.html",
+        "../mock-sources/broken-armor.asc",
+    ] {
+        let out = Command::new("gpg")
+            .args(["--batch", "--with-colons", "--show-keys"])
+            .arg(fixtures().join(rel))
+            .env_clear()
+            .env("HOME", home.path())
+            .env("GNUPGHOME", home.path().join("gnupg"))
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{rel}: gpg must refuse it");
+    }
+    let junk = fs::read(fixtures().join("../mock-sources/junk.bin")).unwrap();
+    assert_eq!(junk, (0..=255u8).collect::<Vec<_>>());
+    assert!(read("../mock-sources/not-found.html").starts_with("<!DOCTYPE html>"));
 }

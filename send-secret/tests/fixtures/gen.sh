@@ -18,8 +18,11 @@ chmod 700 "$GNUPGHOME"
 PASSPHRASE="fixture-passphrase"
 MESSAGE="Send Secret fixture message"
 
+mocks=(github-empty.gpg junk.bin not-found.html broken-armor.asc)
 rm -rf openpgp age ssh ciphertext
+rm -f "${mocks[@]/#/../mock-sources/}"
 mkdir openpgp age ssh ciphertext
+mkdir -p ../mock-sources
 
 gpg_q() {
     gpg --batch --quiet --pinentry-mode loopback "$@"
@@ -79,5 +82,67 @@ printf '%s' "$MESSAGE" | gpg_q --trust-model always -r alice@example.org -e > ci
 printf '%s' "$MESSAGE" | age -a -R age/dave.pub > ciphertext/age-armored.age
 printf '%s' "$MESSAGE" | age -R age/dave.pub > ciphertext/age-binary.age
 
-chmod 644 openpgp/* age/* ssh/* ciphertext/*
+# M2 resolver fixtures. Made after the ciphertexts, so `-r alice@example.org`
+# above has only one key to pick.
+
+fpr_of() {
+    gpg --batch --with-colons --list-keys "=$1" | awk -F: '$1 == "fpr" { print $10; exit }'
+}
+
+# User IDs, the first is the primary. Ed25519 + Cv25519, no passphrase.
+# Prints the fingerprint.
+gen_uids() {
+    local first="$1"
+    shift
+    gpg_q --passphrase "" --quick-gen-key "$first" ed25519 sign,cert never
+    local fpr uid
+    fpr="$(fpr_of "$first")"
+    for uid in "$@"; do
+        gpg_q --passphrase "" --quick-add-uid "$fpr" "$uid"
+    done
+    gpg_q --passphrase "" --quick-add-key "$fpr" cv25519 encr never
+    echo "$fpr"
+}
+
+# A second key for alice@example.org: the "changed key".
+gen_openpgp alice-new ed25519 cv25519 ""
+mallory="$(gen_uids "Mallory Example (test fixture) <mallory@example.net>")"
+gpg_q --armor --export "$mallory" > openpgp/mallory-other.asc
+olivia="$(gen_uids "Olivia Example (test fixture) <olivia@example.org>" \
+    "Olivia Example (test fixture) <olivia@example.net>")"
+gpg_q --armor --export "$olivia" > openpgp/olivia-two-uids.asc
+rita="$(gen_uids "Rita Example (test fixture) <rita@example.org>" \
+    "Rita Example (test fixture) <rita@example.net>")"
+gpg_q --passphrase "" --quick-revoke-uid "$rita" "Rita Example (test fixture) <rita@example.org>"
+gpg_q --armor --export "$rita" > openpgp/rita-revoked-uid.asc
+
+# Eve: made with the clock set to 2020, encryption subkey expired a day
+# later. The primary key never expires.
+eve_uid="Eve Example (test fixture) <eve@example.org>"
+gpg_q --faked-system-time 20200101T000000 --passphrase "" --quick-gen-key "$eve_uid" ed25519 sign,cert never
+eve="$(fpr_of "$eve_uid")"
+gpg_q --faked-system-time 20200101T000000 --passphrase "" --quick-add-key "$eve" cv25519 encr 1d
+gpg_q --armor --export "$eve" > openpgp/eve-expired.asc
+
+# Binary exports, as WKD serves them.
+alice="$(fpr_of "Alice Example (test fixture) <alice@example.org>")"
+gpg_q --export "$alice" > openpgp/alice.gpg
+gpg_q --export "$alice" "$mallory" > openpgp/alice-mallory.gpg
+
+# Canned answers for the resolver's mock servers.
+# GitHub's .gpg for a user with no key (SPEC 15, live check 2026-11-12):
+# 125 bytes, no newline at the end.
+printf -- '-----BEGIN PGP PUBLIC KEY BLOCK-----\nNote: This user hasn'"'"'t uploaded any GPG keys.\n\n\n=twTO\n-----END PGP PUBLIC KEY BLOCK-----' \
+    > ../mock-sources/github-empty.gpg
+for i in $(seq 0 255); do printf "\\x$(printf %02x "$i")"; done > ../mock-sources/junk.bin
+cat > ../mock-sources/not-found.html <<'HTML'
+<!DOCTYPE html>
+<html><head><title>Page not found</title></head>
+<body><h1>404</h1><p>This is not the web page you are looking for.</p></body></html>
+HTML
+# Armor with its body cut short.
+head -n 5 openpgp/alice.asc > ../mock-sources/broken-armor.asc
+echo "-----END PGP PUBLIC KEY BLOCK-----" >> ../mock-sources/broken-armor.asc
+
+chmod 644 openpgp/* age/* ssh/* ciphertext/* "${mocks[@]/#/../mock-sources/}"
 echo "fixtures written to $here"
