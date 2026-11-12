@@ -10,6 +10,13 @@ name = "send-secret"
 path = "src/main.rs"
 
 [dependencies]
+age = "0.12.1"
+clap = { version = "4", features = ["derive"] }
+crypto = { path = "../crypto" }
+identity-core = { path = "../../../crates/identity-core" }
+rpassword = "7"
+zeroize = "1"
 
 [dev-dependencies]
+assert_cmd = "2"
 tempfile = "3"

@@ -4,6 +4,7 @@ mod age_backend;
 mod detect;
 mod error;
 mod facade;
+mod openpgp_backend;
 mod plan;
 mod recipient_file;
 mod self_identity;
@@ -12,9 +13,10 @@ pub use age_backend::{AgeKey, SkipReason, Skipped, age_key};
 pub use detect::{DETECT_LEN, Detected, Detection, MessageReader, detect_format, open_message};
 pub use error::{Error, PlanError};
 pub use facade::{DecryptCtx, Decrypted, EncryptOpts, Sent, decrypt, encrypt, encrypt_each};
+pub use openpgp_backend::{OpenPgpUser, SignatureStatus, Signer, SignerValidity, openpgp_user};
 pub use plan::{
     MessagePlan, OpenPgpCert, OpenPgpSelf, Person, Recipient, SELF_LABEL, SelfNote, Sender, plan,
-    self_plan,
+    self_format, self_plan,
 };
 pub use recipient_file::{RecipientFile, RecipientFileError};
 pub use self_identity::{SelfIdentity, self_identity_path};

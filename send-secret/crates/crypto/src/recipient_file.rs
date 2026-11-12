@@ -6,15 +6,16 @@
 //! so a newline in the path adds recipients or `--hidden`. [`RecipientFile`]
 //! takes key bytes, never a path, and builds the string itself.
 //!
-//! The OpenPGP backend makes the one `unsafe` call into `gpgme-sys` with
-//! [`RecipientFile::gpgme_recipients`], because the safe `gpgme` crate does
-//! not wrap the `_ext` functions. `tests/recipient_file.rs` shows the call.
+//! The OpenPGP backend (`openpgp_backend.rs`) makes the one `unsafe` call
+//! into `gpgme-sys` with [`RecipientFile::gpgme_recipients`], because the
+//! safe `gpgme` crate does not wrap the `_ext` functions.
 
 use std::ffi::{CStr, CString};
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
+use gpgme::{Context, ExportMode, Protocol};
 use identity_core::{Gpg, GpgError, OpenPgpBackend, OpenPgpKey};
 use tempfile::TempDir;
 
@@ -26,6 +27,8 @@ pub enum RecipientFileError {
     Gpg(#[from] GpgError),
     #[error("key input must hold exactly one OpenPGP key")]
     NotOneKey,
+    #[error("key input holds more than {MAX_KEYS} OpenPGP keys")]
+    TooManyKeys,
     #[error("the OpenPGP key has no usable encryption subkey")]
     CannotEncrypt,
     #[error("unsafe path for a GnuPG recipient file")]
@@ -35,6 +38,9 @@ pub enum RecipientFileError {
 }
 
 const FILE_NAME: &str = "recipient.pgp";
+
+/// Most keys one key file may hold.
+pub const MAX_KEYS: usize = 32;
 
 /// One OpenPGP public key in a private temp file, ready to pass to gpgme.
 ///
@@ -64,11 +70,30 @@ impl std::fmt::Debug for RecipientFile {
 impl RecipientFile {
     /// Check `key` with `gpg` (nothing is imported) and write it out.
     pub fn new(gpg: &mut Gpg, key: &[u8]) -> Result<Self, RecipientFileError> {
-        let parent = std::env::var_os("XDG_RUNTIME_DIR")
-            .map(PathBuf::from)
-            .filter(|p| p.is_absolute() && p.is_dir())
-            .unwrap_or_else(std::env::temp_dir);
-        Self::new_in(gpg, key, &parent)
+        Self::new_in(gpg, key, &runtime_dir())
+    }
+
+    /// One recipient file per key in `keys` (an OpenPGP key file may hold
+    /// several, FR-4). Each key is checked like [`RecipientFile::new`]; one
+    /// unusable key fails the whole file.
+    ///
+    /// gpg wants one key per `--file`, and we do not parse OpenPGP packets
+    /// ourselves. So a file with several keys is imported into a throwaway
+    /// home (mode 0700, gpg.conf `no-autostart` so no agent starts, deleted
+    /// after) and each key is exported from there. The user's keyring is
+    /// never touched.
+    pub fn all(gpg: &mut Gpg, keys: &[u8]) -> Result<Vec<Self>, RecipientFileError> {
+        let count = gpg.read_keys(keys)?.len();
+        if count <= 1 {
+            return Ok(vec![Self::new(gpg, keys)?]);
+        }
+        if count > MAX_KEYS {
+            return Err(RecipientFileError::TooManyKeys);
+        }
+        split_keys(keys)?
+            .iter()
+            .map(|key| Self::new(gpg, key))
+            .collect()
     }
 
     fn new_in(gpg: &mut Gpg, key: &[u8], parent: &Path) -> Result<Self, RecipientFileError> {
@@ -113,11 +138,56 @@ impl RecipientFile {
 
     /// The `recp` argument for `gpgme_op_encrypt_ext` and
     /// `gpgme_op_encrypt_sign_ext`: `--file\n<path>`, path checked by
-    /// [`checked_recipient_path`]. Pass it unchanged. Never join it with
-    /// other recipient lines; one message has one recipient file.
+    /// [`checked_recipient_path`]. Pass it unchanged, or join several with
+    /// [`RecipientFile::joined`]. Never add other lines.
     pub fn gpgme_recipients(&self) -> &CStr {
         &self.recipients
     }
+
+    /// The `recp` argument for several files: their `--file\n<path>` lines
+    /// joined with newlines. Each path is already checked, so no line can
+    /// add a key or keyword of its own.
+    pub fn joined(files: &[RecipientFile]) -> CString {
+        let lines: Vec<&[u8]> = files.iter().map(|f| f.recipients.to_bytes()).collect();
+        // No NUL bytes: each part came from a CString.
+        CString::new(lines.join(&b"\n"[..])).unwrap_or_default()
+    }
+}
+
+/// Exports each key of `keys` on its own, through a throwaway home.
+fn split_keys(keys: &[u8]) -> Result<Vec<Vec<u8>>, RecipientFileError> {
+    let gpgme = |e: gpgme::Error| RecipientFileError::Gpg(e.into());
+    let dir = tempfile::Builder::new()
+        .prefix("ss-split")
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir_in(runtime_dir())?;
+    std::fs::write(dir.path().join("gpg.conf"), "no-autostart\n")?;
+    let home = dir.path().to_str().ok_or(RecipientFileError::UnsafePath)?;
+    let mut ctx = Context::from_protocol(Protocol::OpenPgp).map_err(gpgme)?;
+    ctx.set_engine_home_dir(home).map_err(gpgme)?;
+    ctx.import(keys).map_err(gpgme)?;
+    let fprs: Vec<String> = ctx
+        .keys()
+        .map_err(gpgme)?
+        .filter_map(Result::ok)
+        .filter_map(|k| k.fingerprint().ok().map(str::to_owned))
+        .collect();
+    fprs.iter()
+        .map(|fpr| {
+            let mut out = Vec::new();
+            ctx.export([fpr.as_str()], ExportMode::empty(), &mut out)
+                .map_err(gpgme)?;
+            Ok(out)
+        })
+        .collect()
+}
+
+/// `$XDG_RUNTIME_DIR` if set and absolute, else the system temp dir.
+fn runtime_dir() -> PathBuf {
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute() && p.is_dir())
+        .unwrap_or_else(std::env::temp_dir)
 }
 
 fn recipient_string(path: &Path) -> Result<CString, RecipientFileError> {
