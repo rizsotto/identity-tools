@@ -23,6 +23,14 @@ pub enum ProviderError {
     /// The token is scrubbed from the text.
     #[error("HTTP request failed: {0}")]
     Http(String),
+    /// No token is stored for this forge account.
+    #[error("no token is stored for {0}")]
+    NoToken(String),
+    /// The forge answered with JSON we do not understand.
+    #[error("unexpected answer from {forge}: {what}")]
+    BadResponse { forge: LocationKind, what: String },
+    #[error("cannot read OpenPGP keys: {0}")]
+    OpenPgp(String),
     #[error("HTTP {status} from {url}")]
     HttpStatus { status: u16, url: String },
 }

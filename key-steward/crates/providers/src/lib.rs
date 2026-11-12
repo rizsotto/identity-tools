@@ -4,6 +4,7 @@
 //! in a [`NetLog`] (NFR-2) and never writes a token anywhere (S-4).
 
 mod error;
+mod forge;
 mod http;
 mod netlog;
 mod provider;
@@ -11,6 +12,7 @@ mod ssh_server;
 mod token;
 
 pub use error::ProviderError;
+pub use forge::{GitHub, OpenPgpReader};
 pub use http::{AuthStyle, HttpClient};
 pub use inventory::{LocationKind, Purpose, SshHost, Target};
 pub use netlog::{NetLog, NetLogEntry};

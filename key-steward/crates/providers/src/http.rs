@@ -108,8 +108,8 @@ impl HttpClient {
         Ok(self.get(url).await?.0)
     }
 
-    /// `GET <base><path>`, then follow `link: <...>; rel="next"` while there
-    /// is one. Each page must be a JSON array; returns all items in order.
+    /// `GET <base><path>`, then follow `link: <...>; rel="next"` (or
+    /// GitLab's `x-next-page`) while there is one. Each page must be a JSON array; returns all items in order.
     pub async fn get_all_pages(&self, path: &str) -> Result<Vec<serde_json::Value>, ProviderError> {
         let mut url = self.url(path)?;
         let mut items = Vec::new();
@@ -177,7 +177,8 @@ impl HttpClient {
         let next = next_link(resp.headers())
             .map(|n| url.join(&n))
             .transpose()
-            .map_err(|e| ProviderError::Http(self.scrub(&format!("bad next page link: {e}"))))?;
+            .map_err(|e| ProviderError::Http(self.scrub(&format!("bad next page link: {e}"))))?
+            .or_else(|| next_page_param(resp.headers()).map(|n| with_page(&url, n)));
 
         let mut body = Vec::new();
         while let Some(chunk) = resp
@@ -248,6 +249,33 @@ pub(crate) fn scrub_token(text: &str, token: Option<&Token>) -> String {
     out
 }
 
+/// GitLab's `x-next-page` header, for when it sends no `link` header.
+/// Empty on the last page.
+fn next_page_param(headers: &HeaderMap) -> Option<u32> {
+    headers
+        .get("x-next-page")?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// `url` with its `page` query parameter set to `page`.
+fn with_page(url: &Url, page: u32) -> Url {
+    let pairs: Vec<(String, String)> = url
+        .query_pairs()
+        .filter(|(k, _)| k != "page")
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    let mut out = url.clone();
+    out.query_pairs_mut()
+        .clear()
+        .extend_pairs(pairs)
+        .append_pair("page", &page.to_string());
+    out
+}
+
 /// The `rel="next"` target of a `link` header, if any.
 fn next_link(headers: &HeaderMap) -> Option<String> {
     for value in headers.get_all(LINK) {
@@ -297,6 +325,21 @@ mod tests {
         );
         assert_eq!(next_link(&h), None);
         assert_eq!(next_link(&HeaderMap::new()), None);
+    }
+
+    #[test]
+    fn x_next_page_sets_page_param() {
+        let mut h = HeaderMap::new();
+        h.insert("x-next-page", HeaderValue::from_static("3"));
+        assert_eq!(next_page_param(&h), Some(3));
+        h.insert("x-next-page", HeaderValue::from_static(""));
+        assert_eq!(next_page_param(&h), None);
+        assert_eq!(next_page_param(&HeaderMap::new()), None);
+        let url = Url::parse("https://gl.example/api/v4/user/keys?per_page=100&page=2").unwrap();
+        assert_eq!(
+            with_page(&url, 3).as_str(),
+            "https://gl.example/api/v4/user/keys?per_page=100&page=3"
+        );
     }
 
     #[test]
