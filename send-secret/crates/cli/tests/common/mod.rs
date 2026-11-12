@@ -169,7 +169,12 @@ pub fn run_with_input(cmd: &mut Command, input: &[u8]) -> Output {
     let input = input.to_vec();
     let writer = std::thread::spawn(move || stdin.write_all(&input));
     let out = child.wait_with_output().expect("wait");
-    writer.join().expect("writer thread").expect("write stdin");
+    // A child that exits before reading all input (a usage error) closes
+    // the pipe; that is not a test failure.
+    match writer.join().expect("writer thread") {
+        Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => panic!("write stdin: {e}"),
+        _ => {}
+    }
     out
 }
 
