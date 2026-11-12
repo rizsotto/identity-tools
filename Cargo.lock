@@ -1447,6 +1447,7 @@ dependencies = [
  "identity-core",
  "rusqlite",
  "tempfile",
+ "test-support",
  "thiserror 2.0.21",
 ]
 
