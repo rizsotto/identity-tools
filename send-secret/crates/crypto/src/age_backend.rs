@@ -1,11 +1,11 @@
 //! age backend: x25519 and SSH (Ed25519, RSA 2048 to 4096 bits) recipients,
 //! armored and binary, streaming. Only calls the `age` crate (section 14).
 
-use std::cell::Cell;
 use std::fmt;
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::rc::Rc;
 use std::str::FromStr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use age::armor::{ArmoredReader, ArmoredWriter, Format as ArmorFormat};
 use identity_core::{Fingerprint, KeyAlgo, PublicKey};
@@ -183,10 +183,10 @@ pub(crate) fn decrypt(
     identities: &[Box<dyn age::Identity>],
 ) -> Result<bool> {
     if armored {
-        let more = Rc::new(Cell::new(false));
-        let until_end = UntilArmorEnd::new(input, Rc::clone(&more));
+        let more = Arc::new(AtomicBool::new(false));
+        let until_end = UntilArmorEnd::new(input, AGE_END_MARKER, Arc::clone(&more));
         decrypt_stream(ArmoredReader::new(until_end), output, identities)?;
-        Ok(more.get())
+        Ok(more.load(Ordering::Relaxed))
     } else {
         decrypt_stream(input, output, identities)?;
         Ok(false)
@@ -313,24 +313,27 @@ impl<R: Read> Read for HeaderCap<R> {
     }
 }
 
-/// Passes bytes through up to and including the age END line, then reports
-/// end of input. The `age` crate rejects anything but whitespace after the
-/// END line, and pasted text often has closing backticks there. Sets `more`
-/// if another message starts after the END line.
-struct UntilArmorEnd<R> {
+/// Passes bytes through up to and including the armor END line, then
+/// reports end of input. The `age` crate rejects anything but whitespace
+/// after the END line, gpg reads on into a second message, and pasted text
+/// often has closing backticks there. Sets `more` if another message starts
+/// after the END line.
+pub(crate) struct UntilArmorEnd<R> {
     inner: R,
+    marker: &'static [u8],
     /// The current line, cut off once it is too long to be the END line.
     line: Vec<u8>,
     done: bool,
     checked_rest: bool,
-    more: Rc<Cell<bool>>,
+    more: Arc<AtomicBool>,
 }
 
 impl<R> UntilArmorEnd<R> {
-    fn new(inner: R, more: Rc<Cell<bool>>) -> Self {
+    pub(crate) fn new(inner: R, marker: &'static [u8], more: Arc<AtomicBool>) -> Self {
         UntilArmorEnd {
             inner,
-            line: Vec::with_capacity(AGE_END_MARKER.len() + 2),
+            marker,
+            line: Vec::with_capacity(marker.len() + 2),
             done: false,
             checked_rest: false,
             more,
@@ -349,14 +352,16 @@ impl<R: BufRead> UntilArmorEnd<R> {
         (&mut self.inner)
             .take(DETECT_LEN as u64)
             .read_to_end(&mut rest)?;
-        self.more
-            .set(detect_format(&rest).format != Detected::Unknown);
+        self.more.store(
+            detect_format(&rest).format != Detected::Unknown,
+            Ordering::Relaxed,
+        );
         Ok(())
     }
 }
 
-fn is_end_line(line: &[u8]) -> bool {
-    line.strip_suffix(b"\r").unwrap_or(line) == AGE_END_MARKER
+fn is_end_line(line: &[u8], marker: &[u8]) -> bool {
+    line.strip_suffix(b"\r").unwrap_or(line) == marker
 }
 
 impl<R: BufRead> Read for UntilArmorEnd<R> {
@@ -377,12 +382,12 @@ impl<R: BufRead> Read for UntilArmorEnd<R> {
             let b = buf[n];
             n += 1;
             if b == b'\n' {
-                if is_end_line(&self.line) {
+                if is_end_line(&self.line, self.marker) {
                     self.done = true;
                     break;
                 }
                 self.line.clear();
-            } else if self.line.len() < AGE_END_MARKER.len() + 2 {
+            } else if self.line.len() < self.marker.len() + 2 {
                 self.line.push(b);
             }
         }
@@ -578,7 +583,7 @@ mod tests {
         let input =
             b"a\n-----END AGE ENCRYPTED FILE----- \nb\n-----END AGE ENCRYPTED FILE-----\nrest";
         let mut out = Vec::new();
-        UntilArmorEnd::new(&input[..], Rc::default())
+        UntilArmorEnd::new(&input[..], AGE_END_MARKER, Arc::default())
             .read_to_end(&mut out)
             .unwrap();
         assert_eq!(out, &input[..input.len() - 4]);
@@ -588,7 +593,7 @@ mod tests {
     fn until_armor_end_handles_long_lines_and_tiny_reads() {
         let mut input = vec![b'x'; 10_000];
         input.extend(b"\n-----END AGE ENCRYPTED FILE-----\r\nmore");
-        let mut reader = UntilArmorEnd::new(&input[..], Rc::default());
+        let mut reader = UntilArmorEnd::new(&input[..], AGE_END_MARKER, Arc::default());
         let mut out = Vec::new();
         let mut byte = [0u8; 1];
         while reader.read(&mut byte).unwrap() == 1 {

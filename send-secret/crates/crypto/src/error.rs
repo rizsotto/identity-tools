@@ -35,9 +35,22 @@ pub enum Error {
     /// The OpenPGP backend failed. The text comes from gpgme.
     #[error("OpenPGP: {0}")]
     OpenPgp(String),
-    /// This format is not built yet (OpenPGP waits for M1 T08b).
-    #[error("{0} is not supported yet")]
-    NotYet(Format),
+    /// A recipient's key can not be used. The reason is fixed text.
+    #[error("key for {label}: {reason}")]
+    BadKey { label: String, reason: String },
+    /// The user's gpg.conf has an option that would add a key or a signer
+    /// to every message, and gpgme can not turn it off (S-8).
+    #[error("{}: the gpg option \"{option}\" would {}; remove it to send OpenPGP messages", .file.display(), gpg_conf_effect(.option))]
+    GpgConf {
+        file: std::path::PathBuf,
+        option: String,
+    },
+    /// Signing is on, but there is no OpenPGP secret key that can sign.
+    #[error("no OpenPGP secret key that can sign")]
+    NoSigner,
+    /// The message decrypted, but its signature is bad.
+    #[error("the signature is bad: the message was changed or forged")]
+    BadSignature,
     /// A key file is over the size limit (S-7).
     #[error("key is larger than {limit} bytes")]
     KeyTooLarge { limit: usize },
@@ -64,6 +77,14 @@ pub enum PlanError {
     /// the hint to skip the self copy.
     #[error("no {format} key of your own that can encrypt the self copy")]
     NoSelfKey { format: Format },
+}
+
+fn gpg_conf_effect(option: &str) -> &'static str {
+    if option == "local-user" {
+        "add a second signature by another key"
+    } else {
+        "add another key to every message"
+    }
 }
 
 fn unreachable_text(label: &str, format: Option<Format>) -> String {

@@ -1,29 +1,38 @@
 //! The public encrypt and decrypt calls (SPEC section 7, plan.md).
 
 use std::io::{self, BufReader, Read, Write};
+use std::path::{Path, PathBuf};
 
 use crate::age_backend::AgeKey;
 use crate::detect::{Detected, open_message};
-use crate::plan::{MessagePlan, Recipient};
+use crate::openpgp_backend::{self, Signer};
+use crate::plan::{MessagePlan, OpenPgpCert, Recipient};
 use crate::self_identity::SelfIdentity;
 use crate::{Error, Format, Result, age_backend};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EncryptOpts {
     pub armor: bool,
-    /// Sign OpenPGP messages. age messages are never signed (section 4).
+    /// Sign OpenPGP messages with `signer`. age messages are never signed
+    /// (section 4).
     pub sign: bool,
+    /// GnuPG home for OpenPGP messages. `None` is gpg's own default
+    /// (`GNUPGHOME` or `~/.gnupg`). Tests always set it.
+    pub gnupg_home: Option<PathBuf>,
+    /// Fingerprint of the signing key: [`crate::OpenPgpUser::signer`], the
+    /// same key as the self copy. Needed if `sign` is on and a message is
+    /// OpenPGP; gpg's own default choice is never used.
+    pub signer: Option<String>,
 }
 
 /// One message, to `plan.keys` only. Never adds any other key (S-8).
 pub fn encrypt(
-    input: impl Read,
-    output: impl Write,
+    input: impl Read + Send,
+    output: impl Write + Send,
     plan: &MessagePlan,
     opts: &EncryptOpts,
 ) -> Result<()> {
-    let keys = checked_keys(plan)?;
-    age_backend::encrypt(input, output, &keys, opts.armor)
+    prepare(plan, opts)?.encrypt(input, output)
 }
 
 /// The result of one message from [`encrypt_each`].
@@ -37,25 +46,26 @@ pub struct Sent {
 /// if the caller added it). Opens the input again for every message, so no
 /// plaintext is buffered (S-4).
 ///
-/// Every plan is checked first. If one fails, the error is returned and no
-/// input or output is opened. Otherwise there is one result per plan; a
-/// failure does not stop the rest.
-pub fn encrypt_each<R: Read, W: Write>(
+/// Every plan is checked first (keys, OpenPGP key files, signer). If one
+/// fails, the error is returned and no input or output is opened.
+/// Otherwise there is one result per plan; a failure does not stop the
+/// rest.
+pub fn encrypt_each<R: Read + Send, W: Write + Send>(
     mut open_input: impl FnMut() -> io::Result<R>,
     mut open_output: impl FnMut(&MessagePlan) -> io::Result<W>,
     plans: &[MessagePlan],
     opts: &EncryptOpts,
 ) -> Result<Vec<Result<Sent>>> {
-    let checked = plans
+    let prepared = plans
         .iter()
-        .map(|plan| Ok((plan, checked_keys(plan)?)))
+        .map(|plan| Ok((plan, prepare(plan, opts)?)))
         .collect::<Result<Vec<_>>>()?;
-    Ok(checked
+    Ok(prepared
         .into_iter()
-        .map(|(plan, keys)| {
+        .map(|(plan, prepared)| {
             let input = open_input()?;
             let output = open_output(plan)?;
-            age_backend::encrypt(input, output, &keys, opts.armor)?;
+            prepared.encrypt(input, output)?;
             Ok(Sent {
                 label: plan.label.clone(),
                 format: plan.format,
@@ -64,9 +74,24 @@ pub fn encrypt_each<R: Read, W: Write>(
         .collect())
 }
 
-/// The plan's age keys, after checking every key matches the format.
-/// OpenPGP is not built yet (M1 T08b).
-fn checked_keys(plan: &MessagePlan) -> Result<Vec<AgeKey>> {
+/// A checked message, ready to write.
+enum Prepared {
+    Age(Vec<AgeKey>, bool),
+    OpenPgp(Box<openpgp_backend::Prepared>),
+}
+
+impl Prepared {
+    fn encrypt(self, input: impl Read + Send, output: impl Write + Send) -> Result<()> {
+        match self {
+            Prepared::Age(keys, armor) => age_backend::encrypt(input, output, &keys, armor),
+            Prepared::OpenPgp(p) => p.encrypt(input, output),
+        }
+    }
+}
+
+/// Checks every key matches the format and can be used, before any output
+/// is opened.
+fn prepare(plan: &MessagePlan, opts: &EncryptOpts) -> Result<Prepared> {
     if plan.keys.is_empty() {
         return Err(Error::NoKeys {
             label: plan.label.clone(),
@@ -79,15 +104,39 @@ fn checked_keys(plan: &MessagePlan) -> Result<Vec<AgeKey>> {
         });
     }
     match plan.format {
-        Format::OpenPgp => Err(Error::NotYet(Format::OpenPgp)),
-        Format::Age => Ok(plan
-            .keys
-            .iter()
-            .filter_map(|k| match k {
-                Recipient::Age(key) => Some(key.clone()),
-                Recipient::OpenPgp(_) => None,
-            })
-            .collect()),
+        Format::OpenPgp => {
+            let certs: Vec<&OpenPgpCert> = plan
+                .keys
+                .iter()
+                .filter_map(|k| match k {
+                    Recipient::OpenPgp(cert) => Some(cert),
+                    Recipient::Age(_) => None,
+                })
+                .collect();
+            let signer = match (opts.sign, &opts.signer) {
+                (false, _) => None,
+                (true, Some(fpr)) => Some(fpr.as_str()),
+                (true, None) => return Err(Error::NoSigner),
+            };
+            openpgp_backend::prepare(
+                &plan.label,
+                &certs,
+                opts.gnupg_home.as_deref(),
+                signer,
+                opts.armor,
+            )
+            .map(|p| Prepared::OpenPgp(Box::new(p)))
+        }
+        Format::Age => Ok(Prepared::Age(
+            plan.keys
+                .iter()
+                .filter_map(|k| match k {
+                    Recipient::Age(key) => Some(key.clone()),
+                    Recipient::OpenPgp(_) => None,
+                })
+                .collect(),
+            opts.armor,
+        )),
     }
 }
 
@@ -95,11 +144,18 @@ fn checked_keys(plan: &MessagePlan) -> Result<Vec<AgeKey>> {
 #[derive(Default)]
 pub struct DecryptCtx {
     age: Vec<Box<dyn age::Identity>>,
+    gnupg_home: Option<PathBuf>,
 }
 
 impl DecryptCtx {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The GnuPG home for OpenPGP messages. Unset: gpg's own default
+    /// (`GNUPGHOME` or `~/.gnupg`). Tests always set it.
+    pub fn set_gnupg_home(&mut self, home: &Path) {
+        self.gnupg_home = Some(home.to_path_buf());
     }
 
     /// The sender's own identity, to open self copies.
@@ -151,27 +207,45 @@ pub struct Decrypted {
     /// Another message follows the decrypted one (two pasted together).
     /// Only the first was decrypted; the caller says so (not an error).
     pub more_messages: bool,
+    /// The first signer of an OpenPGP message. `None` if unsigned, and
+    /// always for age.
+    pub signer: Option<Signer>,
 }
 
 /// Decrypts one message. Text before the armor (BOM, backticks, a header
-/// line) and after an age END line is ignored (FR-7).
+/// line) and after the END line is ignored (FR-7). OpenPGP signatures are
+/// checked; a bad one is an error.
 ///
-/// Plaintext is written as it is authenticated. On an error the caller must
+/// Plaintext is written before the whole message is checked (age: per
+/// chunk; gpg: the integrity tag comes last). On an error the caller must
 /// throw away what was written to `output`.
-pub fn decrypt(input: impl Read, output: impl Write, ctx: &DecryptCtx) -> Result<Decrypted> {
+pub fn decrypt(
+    input: impl Read + Send,
+    output: impl Write + Send,
+    ctx: &DecryptCtx,
+) -> Result<Decrypted> {
     let (detection, reader) = open_message(input)?;
-    let armored = match detection.format {
-        Detected::AgeArmor => true,
-        Detected::AgeBinary => false,
-        Detected::OpenPgpArmor | Detected::OpenPgpBinary => {
-            return Err(Error::NotYet(Format::OpenPgp));
-        }
+    let reader = BufReader::new(reader);
+    let (format, armored) = match detection.format {
+        Detected::AgeArmor => (Format::Age, true),
+        Detected::AgeBinary => (Format::Age, false),
+        Detected::OpenPgpArmor => (Format::OpenPgp, true),
+        Detected::OpenPgpBinary => (Format::OpenPgp, false),
         Detected::Unknown => return Err(Error::UnknownFormat),
     };
-    let more_messages = age_backend::decrypt(BufReader::new(reader), output, armored, &ctx.age)?;
+    let (signer, more_messages) = match format {
+        Format::Age => (
+            None,
+            age_backend::decrypt(reader, output, armored, &ctx.age)?,
+        ),
+        Format::OpenPgp => {
+            openpgp_backend::decrypt(reader, output, armored, ctx.gnupg_home.as_deref())?
+        }
+    };
     Ok(Decrypted {
-        format: Format::Age,
+        format,
         more_messages,
+        signer,
     })
 }
 
@@ -288,20 +362,20 @@ mod tests {
     }
 
     #[test]
-    fn openpgp_is_not_yet_and_junk_is_unknown() {
-        let err = open(&fixture("ciphertext/openpgp-armored.asc"), &dave()).unwrap_err();
-        assert!(matches!(err, Error::NotYet(Format::OpenPgp)), "{err:?}");
+    fn junk_is_unknown() {
         let err = open(b"hello", &dave()).unwrap_err();
         assert!(matches!(err, Error::UnknownFormat), "{err:?}");
     }
 
     use crate::plan::{OpenPgpCert, OpenPgpSelf, Person, Sender, plan, self_plan};
-    use std::cell::RefCell;
     use std::collections::HashSet;
+    use std::sync::Mutex;
 
     const OPTS: EncryptOpts = EncryptOpts {
         armor: false,
         sign: true,
+        gnupg_home: None,
+        signer: None,
     };
 
     fn ssh_person(label: &str, rel: &str) -> Person {
@@ -326,25 +400,26 @@ mod tests {
 
     /// Runs `encrypt_each` with in-memory outputs, one per plan.
     fn run(plans: &[MessagePlan], msg: &[u8]) -> (Result<Vec<Result<Sent>>>, Vec<Vec<u8>>) {
-        let outputs = RefCell::new(Vec::new());
+        let outputs = Mutex::new(Vec::new());
         let results = encrypt_each(
             || Ok(msg),
             |_| {
-                outputs.borrow_mut().push(Vec::new());
+                outputs.lock().unwrap().push(Vec::new());
                 Ok(Out(&outputs))
             },
             plans,
             &OPTS,
         );
-        (results, outputs.into_inner())
+        (results, outputs.into_inner().unwrap())
     }
 
     /// Writes into the last buffer of the list.
-    struct Out<'a>(&'a RefCell<Vec<Vec<u8>>>);
+    struct Out<'a>(&'a Mutex<Vec<Vec<u8>>>);
     impl Write for Out<'_> {
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
             self.0
-                .borrow_mut()
+                .lock()
+                .unwrap()
                 .last_mut()
                 .unwrap()
                 .extend_from_slice(buf);
@@ -427,7 +502,7 @@ mod tests {
         let me = SelfIdentity::load_or_create(&crate::self_identity_path(tmp.path())).unwrap();
         let sender = Sender {
             openpgp: OpenPgpSelf::NoSecretKey,
-            age: me.recipient(),
+            age: Some(me.recipient()),
         };
         let people: Vec<_> = PEOPLE
             .iter()
@@ -511,7 +586,7 @@ mod tests {
 
     #[test]
     fn encrypt_each_checks_all_plans_before_writing() {
-        let opened = RefCell::new(0);
+        let opened = std::cell::Cell::new(0);
         let people = [
             ssh_person("erin", "ssh/erin_ed25519.pub"),
             Person {
@@ -525,7 +600,7 @@ mod tests {
             format: Format::Age,
             keys: vec![],
         };
-        for (plans, want_not_yet) in [
+        for (plans, want_no_signer) in [
             (plans.clone(), true),
             (
                 {
@@ -538,30 +613,26 @@ mod tests {
         ] {
             let err = encrypt_each(
                 || {
-                    *opened.borrow_mut() += 1;
+                    opened.set(opened.get() + 1);
                     Ok(&b"hello"[..])
                 },
                 |_| -> io::Result<Vec<u8>> {
-                    *opened.borrow_mut() += 1;
+                    opened.set(opened.get() + 1);
                     Ok(Vec::new())
                 },
                 &plans,
                 &OPTS,
             )
             .unwrap_err();
-            // OpenPGP waits for T08b.
-            assert_eq!(
-                matches!(err, Error::NotYet(Format::OpenPgp)),
-                want_not_yet,
-                "{err:?}"
-            );
+            // Signing is on and no signer is set.
+            assert_eq!(matches!(err, Error::NoSigner), want_no_signer, "{err:?}");
             assert_eq!(
                 matches!(err, Error::NoKeys { .. }),
-                !want_not_yet,
+                !want_no_signer,
                 "{err:?}"
             );
         }
-        assert_eq!(*opened.borrow(), 0, "nothing may be opened");
+        assert_eq!(opened.get(), 0, "nothing may be opened");
     }
 
     #[test]
@@ -638,7 +709,7 @@ mod tests {
         // caller opens anything.
         let sender = Sender {
             openpgp: OpenPgpSelf::CannotEncrypt,
-            age: age::x25519::Identity::generate().to_public(),
+            age: Some(age::x25519::Identity::generate().to_public()),
         };
         assert!(self_plan(&sender, Some(Format::OpenPgp)).is_err());
     }
@@ -649,7 +720,7 @@ mod tests {
         let mut out = Vec::new();
         let opts = EncryptOpts {
             armor: true,
-            sign: true,
+            ..OPTS
         };
         encrypt(&b"hello"[..], &mut out, &plans[0], &opts).unwrap();
         assert!(out.starts_with(b"-----BEGIN AGE ENCRYPTED FILE-----\n"));

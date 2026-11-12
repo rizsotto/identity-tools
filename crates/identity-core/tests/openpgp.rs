@@ -279,6 +279,16 @@ fn default_key_reads_versioned_conf_first() {
 }
 
 #[test]
+fn conf_file_follows_versioned_names() {
+    let home = GpgHome::new();
+    let gpg = Gpg::with_home(home.path()).unwrap();
+    assert_eq!(gpg.conf_file(), Some(home.path().join("gpg.conf")));
+    write_conf(&home, "gpg.conf", "");
+    write_conf(&home, "gpg.conf-2", "");
+    assert_eq!(gpg.conf_file(), Some(home.path().join("gpg.conf-2")));
+}
+
+#[test]
 fn default_key_conf_may_be_non_utf8() {
     let home = GpgHome::new();
     home.gen_key("First Example (test fixture) <first@example.org>");

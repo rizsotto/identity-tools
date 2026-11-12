@@ -99,11 +99,16 @@ Follows SPEC section 7, adjusted to real types:
 
 ```rust
 pub enum Recipient {
-    OpenPgp(OpenPgpCert),   // key file bytes, max 1 MB; T08b checks one key (F3)
+    OpenPgp(OpenPgpCert),   // key file bytes, max 1 MB; one or more keys, each checked (F3)
     Age(AgeKey),            // AgeKey::X25519(age::x25519::Recipient) | AgeKey::Ssh(age::ssh::Recipient)
 }
 pub enum Format { OpenPgp, Age }
-pub struct EncryptOpts { pub armor: bool, pub sign: bool }
+pub struct EncryptOpts {
+    pub armor: bool,
+    pub sign: bool,
+    pub gnupg_home: Option<PathBuf>,  // None: gpg's default (GNUPGHOME or ~/.gnupg)
+    pub signer: Option<String>,       // fingerprint from openpgp_user(); needed to sign
+}
 
 /// One recipient. In M1, one `--to-key` file. May hold keys of both formats.
 pub struct Person { pub label: String, pub keys: Vec<Recipient> }
@@ -116,34 +121,62 @@ pub fn plan(people: &[Person], force: Option<Format>) -> Result<Vec<MessagePlan>
 
 /// The sender's own keys, for the self copy (FR-12).
 /// Found before any output is written.
-pub struct Sender { pub openpgp: OpenPgpSelf, pub age: age::x25519::Recipient }
+pub struct Sender { pub openpgp: OpenPgpSelf, pub age: Option<age::x25519::Recipient> }
+/// The default secret key as self copy key and signer (the same key).
+pub struct OpenPgpUser { pub self_key: OpenPgpSelf, pub signer: Option<String> }
+pub fn openpgp_user(home: Option<&Path>) -> Result<OpenPgpUser>;
 /// The default secret key (gpg.conf `default-key`, else the first secret
 /// key) and whether it has a valid encryption subkey.
 pub enum OpenPgpSelf { CanEncrypt(OpenPgpCert), NoSecretKey, CannotEncrypt }
 /// Pure: label "self", only the sender's key. Forced format, else OpenPGP
 /// if `OpenPgpSelf::CanEncrypt`, else age plus a note saying why
 /// (`SelfNote`). Forced OpenPGP without `CanEncrypt`: `PlanError::NoSelfKey`.
+pub fn self_format(openpgp: &OpenPgpSelf, force: Option<Format>)
+    -> Result<(Format, Option<SelfNote>), PlanError>;
 pub fn self_plan(sender: &Sender, force: Option<Format>)
     -> Result<(MessagePlan, Option<SelfNote>), PlanError>;
 
 /// One message, to `plan.keys` only. Never adds any other key (S-8).
-pub fn encrypt(input: impl Read, output: impl Write,
+pub fn encrypt(input: impl Read + Send, output: impl Write + Send,
                plan: &MessagePlan, opts: &EncryptOpts) -> Result<()>;
 
 /// Checks ALL plans first; Err if one fails, and then nothing is opened.
 /// Else one result per plan (recipients, then the self copy), in order.
 pub struct Sent { pub label: String, pub format: Format }
-pub fn encrypt_each<R: Read, W: Write>(
+pub fn encrypt_each<R: Read + Send, W: Write + Send>(
     open_input: impl FnMut() -> io::Result<R>,
     open_output: impl FnMut(&MessagePlan) -> io::Result<W>,
     plans: &[MessagePlan], opts: &EncryptOpts) -> Result<Vec<Result<Sent>>>;
-pub fn decrypt(input: impl Read, output: impl Write,
-               ctx: &DecryptCtx) -> Result<Decrypted>;  // format, more_messages, signer (T08b)
+pub fn decrypt(input: impl Read + Send, output: impl Write + Send,
+               ctx: &DecryptCtx) -> Result<Decrypted>;  // format, more_messages, signer
 pub fn detect_format(head: &[u8]) -> Detection;  // format: OpenPgpArmor, AgeArmor, OpenPgpBinary, AgeBinary, Unknown; start: offset of the armor line
 ```
 
 - Streaming `Read` to `Write`, never a temp file (S-4). SPEC section 7
   now shows this shape.
+- As built (T08b/T09): readers and writers must be `Send` (gpgme data
+  callbacks need it). `EncryptOpts` also holds `gnupg_home` (`None`: gpg's
+  default) and `signer` (fingerprint from `openpgp_user()`, which reads
+  `default_secret_key()` and also gives `OpenPgpSelf`). Signing on, an
+  OpenPGP message and no signer is `Error::NoSigner` before any output;
+  the CLI adds "use --no-sign". `encrypt_each` builds every OpenPGP
+  `RecipientFile` and sets the signer before it opens anything, so a bad
+  key file also writes nothing. A key file with several OpenPGP keys gives
+  one message all of them open (FR-4): `RecipientFile::all` imports the
+  file into a throwaway home (0700, gpg.conf `no-autostart`, deleted
+  after; the user's keyring is never touched), exports each key, checks
+  each one like a single key (one unusable key refuses the file, at most
+  32 keys), and the `--file` lines are joined. Before any output,
+  `prepare` also refuses a gpg.conf (the file gpg reads, versioned names
+  first, `Gpg::conf_file`) with `recipient`, `hidden-recipient`,
+  `recipient-file` or `hidden-recipient-file`, which `NO_ENCRYPT_TO` does
+  not turn off, and `local-user` when signing (it adds a second signer)
+  (`Error::GpgConf`, S-8). gpg takes these names only in full, at line
+  start after spaces or tabs (checked with gpg 2.4.9). `Sender.age` is an `Option` and
+  `self_format()` gives the format first, so the age self identity is
+  only created for an age self copy. `Decrypted::signer` holds the
+  fingerprint, status and validity; a bad signature is an error. Armored
+  OpenPGP input is cut after the END line like age.
 - In-memory plaintext uses `secrecy`/`zeroize` (NFR-3, S-5).
 - One message per recipient, always (decision 0002, FR-11). `encrypt_each`
   opens the input once per message, so no plaintext is buffered and no
@@ -157,7 +190,8 @@ pub fn detect_format(head: &[u8]) -> Detection;  // format: OpenPgpArmor, AgeArm
 - No sender key in a recipient's message (S-8, decision 0002
   encrypt-to-self sub-decision). `encrypt` uses only `plan.keys`. The
   OpenPGP backend sets `GPGME_ENCRYPT_NO_ENCRYPT_TO`, so gpg.conf
-  `encrypt-to` cannot add a key.
+  `encrypt-to` cannot add a key, and refuses a gpg.conf with the
+  options that flag does not cover (see "As built" above).
 - Read-back is a separate self copy (FR-12): `self_plan` gives one more
   `MessagePlan` with only the sender's key, and `encrypt_each` runs it
   after the recipients. One self copy per run.
@@ -287,6 +321,11 @@ send-secret decrypt [-i IN] [-o OUT] [--identity FILE ...]
 - Skipped keys (unsupported SSH types) print a note to stderr.
 - Signer info prints to stderr, so stdout stays clean plaintext.
 - Exit codes: 0 ok, 1 error, 2 usage. No plaintext in error messages.
+- As built (T10): encrypt refuses to overwrite: if any output file exists,
+  it exits 1 before writing anything. A message that fails midway has its
+  file removed. If gpg can not be used at all and is only needed for the
+  self copy, the self copy falls back to age as if there were no secret
+  key.
 
 ## Interop test harness
 
