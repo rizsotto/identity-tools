@@ -4,7 +4,9 @@
 mod common;
 
 use common::GpgHome;
-use identity_core::{Gpg, GpgError, MAX_KEY_INPUT, OpenPgpBackend, UserId};
+use identity_core::{
+    Gpg, GpgError, MAX_KEY_INPUT, MAX_SPLIT_SUBKEYS, MAX_SPLIT_USER_IDS, OpenPgpBackend, UserId,
+};
 
 fn uid(uid: &str, email: Option<&str>) -> UserId {
     UserId {
@@ -183,4 +185,48 @@ fn split_keys_junk_gives_no_key() {
             Err(e) => assert!(matches!(e, GpgError::Gpgme(_))),
         }
     }
+}
+
+#[test]
+fn export_key_is_binary_even_with_armor_in_gpg_conf() {
+    let home = GpgHome::new();
+    let a = home.gen_key("A Example (test fixture) <a@example.org>");
+    std::fs::write(home.path().join("gpg.conf"), "armor\n").unwrap();
+    let mut gpg = Gpg::with_home(home.path()).unwrap();
+    let bytes = gpg.export_key(&a).unwrap();
+    assert_ne!(bytes[0] & 0x80, 0, "binary, not armor");
+    let keys = gpg.read_keys(&bytes).unwrap();
+    assert_eq!(keys.len(), 1);
+    assert_eq!(keys[0].fingerprint.as_str(), a);
+}
+
+#[test]
+fn split_keys_refuses_too_many_user_ids() {
+    let home = GpgHome::new();
+    let fpr = home.gen_sign_only("U0 Example (test fixture) <u0@example.org>");
+    for i in 1..MAX_SPLIT_USER_IDS {
+        home.gpg(&["--quick-add-uid", &fpr, &format!("U{i} <u{i}@example.org>")]);
+    }
+    assert_eq!(Gpg::split_keys(&home.export(&[&fpr])).unwrap().len(), 1);
+    let n = MAX_SPLIT_USER_IDS;
+    home.gpg(&["--quick-add-uid", &fpr, &format!("U{n} <u{n}@example.org>")]);
+    assert!(matches!(
+        Gpg::split_keys(&home.export(&[&fpr])),
+        Err(GpgError::TooComplex { .. })
+    ));
+}
+
+#[test]
+fn split_keys_refuses_too_many_subkeys() {
+    let home = GpgHome::new();
+    let fpr = home.gen_sign_only("S Example (test fixture) <s@example.org>");
+    for _ in 0..MAX_SPLIT_SUBKEYS {
+        home.gpg(&["--quick-add-key", &fpr, "cv25519", "encr", "1y"]);
+    }
+    assert_eq!(Gpg::split_keys(&home.export(&[&fpr])).unwrap().len(), 1);
+    home.gpg(&["--quick-add-key", &fpr, "cv25519", "encr", "1y"]);
+    assert!(matches!(
+        Gpg::split_keys(&home.export(&[&fpr])),
+        Err(GpgError::TooComplex { .. })
+    ));
 }

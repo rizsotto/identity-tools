@@ -201,6 +201,14 @@ pub enum SourceError { NotFound, Timeout, RateLimited { retry_after: Option<Dura
   always holds exactly one key, and the user's keyring is never touched.
   This reuses the idea of `crypto::RecipientFile::all` (M1). Moving
   `RecipientFile::all` onto `split_keys` is a later cleanup, not M2.
+- **CPU (S-7).** gpg's time grows with the packets in a blob (measured:
+  a key with 400 user IDs takes about 0.5 s to read and 0.9 s to import;
+  1,200 user IDs took 3.2 s in `split_keys`). `split_keys` refuses more
+  than 32 keys, 100 user IDs or 50 subkeys per key after gpgme reads the
+  blob and before the import. We do not count packets in the raw bytes
+  ourselves (that would be our own packet parser, section 14). So callers
+  (T08, T09, T11, pasted) run `split_keys`, `read_keys` and any import in
+  `spawn_blocking` under the source's deadline, and report a timeout.
 - **S-6 user ID check.** For WKD and VKS, a key is kept only if one of its
   user IDs is not revoked, not invalid, and its email equals the query
   (ASCII case-insensitive on the whole address, exact otherwise). Keys

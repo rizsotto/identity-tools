@@ -18,8 +18,11 @@ chmod 700 "$GNUPGHOME"
 PASSPHRASE="fixture-passphrase"
 MESSAGE="Send Secret fixture message"
 
-rm -rf openpgp age ssh ciphertext ../mock-sources
-mkdir openpgp age ssh ciphertext ../mock-sources
+mocks=(github-empty.gpg junk.bin not-found.html broken-armor.asc)
+rm -rf openpgp age ssh ciphertext
+rm -f "${mocks[@]/#/../mock-sources/}"
+mkdir openpgp age ssh ciphertext
+mkdir -p ../mock-sources
 
 gpg_q() {
     gpg --batch --quiet --pinentry-mode loopback "$@"
@@ -86,10 +89,11 @@ fpr_of() {
     gpg --batch --with-colons --list-keys "=$1" | awk -F: '$1 == "fpr" { print $10; exit }'
 }
 
-# name, then user IDs. Ed25519 + Cv25519, no passphrase, public key only.
+# User IDs, the first is the primary. Ed25519 + Cv25519, no passphrase.
+# Prints the fingerprint.
 gen_uids() {
-    local name="$1" first="$2"
-    shift 2
+    local first="$1"
+    shift
     gpg_q --passphrase "" --quick-gen-key "$first" ed25519 sign,cert never
     local fpr uid
     fpr="$(fpr_of "$first")"
@@ -102,12 +106,12 @@ gen_uids() {
 
 # A second key for alice@example.org: the "changed key".
 gen_openpgp alice-new ed25519 cv25519 ""
-mallory="$(gen_uids mallory "Mallory Example (test fixture) <mallory@example.net>")"
+mallory="$(gen_uids "Mallory Example (test fixture) <mallory@example.net>")"
 gpg_q --armor --export "$mallory" > openpgp/mallory-other.asc
-olivia="$(gen_uids olivia "Olivia Example (test fixture) <olivia@example.org>" \
+olivia="$(gen_uids "Olivia Example (test fixture) <olivia@example.org>" \
     "Olivia Example (test fixture) <olivia@example.net>")"
 gpg_q --armor --export "$olivia" > openpgp/olivia-two-uids.asc
-rita="$(gen_uids rita "Rita Example (test fixture) <rita@example.org>" \
+rita="$(gen_uids "Rita Example (test fixture) <rita@example.org>" \
     "Rita Example (test fixture) <rita@example.net>")"
 gpg_q --passphrase "" --quick-revoke-uid "$rita" "Rita Example (test fixture) <rita@example.org>"
 gpg_q --armor --export "$rita" > openpgp/rita-revoked-uid.asc
@@ -140,5 +144,5 @@ HTML
 head -n 5 openpgp/alice.asc > ../mock-sources/broken-armor.asc
 echo "-----END PGP PUBLIC KEY BLOCK-----" >> ../mock-sources/broken-armor.asc
 
-chmod 644 openpgp/* age/* ssh/* ciphertext/* ../mock-sources/*
+chmod 644 openpgp/* age/* ssh/* ciphertext/* "${mocks[@]/#/../mock-sources/}"
 echo "fixtures written to $here"

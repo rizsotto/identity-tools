@@ -55,6 +55,8 @@ pub enum GpgError {
     KeyNotFound,
     #[error("more than {limit} keys")]
     TooManyKeys { limit: usize },
+    #[error("a key has more than {limit} {what}")]
+    TooComplex { what: &'static str, limit: usize },
 }
 
 impl From<gpgme::Error> for GpgError {

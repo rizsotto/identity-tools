@@ -17,6 +17,11 @@ use crate::parse::MAX_KEY_INPUT;
 
 /// The most keys [`Gpg::split_keys`] takes from one blob.
 pub const MAX_SPLIT_KEYS: usize = 32;
+/// The most user IDs [`Gpg::split_keys`] takes on one key.
+pub const MAX_SPLIT_USER_IDS: usize = 100;
+/// The most subkeys (not counting the primary key) [`Gpg::split_keys`]
+/// takes on one key.
+pub const MAX_SPLIT_SUBKEYS: usize = 50;
 
 /// Read access to OpenPGP keys. Never exports or returns secret key
 /// material.
@@ -103,7 +108,24 @@ impl Gpg {
     /// Export one key (public parts only, binary) by the full fingerprint
     /// of its primary key (40 or 64 hex digits). Output over
     /// [`MAX_KEY_INPUT`] is refused.
+    ///
+    /// gpgme has no "no armor" switch, so `armor` in the user's gpg.conf
+    /// makes gpg export armor. Such output goes through
+    /// [`Gpg::split_keys`], whose throwaway home has no `armor`.
     pub fn export_key(&mut self, fingerprint: &str) -> Result<Vec<u8>, GpgError> {
+        let out = self.export_as_gpg_writes(fingerprint)?;
+        if is_binary(&out) {
+            return Ok(out);
+        }
+        let mut parts = Self::split_keys(&out)?;
+        if parts.len() != 1 {
+            return Err(GpgError::KeyNotFound);
+        }
+        Ok(parts.remove(0).1)
+    }
+
+    /// [`Gpg::export_key`] without the armor fallback.
+    fn export_as_gpg_writes(&mut self, fingerprint: &str) -> Result<Vec<u8>, GpgError> {
         let fpr = fingerprint.to_ascii_uppercase();
         if !matches!(fpr.len(), 40 | 64) || !fpr.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(GpgError::BadFingerprint);
@@ -132,17 +154,30 @@ impl Gpg {
     /// `$XDG_RUNTIME_DIR` or the temp dir, gpg.conf `no-autostart`, deleted
     /// before this returns), never into the user's keyring. Input over
     /// [`MAX_KEY_INPUT`] or with more than [`MAX_SPLIT_KEYS`] keys is
-    /// refused. A blob with no key gives an empty list.
+    /// refused, and so is a key with more than [`MAX_SPLIT_USER_IDS`] user
+    /// IDs or [`MAX_SPLIT_SUBKEYS`] subkeys (checked after gpgme reads the
+    /// blob, before the slower import). A blob with no key gives an empty
+    /// list.
+    ///
+    /// gpg's CPU time grows with the number of packets (about 0.5 s to read
+    /// and 0.9 s to import a key with 400 user IDs). Callers that handle
+    /// fetched data run this under a deadline.
     pub fn split_keys(bytes: &[u8]) -> Result<Vec<(OpenPgpKey, Vec<u8>)>, GpgError> {
         if bytes.len() > MAX_KEY_INPUT {
             return Err(GpgError::TooLarge {
                 limit: MAX_KEY_INPUT,
             });
         }
-        let dir = tempfile::Builder::new()
-            .prefix("ic-split")
-            .permissions(std::fs::Permissions::from_mode(0o700))
-            .tempdir_in(runtime_dir())?;
+        let builder = |parent: PathBuf| {
+            tempfile::Builder::new()
+                .prefix("ic-split")
+                .permissions(std::fs::Permissions::from_mode(0o700))
+                .tempdir_in(parent)
+        };
+        let dir = match runtime_dir() {
+            Some(runtime) => builder(runtime).or_else(|_| builder(std::env::temp_dir()))?,
+            None => builder(std::env::temp_dir())?,
+        };
         std::fs::write(dir.path().join("gpg.conf"), "no-autostart\n")?;
         let result = Self::split_in(dir.path(), bytes);
         dir.close()?;
@@ -151,14 +186,28 @@ impl Gpg {
 
     fn split_in(home: &Path, bytes: &[u8]) -> Result<Vec<(OpenPgpKey, Vec<u8>)>, GpgError> {
         let mut gpg = Gpg::with_home(home)?;
-        let count = gpg.read_keys(bytes)?.len();
-        if count == 0 {
+        let read = gpg.read_keys(bytes)?;
+        if read.is_empty() {
             return Ok(Vec::new());
         }
-        if count > MAX_SPLIT_KEYS {
+        if read.len() > MAX_SPLIT_KEYS {
             return Err(GpgError::TooManyKeys {
                 limit: MAX_SPLIT_KEYS,
             });
+        }
+        for key in &read {
+            if key.user_ids.len() > MAX_SPLIT_USER_IDS {
+                return Err(GpgError::TooComplex {
+                    what: "user IDs",
+                    limit: MAX_SPLIT_USER_IDS,
+                });
+            }
+            if key.subkeys.len().saturating_sub(1) > MAX_SPLIT_SUBKEYS {
+                return Err(GpgError::TooComplex {
+                    what: "subkeys",
+                    limit: MAX_SPLIT_SUBKEYS,
+                });
+            }
         }
         gpg.ctx.import(bytes)?;
         let keys = gpg.public_keys()?;
@@ -169,7 +218,11 @@ impl Gpg {
         }
         keys.into_iter()
             .map(|key| {
-                let bytes = gpg.export_key(key.fingerprint.as_str())?;
+                let bytes = gpg.export_as_gpg_writes(key.fingerprint.as_str())?;
+                if !is_binary(&bytes) {
+                    // Armor forced from outside the home (gpgconf.conf).
+                    return Err(GpgError::Gpgme("gpg exported armor".into()));
+                }
                 Ok((key, bytes))
             })
             .collect()
@@ -213,12 +266,17 @@ impl Gpg {
     }
 }
 
-/// `$XDG_RUNTIME_DIR` if set and absolute, else the system temp dir.
-fn runtime_dir() -> PathBuf {
+/// `$XDG_RUNTIME_DIR` if set, absolute and a dir.
+fn runtime_dir() -> Option<PathBuf> {
     std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute() && p.is_dir())
-        .unwrap_or_else(std::env::temp_dir)
+}
+
+/// Binary OpenPGP starts with a packet tag byte, which has bit 7 set.
+/// Armor starts with ASCII.
+fn is_binary(bytes: &[u8]) -> bool {
+    bytes.first().is_some_and(|b| b & 0x80 != 0)
 }
 
 fn usable(key: &OpenPgpKey) -> bool {
