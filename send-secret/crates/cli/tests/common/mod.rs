@@ -144,12 +144,16 @@ impl Default for TestEnv {
 
 impl Drop for TestEnv {
     fn drop(&mut self) {
-        let _ = self
-            .command("gpgconf")
-            .args(["--kill", "all"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        // Kill the agent first, then remove its socket dir, which may live
+        // under /run/user instead of the temp dir.
+        for args in [&["--kill", "all"][..], &["--remove-socketdir"][..]] {
+            let _ = self
+                .command("gpgconf")
+                .args(args)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
     }
 }
 
