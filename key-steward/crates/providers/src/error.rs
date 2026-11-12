@@ -14,4 +14,9 @@ pub enum ProviderError {
     Spawn { program: String, reason: String },
     #[error(transparent)]
     Token(#[from] TokenError),
+    /// The token is scrubbed from the text.
+    #[error("HTTP request failed: {0}")]
+    Http(String),
+    #[error("HTTP {status} from {url}")]
+    HttpStatus { status: u16, url: String },
 }
