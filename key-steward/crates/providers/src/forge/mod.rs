@@ -5,6 +5,7 @@
 //! taken from the forge. `verify` is `list` plus a fingerprint compare.
 //! Endpoints, fields and pagination: SPEC 15, fact 1.
 
+mod forgejo;
 mod github;
 mod gitlab;
 
@@ -21,6 +22,7 @@ use crate::netlog::NetLog;
 use crate::provider::{KeyRef, PublicKeyRef, VerifyError, VerifyStatus};
 use crate::token::{TokenKey, TokenSource};
 
+pub use forgejo::Forgejo;
 pub use github::GitHub;
 pub use gitlab::GitLab;
 

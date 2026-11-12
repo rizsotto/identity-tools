@@ -12,7 +12,7 @@ mod ssh_server;
 mod token;
 
 pub use error::ProviderError;
-pub use forge::{GitHub, GitLab, OpenPgpReader};
+pub use forge::{Forgejo, GitHub, GitLab, OpenPgpReader};
 pub use http::{AuthStyle, HttpClient};
 pub use inventory::{LocationKind, Purpose, SshHost, Target};
 pub use netlog::{NetLog, NetLogEntry};
