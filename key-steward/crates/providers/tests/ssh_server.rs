@@ -6,8 +6,8 @@ use std::process::{Command, Stdio};
 
 use identity_core::{Fingerprint, PublicKey, parse_public_keys};
 use providers::{
-    KeyRef, LocationKind, NetLog, Provider, ProviderError, Purpose, RemoveOpts, SshHost, SshServer,
-    Target, VerifyError, VerifyStatus,
+    AuthorizedKeysError, KeyRef, LocationKind, NetLog, Provider, ProviderError, Purpose,
+    RemoveOpts, SshHost, SshServer, Target, VerifyError, VerifyStatus,
 };
 use test_support::Sshd;
 
@@ -272,7 +272,12 @@ async fn add_list_remove_are_not_yet() {
     let sshd = Sshd::start(BASE);
     let p = provider(&sshd, sshd.ssh_config(), &NetLog::new());
     let t = target(&sshd);
-    assert!(matches!(p.list(&t).await, Err(ProviderError::NotYet(_))));
+    assert!(matches!(
+        p.list(&t).await,
+        Err(ProviderError::AuthorizedKeys(
+            AuthorizedKeysError::NoLoginKey
+        ))
+    ));
     let fpr = fingerprint(&sshd.client_key());
     assert!(matches!(
         p.remove(

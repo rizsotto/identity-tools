@@ -38,4 +38,6 @@ pub enum ProviderError {
     OpenPgp(String),
     #[error("HTTP {status} from {url}")]
     HttpStatus { status: u16, url: String },
+    #[error(transparent)]
+    AuthorizedKeys(#[from] crate::ssh_server::AuthorizedKeysError),
 }

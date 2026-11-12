@@ -17,6 +17,7 @@
 pub mod authorized_keys;
 mod classify;
 mod config;
+mod edit;
 pub mod remote;
 
 use std::collections::{HashSet, VecDeque};
@@ -33,6 +34,7 @@ use inventory::{LocationKind, Target};
 use tokio::process::Command;
 
 pub use classify::classify;
+pub use edit::AuthorizedKeysError;
 
 use crate::error::ProviderError;
 use crate::netlog::NetLog;
@@ -95,6 +97,7 @@ pub struct SshServer {
     home: Option<PathBuf>,
     no_agent: bool,
     allow_commands: bool,
+    login: Option<KeyRef>,
     netlog: NetLog,
 }
 
@@ -107,6 +110,7 @@ impl SshServer {
             home: None,
             no_agent: false,
             allow_commands: false,
+            login: None,
             netlog,
         }
     }
@@ -149,9 +153,22 @@ impl SshServer {
         self
     }
 
+    /// The key [`Provider::list`] logs in with. Without it, `list` fails
+    /// with [`AuthorizedKeysError::NoLoginKey`]; see [`SshServer::list_as`].
+    pub fn with_login(mut self, key: KeyRef) -> Self {
+        self.login = Some(key);
+        self
+    }
+
     /// The arguments for the check (after `ssh`): `config` is the temp
     /// config, `log` the private file for `-E`.
     pub fn verify_args(&self, alias: &str, config: &Path, log: &Path) -> Vec<OsString> {
+        self.ssh_args(alias, config, log, "true")
+    }
+
+    /// Like [`verify_args`](Self::verify_args), with `remote` as the remote
+    /// command. It must hold no user data (S-6).
+    fn ssh_args(&self, alias: &str, config: &Path, log: &Path, remote: &str) -> Vec<OsString> {
         let mut args: Vec<OsString> = vec!["-F".into(), config.into()];
         if let Some(kh) = &self.known_hosts {
             let mut opt = OsString::from("UserKnownHostsFile=\"");
@@ -173,7 +190,7 @@ impl SshServer {
         }
         args.push("--".into());
         args.push(alias.into());
-        args.push("true".into());
+        args.push(remote.into());
         args
     }
 
@@ -436,8 +453,10 @@ impl Provider for SshServer {
         LocationKind::SshServer
     }
 
-    async fn list(&self, _target: &Target) -> Result<Vec<PublicKeyRef>, ProviderError> {
-        Err(ProviderError::NotYet("listing keys on an SSH server (M2)"))
+    /// Logs in with the key from [`SshServer::with_login`].
+    async fn list(&self, target: &Target) -> Result<Vec<PublicKeyRef>, ProviderError> {
+        let login = self.login.as_ref().ok_or(AuthorizedKeysError::NoLoginKey)?;
+        self.list_as(target, login).await
     }
 
     async fn add(
