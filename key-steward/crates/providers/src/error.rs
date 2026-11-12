@@ -1,0 +1,28 @@
+use inventory::LocationKind;
+
+use crate::token::TokenError;
+
+/// Provider errors. The text never holds a token (S-4).
+#[derive(Debug, thiserror::Error)]
+pub enum ProviderError {
+    /// Not built yet. `add` and `remove` come in M2.
+    #[error("{0} is not available yet")]
+    NotYet(&'static str),
+    #[error("a {kind} provider cannot use this target")]
+    WrongTarget { kind: LocationKind },
+    #[error("cannot run {program}: {reason}")]
+    Spawn { program: String, reason: String },
+    #[error(transparent)]
+    Token(#[from] TokenError),
+    /// The ssh config can make `ssh -G` run commands (`Match exec`). Ask
+    /// the user, then allow it.
+    #[error("the ssh config can run commands when it is read: {}", .0.join("; "))]
+    CommandsNeedConsent(Vec<String>),
+    #[error("cannot read the ssh config: {0}")]
+    Config(String),
+    /// The token is scrubbed from the text.
+    #[error("HTTP request failed: {0}")]
+    Http(String),
+    #[error("HTTP {status} from {url}")]
+    HttpStatus { status: u16, url: String },
+}

@@ -28,6 +28,7 @@ pub struct Sshd {
     child: Option<Child>,
     user: User,
     reported: bool,
+    extra_config: String,
 }
 
 enum StartError {
@@ -39,6 +40,14 @@ impl Sshd {
     /// Starts a new server in a temp dir under `base_dir`. Tests pass
     /// `env!("CARGO_TARGET_TMPDIR")`. Panics with diagnostics on failure.
     pub fn start(base_dir: impl AsRef<Path>) -> Self {
+        Self::start_with(base_dir, "")
+    }
+
+    /// Like [`Sshd::start`], with extra lines at the start of `sshd_config`
+    /// (for example `Banner` or `TrustedUserCAKeys`). sshd keeps the first
+    /// value of an option, so these win over the defaults. Paths in them
+    /// may use `@DIR@` for the server's temp dir and `@PORT@` for its port.
+    pub fn start_with(base_dir: impl AsRef<Path>, extra_config: &str) -> Self {
         refuse_root();
         let base = base_dir.as_ref();
         fs::create_dir_all(base)
@@ -65,6 +74,7 @@ impl Sshd {
             child: None,
             user,
             reported: false,
+            extra_config: extra_config.to_string(),
         };
         sshd.setup_files();
 
@@ -245,7 +255,7 @@ impl Sshd {
     fn write_sshd_config(&self, port: u16) {
         let d = self.dir().display();
         let cfg = format!(
-            "ListenAddress 127.0.0.1:{port}\n\
+            "{extra}ListenAddress 127.0.0.1:{port}\n\
              HostKey {d}/hostkey\n\
              PidFile none\n\
              UsePAM no\n\
@@ -260,6 +270,10 @@ impl Sshd {
              LogLevel VERBOSE\n",
             ak = self.authorized_keys().display(),
             home = self.server_home().display(),
+            extra = self
+                .extra_config
+                .replace("@DIR@", &d.to_string())
+                .replace("@PORT@", &port.to_string()),
         );
         fs::write(self.dir().join("sshd_config"), cfg).unwrap();
     }
