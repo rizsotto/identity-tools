@@ -9,7 +9,7 @@ log=$1
 # Minimum test count per suite. Raise it when you add tests.
 declare -A want=(
     [send-secret/crates/cli/tests/interop.rs]=11
-    [send-secret/crates/cli/tests/security.rs]=6
+    [send-secret/crates/cli/tests/security.rs]=8
 )
 
 fail=0

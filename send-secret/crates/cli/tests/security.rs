@@ -5,6 +5,7 @@
 mod common;
 
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -532,6 +533,110 @@ fn no_plaintext_in_stderr() {
     for (what, err) in &s.stderrs {
         assert!(!err.contains(&s.secret), "{what}: {err}");
     }
+}
+
+#[test]
+fn no_ciphertext_in_stderr() {
+    let s = session();
+    // Body lines of every armored output; header lines like `Comment: x`
+    // are not ciphertext.
+    let mut body = Vec::new();
+    for entry in fs::read_dir(s.env.path("out")).unwrap() {
+        let text = String::from_utf8_lossy(&fs::read(entry.unwrap().path()).unwrap()).into_owned();
+        if text.starts_with("-----BEGIN") {
+            body.extend(
+                text.lines()
+                    .filter(|l| l.len() >= 16 && !l.starts_with("-----") && !l.contains(": "))
+                    .map(str::to_owned),
+            );
+        }
+    }
+    assert!(body.len() > 10, "{}", body.len());
+    for (what, err) in &s.stderrs {
+        assert!(!err.contains("-----BEGIN"), "{what}: {err}");
+        assert!(!err.contains("age-encryption.org"), "{what}: {err}");
+        for line in &body {
+            assert!(!err.contains(line.as_str()), "{what}: {err}");
+        }
+    }
+}
+
+/// Runs `cmd` on a new terminal, types `typed` at the first passphrase
+/// prompt once echo is off, and returns (exit code, all terminal output).
+fn on_tty(env: &TestEnv, typed: &str, cmd: &[&OsStr]) -> (i32, String) {
+    const SCRIPT: &str = r#"
+import os, pty, signal, sys, termios, time
+signal.alarm(60)
+pid, fd = pty.fork()
+if pid == 0:
+    os.execv(sys.argv[2], sys.argv[2:])
+out, sent = b"", False
+while True:
+    try:
+        data = os.read(fd, 4096)
+    except OSError:
+        break
+    if not data:
+        break
+    out += data
+    if not sent and b"assphrase" in out:
+        for _ in range(500):
+            if not termios.tcgetattr(fd)[3] & termios.ECHO:
+                break
+            time.sleep(0.01)
+        os.write(fd, sys.argv[1].encode() + b"\n")
+        sent = True
+_, status = os.waitpid(pid, 0)
+sys.stdout.buffer.write(out)
+sys.exit(os.waitstatus_to_exitcode(status) if sent else 99)
+"#;
+    let out = env
+        .command("python3")
+        .args(["-I", "-c", SCRIPT, typed])
+        .args(cmd)
+        .output()
+        .unwrap();
+    assert!(out.stderr.is_empty(), "{}", stderr(&out));
+    let code = out.status.code().unwrap();
+    assert_ne!(code, 99, "no passphrase prompt");
+    (code, String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+#[test]
+fn ssh_passphrase_never_echoed() {
+    // The SSH key passphrase is typed on the terminal: it must not show up
+    // in anything our binary writes, right or wrong.
+    let env = TestEnv::new();
+    let secret = marker();
+    let ct = env.path("m.age");
+    let out = run_with_input(
+        env.ours()
+            .args(["encrypt", "--no-self-copy", "--to-key"])
+            .arg(fixture("ssh/grace_ed25519_pw.pub"))
+            .arg("-o")
+            .arg(&ct),
+        secret.as_bytes(),
+    );
+    assert_success(&out, "encrypt");
+    let identity = env.private_copy("ssh/grace_ed25519_pw");
+    let decrypt = [
+        OsStr::new(env!("CARGO_BIN_EXE_send-secret")),
+        OsStr::new("decrypt"),
+        OsStr::new("--identity"),
+        identity.as_os_str(),
+        OsStr::new("-i"),
+        ct.as_os_str(),
+    ];
+    let (code, tty) = on_tty(&env, "fixture-passphrase", &decrypt);
+    assert_eq!(code, 0, "{tty}");
+    assert!(tty.contains(&secret), "{tty}");
+    assert!(!tty.contains("fixture-passphrase"), "{tty}");
+
+    let wrong = format!("wrong-{}", marker());
+    let (code, tty) = on_tty(&env, &wrong, &decrypt);
+    assert_eq!(code, 1, "{tty}");
+    assert!(!tty.contains(&secret), "{tty}");
+    assert!(!tty.contains(&wrong), "{tty}");
 }
 
 /// Key files of `MAX_KEY + extra` bytes, one per kind: an age line, an
