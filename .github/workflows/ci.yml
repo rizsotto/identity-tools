@@ -13,6 +13,10 @@ jobs:
         with:
           configFile: .github/ci/devcontainer.json
           runCmd: |
+            id
+            getent passwd "$(id -un)"
+            stat -c '%u %g %a %n' "$PWD" "$(dirname "$PWD")" /
             cargo fmt --all -- --check
             cargo clippy --workspace --all-targets -- -D warnings
             cargo test --workspace
+            stat -c '%u %g %a %n' target target/tmp
