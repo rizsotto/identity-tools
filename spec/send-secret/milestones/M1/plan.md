@@ -144,6 +144,20 @@ pub fn detect_format(head: &[u8]) -> Detection;  // format: OpenPgpArmor, AgeArm
 
 - Streaming `Read` to `Write`, never a temp file (S-4). SPEC section 7
   now shows this shape.
+- As built (T08b/T09): readers and writers must be `Send` (gpgme data
+  callbacks need it). `EncryptOpts` also holds `gnupg_home` (`None`: gpg's
+  default) and `signer` (fingerprint from `openpgp_user()`, which reads
+  `default_secret_key()` and also gives `OpenPgpSelf`). Signing on, an
+  OpenPGP message and no signer is `Error::NoSigner` before any output;
+  the CLI adds "use --no-sign". `encrypt_each` builds every OpenPGP
+  `RecipientFile` and sets the signer before it opens anything, so a bad
+  key file also writes nothing. One OpenPGP key per message: a key file
+  with several OpenPGP keys is refused (`Error::BadKey`), since
+  `RecipientFile` holds one key. `Sender.age` is an `Option` and
+  `self_format()` gives the format first, so the age self identity is
+  only created for an age self copy. `Decrypted::signer` holds the
+  fingerprint, status and validity; a bad signature is an error. Armored
+  OpenPGP input is cut after the END line like age.
 - In-memory plaintext uses `secrecy`/`zeroize` (NFR-3, S-5).
 - One message per recipient, always (decision 0002, FR-11). `encrypt_each`
   opens the input once per message, so no plaintext is buffered and no
@@ -287,6 +301,11 @@ send-secret decrypt [-i IN] [-o OUT] [--identity FILE ...]
 - Skipped keys (unsupported SSH types) print a note to stderr.
 - Signer info prints to stderr, so stdout stays clean plaintext.
 - Exit codes: 0 ok, 1 error, 2 usage. No plaintext in error messages.
+- As built (T10): encrypt refuses to overwrite: if any output file exists,
+  it exits 1 before writing anything. A message that fails midway has its
+  file removed. If gpg can not be used at all and is only needed for the
+  self copy, the self copy falls back to age as if there were no secret
+  key.
 
 ## Interop test harness
 
