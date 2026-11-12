@@ -1,6 +1,8 @@
 //! SSH dir scan (Key Steward T04). The dir is always a parameter; this
 //! module never looks up the home dir.
 
+use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -26,29 +28,58 @@ pub struct SshKeyFile {
     pub file_date: Option<SystemTime>,
 }
 
+/// The result of [`scan_ssh_dir`].
+#[derive(Debug, Default)]
+pub struct SshScan {
+    /// One entry per `.pub` file, sorted by path.
+    pub keys: Vec<SshKeyFile>,
+    /// OpenSSH certificates (`*-cert.pub`). They are not keys, so they are
+    /// not in `keys`; the caller can note them.
+    pub certificates: Vec<PathBuf>,
+    /// Dir entries that could not be read. The scan goes on after them.
+    pub entry_errors: Vec<KeyError>,
+}
+
 /// List the SSH keys in `dir` (not its subdirs): every regular `*.pub`
 /// file, paired with its private file. Private files without a `.pub` are
 /// not listed, since the public key would have to come from the private
-/// file. Sorted by path.
-pub fn scan_ssh_dir(dir: &Path) -> Result<Vec<SshKeyFile>, KeyError> {
-    let mut out = Vec::new();
+/// file. File names need not be UTF-8. Only a dir that can not be opened
+/// is an error.
+pub fn scan_ssh_dir(dir: &Path) -> Result<SshScan, KeyError> {
+    let mut scan = SshScan::default();
     for entry in std::fs::read_dir(dir)? {
-        let public_path = entry?.path();
-        let Some(stem) = public_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .and_then(|n| n.strip_suffix(".pub"))
-            .filter(|s| !s.is_empty())
-        else {
+        let public_path = match entry {
+            Ok(e) => e.path(),
+            Err(e) => {
+                scan.entry_errors.push(e.into());
+                continue;
+            }
+        };
+        let Some(name) = public_path.file_name().map(OsStrExt::as_bytes) else {
             continue;
         };
-        let Ok(meta) = std::fs::metadata(&public_path) else {
+        let Some(stem) = name.strip_suffix(b".pub").filter(|s| !s.is_empty()) else {
             continue;
         };
-        if !meta.is_file() {
+        if stem.ends_with(b"-cert") {
+            scan.certificates.push(public_path);
             continue;
         }
-        let private = dir.join(stem);
+        let private = dir.join(OsStr::from_bytes(stem));
+        let meta = match std::fs::metadata(&public_path) {
+            Ok(m) if m.is_file() => m,
+            Ok(_) => continue,
+            Err(e) => {
+                scan.keys.push(SshKeyFile {
+                    public_path,
+                    key: Err(e.into()),
+                    private_path: None,
+                    protection: None,
+                    file_date: None,
+                });
+                continue;
+            }
+        };
         let private_meta = std::fs::metadata(&private).ok().filter(|m| m.is_file());
         let protection = private_meta
             .as_ref()
@@ -57,7 +88,7 @@ pub fn scan_ssh_dir(dir: &Path) -> Result<Vec<SshKeyFile>, KeyError> {
             .as_ref()
             .and_then(|m| m.modified().ok())
             .or_else(|| meta.modified().ok());
-        out.push(SshKeyFile {
+        scan.keys.push(SshKeyFile {
             key: read_ssh_pub(&public_path),
             private_path: private_meta.map(|_| private),
             protection,
@@ -65,8 +96,9 @@ pub fn scan_ssh_dir(dir: &Path) -> Result<Vec<SshKeyFile>, KeyError> {
             public_path,
         });
     }
-    out.sort_by(|a, b| a.public_path.cmp(&b.public_path));
-    Ok(out)
+    scan.keys.sort_by(|a, b| a.public_path.cmp(&b.public_path));
+    scan.certificates.sort();
+    Ok(scan)
 }
 
 fn read_ssh_pub(path: &Path) -> Result<SshPublicKey, KeyError> {
