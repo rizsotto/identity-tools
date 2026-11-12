@@ -3,7 +3,7 @@
 mod detect;
 mod error;
 
-pub use detect::{DETECT_LEN, Detected, detect_format};
+pub use detect::{DETECT_LEN, Detected, Detection, detect_format};
 pub use error::{Error, PlanError};
 
 /// The two message formats (SPEC section 4).
