@@ -213,11 +213,13 @@ pub enum SourceError { NotFound, Timeout, RateLimited { retry_after: Option<Dura
   user IDs is not revoked, not invalid, and its email equals the query
   (ASCII case-insensitive on the whole address, exact otherwise). Keys
   without such a user ID become `Rejected { reason: EmailMismatch }`. Other
-  user IDs are never shown or stored as names. We do not rewrite the key to
-  drop them (that would need our own packet code, section 14); the draft's
-  "drop other user IDs" protects a keyring, and we never import into one.
-  GitHub `.gpg` keys have no email check (SPEC 10 only names WKD and VKS);
-  their user IDs are shown as found, filtered by `UserId::display`.
+  user IDs are never shown or stored as names: they are dropped from the
+  `FoundKey` summary (`key.user_ids` and `shown_user_ids`). We do not
+  rewrite the key bytes to drop them (that would need our own packet code,
+  section 14); the draft's "drop other user IDs" protects a keyring, and we
+  never import into one. GitHub `.gpg` keys have no email check (SPEC 10
+  only names WKD and VKS); their valid (not revoked, not invalid) user IDs
+  are shown, through `UserId::display`.
 - Fingerprints always come from identity-core (`ssh-key` crate, gpgme),
   never from the server.
 
@@ -261,7 +263,7 @@ pub struct Candidate { pub fingerprint: Fingerprint, pub key: FoundKey /* from t
 | GnuPG keyring | email, fingerprint | none (gpgme, `Gpg::user_default()`; tests `Gpg::with_home`) | gpgme contexts are not `Send` (Key Steward note), so runs in `spawn_blocking`. Email: valid user ID with that email (`UserId::has_email`). Bytes: `Gpg::export_key(fpr)` (new). Not stored again in the trust store. |
 | WKD | email | DNS check of `openpgpkey.<domain>`; then `GET https://openpgpkey.<domain>/.well-known/openpgpkey/<domain>/hu/<hash>?l=<local>` if it has an address, else `GET https://<domain>/.well-known/openpgpkey/hu/<hash>?l=<local>` | Domain lower case. `<hash>`: z-base-32 of SHA-1 of the local part with only ASCII A-Z lowered (`identity_core::wkd_hash`). `l=` is the local part unchanged, percent-escaped (draft; `gpg-wks-client` sends it lowered, servers ignore it). No fallback on 404, timeout or TLS error at the advanced host (draft 3.1). Answer is binary or armored, may hold several keys; any `Content-Type` accepted. S-6 check. The `policy` file is not fetched (lookups do not need it). |
 | keys.openpgp.org | email | `GET https://keys.openpgp.org/vks/v1/by-email/<percent-encoded email>` | 200: armored key (`application/pgp-keys`). 404: not found. 429: rate limited (1 per minute by email, burst 50). S-6 check. |
-| GitHub | `github:` | `GET https://github.com/<user>.keys` and `GET https://github.com/<user>.gpg`, in parallel | `.keys`: `authorized_keys` lines via `parse_public_keys`, bad lines are notes. `.gpg`: armored, may hold no key: if gpgme finds zero keys, that is "no OpenPGP key", not an error. 404 on either: user not found (only an error if both fail). |
+| GitHub | `github:` | `GET https://github.com/<user>.keys` and `GET https://github.com/<user>.gpg`, in parallel | `.keys`: `authorized_keys` lines via `parse_public_keys`; bad lines next to good keys are notes, but bad lines and no key at all (a captive portal or HTML page) is `Malformed`; an empty list is "no key". `.gpg`: armored, may hold no key: zero keys is "no OpenPGP key" only when the body starts with `-----BEGIN PGP PUBLIC KEY BLOCK-----` (GitHub's empty answer does), else `Malformed`. Only valid user IDs are shown. Both 404: not found. One part 404: fine. One part failing with another error while the other found keys: the keys are returned and the error goes into `Found::incomplete` (`Resolution::partial`), so a 429 still shows its `retry_after`. No key and an error: the error. |
 | GitLab | `gitlab:` | `GET https://gitlab.com/<user>.keys` or `https://<host>/<user>.keys` | Same parsing as GitHub `.keys`. GitLab also serves `/<user>.gpg` (verified keys only), but SPEC 4 does not list it: not used (human question). |
 | Pasted | `Pasted` | none | OpenPGP (armored or binary) via `split_keys`; else SSH lines and age recipients via `parse_public_keys`. Max 1 MB. |
 
@@ -366,7 +368,10 @@ impl Store {
 - **Narrowed** (a key vanished from GitHub, for example): safe, since no new
   key is trusted. The pin shrinks to the found keys, a `narrowed` event is
   recorded and a note is shown. Not encrypting to a key its owner removed is
-  the safer side.
+  the safer side. Never narrow on a partial result: if the source of a
+  pinned key is in `Resolution::errors` or `Resolution::partial` (for
+  example GitHub `.gpg` answered 429 while `.keys` worked), a missing key is
+  not read as removed and the pin stays as it is.
 - **New with conflicting sources:** if the candidates for one email hold more
   than one OpenPGP primary key and they come from different sources (WKD
   says A, keys.openpgp.org says B), `--accept-new` refuses and the user must

@@ -2,12 +2,16 @@
 
 use std::time::Duration;
 
+mod forge;
+mod found;
 mod model;
 mod net;
 mod netlog;
 mod query;
 mod resolve;
+mod vks;
 
+pub use forge::{GitHubSource, GitLabSource};
 pub use model::{
     Found, FoundKey, KeyBytes, KeySource, RejectReason, Rejected, Source, SourceError, SourceKind,
     Unusable,
@@ -16,6 +20,7 @@ pub use net::{Fetched, Net, NetError, OriginMap};
 pub use netlog::{NetLog, NetLogEntry};
 pub use query::{Email, Host, Query, QueryError, parse_query};
 pub use resolve::{Candidate, Mode, Resolution, Resolver};
+pub use vks::VksSource;
 
 /// Limits for one resolver. Tests use short timeouts.
 #[derive(Debug, Clone, PartialEq, Eq)]
