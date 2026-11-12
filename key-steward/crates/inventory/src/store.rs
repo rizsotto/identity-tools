@@ -1,3 +1,5 @@
+use std::fs;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -19,6 +21,11 @@ pub enum StoreError {
     TargetMismatch { kind: LocationKind },
     #[error("bad value in the database: {0}")]
     Corrupt(String),
+    #[error("cannot prepare the database file {path}: {reason}")]
+    Io { path: String, reason: String },
+    /// S-8: the database dir must be 0700.
+    #[error("{path} is open to other users (mode {mode:o}); it must be 0700")]
+    SharedDir { path: String, mode: u32 },
 }
 
 pub type Result<T> = std::result::Result<T, StoreError>;
@@ -81,7 +88,10 @@ const COLUMNS: &str = "id, kind, ssh_alias, ssh_hostname, ssh_user, ssh_port, ba
 impl Store {
     /// Opens or creates the database file and applies pending migrations.
     /// The caller picks the path (the app uses `$XDG_DATA_HOME/key-steward/`).
+    /// A missing dir is made 0700 and a new file 0600 (S-8). A dir that
+    /// other users can open is refused; an existing file is set to 0600.
     pub fn open(path: &Path) -> Result<Store> {
+        prepare_path(path)?;
         Store::init(Connection::open(path)?)
     }
 
@@ -221,6 +231,52 @@ impl Store {
     }
 }
 
+fn prepare_path(path: &Path) -> Result<()> {
+    let io = |p: &Path, e: std::io::Error| StoreError::Io {
+        path: p.display().to_string(),
+        reason: e.to_string(),
+    };
+    let dir = match path.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d,
+        _ => Path::new("."),
+    };
+    if !dir.exists() {
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+            .map_err(|e| io(dir, e))?;
+    }
+    let mode = fs::metadata(dir)
+        .map_err(|e| io(dir, e))?
+        .permissions()
+        .mode()
+        & 0o777;
+    if mode & 0o077 != 0 {
+        return Err(StoreError::SharedDir {
+            path: dir.display().to_string(),
+            mode,
+        });
+    }
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+    {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            let meta = fs::metadata(path).map_err(|e| io(path, e))?;
+            if meta.permissions().mode() & 0o077 != 0 {
+                fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+                    .map_err(|e| io(path, e))?;
+            }
+            Ok(())
+        }
+        Err(e) => Err(io(path, e)),
+    }
+}
+
 fn check_target(kind: LocationKind, target: &Target) -> Result<()> {
     match (kind, target) {
         (LocationKind::SshServer, Target::Ssh(_)) => Ok(()),
@@ -340,6 +396,13 @@ fn read_row(r: &Row<'_>) -> rusqlite::Result<Result<Location>> {
 mod tests {
     use super::*;
 
+    fn private_dir() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .permissions(fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap()
+    }
+
     fn ssh_loc(alias: &str) -> NewLocation {
         NewLocation {
             kind: LocationKind::SshServer,
@@ -368,7 +431,7 @@ mod tests {
 
     #[test]
     fn migrations_apply_on_empty_db() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_dir();
         let path = dir.path().join("inventory.sqlite");
         let store = Store::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), MIGRATIONS.len() as u32);
@@ -383,8 +446,72 @@ mod tests {
     }
 
     #[test]
+    fn database_is_private() {
+        use std::os::unix::fs::MetadataExt;
+        let base = tempfile::tempdir().unwrap();
+        let path = base.path().join("data/key-steward/inventory.sqlite");
+        let mut store = Store::open(&path).unwrap();
+        store.add(&ssh_loc("build")).unwrap();
+        let mode = |p: &Path| fs::metadata(p).unwrap().mode() & 0o777;
+        assert_eq!(mode(path.parent().unwrap()), 0o700);
+        assert_eq!(mode(&path), 0o600);
+        drop(store);
+
+        // An existing file that is too open is fixed.
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        Store::open(&path).unwrap();
+        assert_eq!(mode(&path), 0o600);
+
+        // A dir other users can open is refused, and nothing is created.
+        let shared = base.path().join("shared");
+        fs::create_dir(&shared).unwrap();
+        fs::set_permissions(&shared, fs::Permissions::from_mode(0o755)).unwrap();
+        let err = Store::open(&shared.join("inventory.sqlite")).err().unwrap();
+        assert!(
+            matches!(err, StoreError::SharedDir { mode: 0o755, .. }),
+            "{err}"
+        );
+        assert!(!shared.join("inventory.sqlite").exists());
+    }
+
+    /// S-8: locations name keys by fingerprint only. No column may hold key
+    /// material (public or private) or a token.
+    #[test]
+    fn schema_has_no_key_material() {
+        let store = Store::open_in_memory().unwrap();
+        let conn = store.conn();
+        let mut stmt = conn
+            .prepare(
+                "SELECT m.name, p.name, p.type FROM sqlite_master m \
+                 JOIN pragma_table_info(m.name) p WHERE m.type = 'table'",
+            )
+            .unwrap();
+        let cols: Vec<(String, String, String)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(!cols.is_empty());
+        for (table, col, ty) in cols {
+            let c = col.to_lowercase();
+            assert_ne!(ty.to_uppercase(), "BLOB", "{table}.{col} is a BLOB");
+            for bad in [
+                "public", "private", "blob", "material", "pem", "armor", "encoded",
+            ] {
+                assert!(!c.contains(bad), "{table}.{col} could hold key material");
+            }
+            if c.contains("key") {
+                assert!(
+                    ["key_kind", "key_fingerprint"].contains(&c.as_str()),
+                    "{table}.{col}: keys are referenced by fingerprint only"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn newer_schema_is_refused() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_dir();
         let path = dir.path().join("inventory.sqlite");
         let conn = Connection::open(&path).unwrap();
         conn.pragma_update(None, "user_version", 99).unwrap();
