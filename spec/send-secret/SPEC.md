@@ -314,6 +314,8 @@ send-secret/
   - Decrypt: `Decryptor::decrypt(iter of &dyn age::Identity)`. No matching key gives `DecryptError::NoMatchingKeys`.
   - Interop: Go `age` 1.3.1 decrypts crate output for x25519, SSH Ed25519 and SSH RSA, armored and binary, and the crate decrypts Go `age` output for SSH Ed25519 (armored) and SSH RSA (binary). Full matrix is M1 T11.
   - Metadata: an SSH stanza line is `-> ssh-ed25519 <tag> ...` with a 4 byte key tag, visible in the file. Confirms S-8 / FR-12.
+  - Zeroing (checked in M1 T08a, crate source `src/primitives/stream.rs`): decryption hands out plaintext chunks as `SecretSlice` (zeroed on drop), but `StreamWriter` keeps up to one 64 KiB plaintext chunk in a plain `Vec<u8>` that is not zeroed when it drops. Our own copy buffer is zeroed. See section 16, question 7.
+  - Trailing text: `ArmoredReader` rejects anything but whitespace after the END line (`TrailingGarbage`). Our age backend stops reading after the END line, so closing backticks work (M1 T08a).
   - Sources: https://docs.rs/age/0.12.1/age/ , https://docs.rs/age/0.12.1/age/ssh/enum.ParseRecipientKeyError.html , crate source `src/ssh/recipient.rs`, `src/protocol.rs`, `src/primitives/armor.rs` (https://docs.rs/crate/age/0.12.1/source/), `rsa` crate `RsaPublicKey::MAX_SIZE = 4096`.
 - [ ] Whether `https://github.com/<user>.gpg` and `https://gitlab.com/<user>.keys` are still served and what their rate limits are.
 - [ ] The WKD spec details (current draft) and the keys.openpgp.org `by-email` endpoint.
@@ -335,6 +337,7 @@ send-secret/
 4. Default clipboard clear time (proposed 60 s).
 5. Is a web decryptor for recipients without the app worth doing early? It helps adoption a lot.
 6. How to keep gpg.conf `comment` / `emit-version` armor headers out of OpenPGP output, since gpgme cannot pass `--no-comments` (S-8). See [decision 0003](decisions/0003-openpgp-armor-headers.md) (research).
+7. S-5 and the `age` crate: its encrypting `StreamWriter` does not zero its last plaintext chunk (up to 64 KiB) when it drops (SPEC 15 item 1). Accept this for v1, or report it upstream and carry a patch? We must not write our own stream code (section 14).
 
 ---
 

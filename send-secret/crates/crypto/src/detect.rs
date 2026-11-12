@@ -1,5 +1,7 @@
 //! Find out what kind of message an input holds, from its first bytes.
 
+use std::io::{self, Read};
+
 /// How many leading bytes `detect_format` looks at. Pass fewer only when
 /// the input is shorter.
 pub const DETECT_LEN: usize = 1024;
@@ -8,6 +10,24 @@ const OPENPGP_ARMOR: &[u8] = b"-----BEGIN PGP MESSAGE-----";
 const AGE_ARMOR: &[u8] = b"-----BEGIN AGE ENCRYPTED FILE-----";
 const AGE_BINARY: &[u8] = b"age-encryption.org/v1\n";
 const UTF8_BOM: &[u8] = b"\xef\xbb\xbf";
+
+/// The input from the start of the message on: the rest of the head, then
+/// the rest of the input.
+pub type MessageReader<R> = io::Chain<io::Cursor<Vec<u8>>, R>;
+
+/// Reads the first bytes of `input`, detects the format and returns a reader
+/// that starts at the message (`Detection::start`), so text before the
+/// armor is skipped.
+pub fn open_message<R: Read>(mut input: R) -> io::Result<(Detection, MessageReader<R>)> {
+    let mut head = Vec::with_capacity(DETECT_LEN);
+    (&mut input)
+        .take(DETECT_LEN as u64)
+        .read_to_end(&mut head)?;
+    let detection = detect_format(&head);
+    let mut head = io::Cursor::new(head);
+    head.set_position(detection.start as u64);
+    Ok((detection, head.chain(input)))
+}
 
 /// The kind of message `detect_format` found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -139,6 +159,19 @@ mod tests {
         let mut input = prefix.to_vec();
         input.extend(fixture(rel));
         input
+    }
+
+    #[test]
+    fn open_message_starts_at_the_armor() {
+        let mut input = b"\xef\xbb\xbf```\n".to_vec();
+        input.extend(vec![b'a'; DETECT_LEN]);
+        input[7..34].copy_from_slice(b"-----BEGIN PGP MESSAGE-----");
+        input[34] = b'\n';
+        let (d, mut reader) = open_message(&input[..]).unwrap();
+        assert_eq!(d.format, Detected::OpenPgpArmor);
+        let mut rest = Vec::new();
+        reader.read_to_end(&mut rest).unwrap();
+        assert_eq!(rest, &input[7..]);
     }
 
     #[test]
