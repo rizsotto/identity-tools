@@ -13,6 +13,8 @@ Short version of SPEC.md sections 10 and 14. The spec wins if they differ.
 - Zero plaintext buffers after use (`zeroize`, `secrecy`). Never log
   plaintext, ciphertext or passphrases, at any level. (S-5)
 - Treat every fetched or pasted key as hostile. Reject keys over 1 MB. (S-7)
+- A recipient's message holds only that recipient's keys, never the sender's.
+  Read-back is a separate self copy. (S-8, FR-12)
 - A changed key for a pinned contact blocks encryption until the user accepts
   it. Always show the key source next to the fingerprint. (S-2, S-3)
 - WKD and keys.openpgp.org results must have a user ID matching the queried
