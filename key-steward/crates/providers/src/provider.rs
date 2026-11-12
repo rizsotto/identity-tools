@@ -41,6 +41,9 @@ pub enum VerifyError {
     UnknownHostKey,
     /// The server's host key differs from the known one.
     HostKeyChanged,
+    /// A `ProxyJump` host's key is not known (or has changed). Names the
+    /// host as ssh printed it.
+    UnknownJumpHostKey(String),
     /// Could not reach the host.
     Unreachable(String),
     /// The location accepts the key, but it could not be used to log in
@@ -76,6 +79,11 @@ impl VerifyStatus {
                 VerifyError::HostKeyChanged => "The host key has changed. This can be an \
                     attack. Find out why before you connect."
                     .into(),
+                VerifyError::UnknownJumpHostKey(host) => format!(
+                    "The host key of the jump host {host} is not known or has changed. \
+                     Connect to it once in a terminal and check the fingerprint, then \
+                     check again."
+                ),
                 VerifyError::Unreachable(why) => format!("Cannot reach the host: {why}"),
                 VerifyError::KeyNotUsable => "The server accepts the key, but ssh could not \
                     use it. Add it to the ssh agent or check its passphrase."

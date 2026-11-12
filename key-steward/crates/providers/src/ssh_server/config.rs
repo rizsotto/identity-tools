@@ -26,7 +26,6 @@ const COPY_CONNECTION: &[&str] = &[
     "addressfamily",
     "bindaddress",
     "bindinterface",
-    "checkhostip",
     "ciphers",
     "compression",
     "connectionattempts",
@@ -68,6 +67,8 @@ const COPY_JUMP_ONLY: &[&str] = &[
 /// Pinned for the target, before anything copied (ssh keeps the first
 /// value). `IdentityFile` comes first, see [`target_block`].
 const TARGET_PINNED: &[&str] = &[
+    // Read-only: no `[IP]:port` lines added to known_hosts.
+    "CheckHostIP no",
     "IdentitiesOnly yes",
     "PubkeyAuthentication yes",
     "PreferredAuthentications publickey",
@@ -82,6 +83,7 @@ const TARGET_PINNED: &[&str] = &[
 /// Pinned for jump hosts. No `SessionType`, `RemoteCommand` or
 /// `ClearAllForwardings`: the jump runs `ssh -W`.
 const JUMP_PINNED: &[&str] = &[
+    "CheckHostIP no",
     "BatchMode yes",
     "StrictHostKeyChecking yes",
     "VerifyHostKeyDNS no",

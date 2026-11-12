@@ -46,7 +46,7 @@ impl Sshd {
     /// Like [`Sshd::start`], with extra lines at the start of `sshd_config`
     /// (for example `Banner` or `TrustedUserCAKeys`). sshd keeps the first
     /// value of an option, so these win over the defaults. Paths in them
-    /// may use `@DIR@` for the server's temp dir.
+    /// may use `@DIR@` for the server's temp dir and `@PORT@` for its port.
     pub fn start_with(base_dir: impl AsRef<Path>, extra_config: &str) -> Self {
         refuse_root();
         let base = base_dir.as_ref();
@@ -270,7 +270,10 @@ impl Sshd {
              LogLevel VERBOSE\n",
             ak = self.authorized_keys().display(),
             home = self.server_home().display(),
-            extra = self.extra_config.replace("@DIR@", &d.to_string()),
+            extra = self
+                .extra_config
+                .replace("@DIR@", &d.to_string())
+                .replace("@PORT@", &port.to_string()),
         );
         fs::write(self.dir().join("sshd_config"), cfg).unwrap();
     }

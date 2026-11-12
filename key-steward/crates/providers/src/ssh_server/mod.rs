@@ -60,6 +60,7 @@ const FIXED_OPTIONS: &[&str] = &[
     // Read-only check: no new host keys in known_hosts, no key added to the
     // user's agent.
     "UpdateHostKeys=no",
+    "CheckHostIP=no",
     "AddKeysToAgent=no",
     // The fingerprint we compare with is SHA256 (`ssh-keygen -l` default).
     "FingerprintHash=sha256",

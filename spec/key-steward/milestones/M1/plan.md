@@ -221,7 +221,7 @@ for `Match exec` as the import, 10 s limit) and writes a temp config
 - Each `ProxyJump` hop gets its own block, resolved with `ssh -G -l -p`, and
   hops of hops too (at most 16). A hop keeps its own identities (it may
   need the old key) but pins `BatchMode yes`, `StrictHostKeyChecking yes`,
-  `UpdateHostKeys no`, `AddKeysToAgent no`, `ControlPath none`,
+  `UpdateHostKeys no`, `CheckHostIP no`, `AddKeysToAgent no`, `ControlPath none`,
   `ForwardAgent no` and the other safety options. ssh passes `-F <temp
   config>` to the jump ssh it starts, so the hop uses this block.
 - A user `ProxyCommand` gets `3>&- ... 9>&-` in front: ssh runs it as `exec
@@ -246,7 +246,8 @@ with the new key only on the jump (1 and 2 hops, `Missing`), fake banner
 lines, certificate next to the key and as `CertificateFile` (`Missing`),
 two keys required (`MoreThanOneKey`), `AddKeysToAgent`/`ForwardAgent` in
 the config and on the jump host (agent stays empty), `accept-new` on the
-jump host (refused, known_hosts untouched), `Match exec` (refused without
+jump host (refused as `UnknownJumpHostKey` naming the jump host, which the
+jump ssh reports on stderr; known_hosts untouched), `Match exec` (refused without
 consent), and a `ProxyCommand` that sees only fds 0, 1, 2.
 
 *Trade-offs.*
@@ -275,7 +276,9 @@ Fixed options (target block and command line, all accepted by OpenSSH
 10.5p1): `BatchMode=yes`, `IdentitiesOnly=yes`, `ConnectTimeout=10`,
 `StrictHostKeyChecking=yes`, `VerifyHostKeyDNS=no`,
 `PreferredAuthentications=publickey`, `GSSAPIAuthentication=no`,
-`HostbasedAuthentication=no`, `UpdateHostKeys=no`, `AddKeysToAgent=no`,
+`HostbasedAuthentication=no`, `UpdateHostKeys=no`, `CheckHostIP=no` (with
+`CheckHostIP yes` ssh adds `[IP]:port` to known_hosts for a host reached by
+name; test `check_host_ip_does_not_write_known_hosts`), `AddKeysToAgent=no`,
 `FingerprintHash=sha256`, `ControlMaster=no`, `ControlPath=none`,
 `ClearAllForwardings=yes`, `ForwardAgent=no`, `ForwardX11=no`,
 `PermitLocalCommand=no`, `RemoteCommand=none`, `SessionType=default`,
@@ -344,6 +347,16 @@ New facts to add to SPEC 15 (proposed, not added yet):
   first window needs an app ID (SPEC 16 item 1).
 - `identity-core` is shared with Send Secret in this repo (decision 0001).
   Keep its public API small and documented.
+
+## Notes for M2
+
+- Rotation must refuse when the old and new key fingerprints are equal.
+  Otherwise "the new key is verified" would be true of the old key, and
+  removing "the old key" would remove the only key (S-3). (Third review of
+  T12.)
+- `ssh_server` verify is read-only and pins `CheckHostIP no`; the `sh -s`
+  edits in M2 should run through the same generated config (target block
+  plus jump blocks), so they reach the host the check verified.
 
 ## Devcontainer packages to add
 

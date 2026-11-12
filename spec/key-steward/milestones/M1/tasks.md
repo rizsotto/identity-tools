@@ -37,3 +37,10 @@ every SSH task waits for its harness to pass in GitHub CI.
 - Network: T11 then T13, then T14, T15, T16 in parallel. T18 any time after T11.
 - SSH: T10 (green in GitHub CI) then T12, then T17. M2 rotation tests also
   need T10.
+
+## Notes for M2
+
+- Rotation must refuse when the old and new key fingerprints are equal.
+  Otherwise "the new key is verified" would be true of the old key, and
+  removing "the old key" would remove the only key (S-3). (Third review of
+  T12.)

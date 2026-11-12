@@ -724,7 +724,7 @@ async fn jump_host_gets_safe_options() {
         .without_agent();
     let got = p.verify(&far, &key_ref(&tgt.client_key())).await.unwrap();
     assert!(
-        matches!(got, VerifyStatus::Error(_)),
+        matches!(&got, VerifyStatus::Error(VerifyError::UnknownJumpHostKey(h)) if h.contains(&jump.port().to_string())),
         "{got:?}\n{}",
         log.render()
     );
@@ -787,4 +787,65 @@ async fn proxy_command_does_not_inherit_the_log() {
     let listed = fs::read_to_string(&fds).unwrap();
     let open: Vec<&str> = listed.split_whitespace().collect();
     assert_eq!(open, ["0", "1", "2"], "{listed}");
+}
+
+/// A non-loopback IPv4 address of this machine and a name for it: the
+/// container's own host name, which Docker and Podman put in /etc/hosts.
+/// ssh skips the CheckHostIP work for loopback addresses.
+fn own_name_and_ip() -> (String, std::net::Ipv4Addr) {
+    use std::net::ToSocketAddrs;
+    let name = fs::read_to_string("/etc/hostname")
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let ip = (name.as_str(), 0)
+        .to_socket_addrs()
+        .ok()
+        .into_iter()
+        .flatten()
+        .find_map(|a| match a.ip() {
+            std::net::IpAddr::V4(ip) if !ip.is_loopback() => Some(ip),
+            _ => None,
+        });
+    match ip {
+        Some(ip) => (name, ip),
+        None => panic!(
+            "this test needs the host name in /etc/hostname ({name:?}) to resolve to a \
+             non-loopback IPv4 address, as in the devcontainer"
+        ),
+    }
+}
+
+/// `CheckHostIP yes` in the user's config would add `[IP]:port` to
+/// known_hosts when the host is reached by name. The check is read-only.
+#[tokio::test]
+async fn check_host_ip_does_not_write_known_hosts() {
+    let (name, ip) = own_name_and_ip();
+    let sshd = Sshd::start_with(BASE, &format!("ListenAddress {ip}:@PORT@\n"));
+    let hostpub = fs::read_to_string(sshd.dir().join("hostkey.pub")).unwrap();
+    let mut f = hostpub.split_whitespace();
+    let kh = sshd.dir().join("known_hosts_by_name");
+    let before = format!(
+        "[{name}]:{} {} {}\n",
+        sshd.port(),
+        f.next().unwrap(),
+        f.next().unwrap()
+    );
+    fs::write(&kh, &before).unwrap();
+    let cfg = sshd.dir().join("ssh_config_checkhostip");
+    fs::write(
+        &cfg,
+        host_block("byname", &sshd, &kh, "  CheckHostIP yes\n")
+            .replace("HostName 127.0.0.1", &format!("HostName {name}")),
+    )
+    .unwrap();
+    let log = NetLog::new();
+    let p = SshServer::new(log.clone())
+        .with_config(&cfg)
+        .with_home(sshd.client_home())
+        .without_agent();
+    let t = Target::Ssh(SshHost::new("byname"));
+    let got = p.verify(&t, &key_ref(&sshd.client_key())).await.unwrap();
+    assert_eq!(got, VerifyStatus::Verified, "{}", log.render());
+    assert_eq!(fs::read_to_string(&kh).unwrap(), before);
 }

@@ -107,6 +107,18 @@ pub fn classify(
     let message = last_message(log)
         .or_else(|| last_message(stderr))
         .unwrap_or_else(|| "ssh failed with no message".to_string());
+    // The main client only sees the jump connection close. The jump ssh
+    // says why on stderr. This can only turn one error into another.
+    if stderr.contains("Host key verification failed.") {
+        let host = stderr
+            .lines()
+            .find_map(|l| {
+                let rest = l.split_once("host key is known for ")?.1;
+                Some(rest.split_once(" and you")?.0.to_string())
+            })
+            .unwrap_or_else(|| "on the way".to_string());
+        return VerifyStatus::Error(VerifyError::UnknownJumpHostKey(host));
+    }
     if UNREACHABLE.iter().any(|p| log.contains(p)) {
         return VerifyStatus::Error(VerifyError::Unreachable(message));
     }
@@ -284,6 +296,25 @@ mod tests {
         assert_eq!(
             c(255, "debug1: x\nsomething odd\ndebug1: y\n"),
             VerifyStatus::Error(VerifyError::Other("something odd".into()))
+        );
+    }
+
+    #[test]
+    fn jump_host_key_failure_is_named() {
+        let log = "debug1: Executing proxy command: exec ssh -W ...\n\
+                   Connection closed by UNKNOWN port 65535\n";
+        let stderr = "No ED25519 host key is known for [127.0.0.1]:2201 and you have \
+                      requested strict checking.\nHost key verification failed.\n";
+        let got = classify(
+            Some(255),
+            log,
+            stderr,
+            Path::new("/k/new key"),
+            &Fingerprint::Ssh(NEW.into()),
+        );
+        assert_eq!(
+            got,
+            VerifyStatus::Error(VerifyError::UnknownJumpHostKey("[127.0.0.1]:2201".into()))
         );
     }
 
