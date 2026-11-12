@@ -340,6 +340,7 @@ key-steward/
 - [ ] How to reach the host ssh-agent and gpg-agent sockets from Flatpak cleanly. Is `--filesystem=~/.ssh` acceptable for Flathub review?
 - [ ] The Background portal API for periodic reminders in the current GNOME, and whether it works on Niri (with the gnome or gtk portal).
 - [ ] `oo7` crate status and API in the current version.
+- [x] The `gpgme` Rust crate (0.11.0, `gpgme-sys` 0.11.0) builds and works against Fedora 45's gpgme 2.0.1 with GnuPG 2.4.9. It lists keys, user IDs and subkeys in a temp `GNUPGHOME` (checked 2026-11-12, test `gpgme_lists_key_in_temp_home` in `crates/identity-core/tests/gpgme_spike.rs`). The crate's feature flags stop at GPGME 1.18, so newer calls are not wrapped. The crate is dormant (last release 2022), see `spec/decisions/0001-identity-core-sharing.md`.
 
 ---
 

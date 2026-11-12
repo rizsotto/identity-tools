@@ -308,6 +308,8 @@ send-secret/
 - [ ] How to ship the optional Nautilus "Encrypt for…" entry (Nautilus extensions can't live inside a Flatpak).
 - [ ] Whether a Wayland app can clear the clipboard after it has lost focus, on GNOME and on Niri.
 - [ ] How to reach the host gpg-agent from Flatpak for signing.
+- [x] F2: the `gpgme` Rust crate (0.11.0, `gpgme-sys` 0.11.0) builds and works against Fedora 45's gpgme 2.0.1 with GnuPG 2.4.9 (checked 2026-11-12, test `gpgme_lists_key_in_temp_home` in `crates/identity-core/tests/gpgme_spike.rs`). Its feature flags stop at GPGME 1.18.
+- [x] F3: gpgme can sign and encrypt to a public key in a file without importing it into the user's keyring. Use `gpgme_op_encrypt_ext` / `gpgme_op_encrypt_sign_ext` (GPGME 1.11+) with the recipient string `--file\n<path>`; gpgme passes it to `gpg -f` (`--recipient-file`, GnuPG 2.1.14+), which treats the key as fully valid. The test shows the key is not imported (the manual does not say so). The file must hold exactly one key, so a `.gpg` list with several keys must be split first. The safe `gpgme` crate does not wrap the `_ext` calls, so the caller needs one small `unsafe` call into `gpgme-sys` (or a patch to the crate). A key read with `Context::read_keys` (no import) can not be used as a recipient in another home: gpgme hands gpg its fingerprint and gpg looks in the keyring. No temp `GNUPGHOME` is needed. Tests `gpgme_encrypts_to_key_file_without_import` and `gpgme_read_keys_key_is_not_a_recipient_without_import` in the same file (checked 2026-11-12). Sources: [GPGME manual, encrypting](https://www.gnupg.org/documentation/manuals/gpgme/Encrypting-a-Plaintext.html), [gpg `--recipient-file`](https://www.gnupg.org/documentation/manuals/gnupg/GPG-Key-related-Options.html).
 
 ---
 

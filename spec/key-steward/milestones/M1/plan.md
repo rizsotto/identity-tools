@@ -209,8 +209,7 @@ Facts 2 (VKS), 3 (`--quick-set-expire`), 4 (Flatpak sockets) and 5
 New facts to add to SPEC 15 (proposed, not added yet):
 
 - The `gpgme` Rust crate builds and works against Fedora 45's gpgme 2.0.x.
-  gpgme 2.0 removed old APIs, so this is not certain. If it fails, options are
-  a newer fork or calling `gpg --with-colons`. (T01a)
+  (T01a) Verified and added to SPEC 15: it works with gpgme 2.0.1.
 - `ssh -G` output fields and how `Include` and `Match` behave with `-F`. (T09)
 - The exact stderr text from OpenSSH 10.x for denied auth and unknown host
   keys. (T12)
