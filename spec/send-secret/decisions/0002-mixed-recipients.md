@@ -1,6 +1,7 @@
 # 0002: Mixed OpenPGP and age recipients
 
 - Status: accepted (2026-11-12)
+- Partly superseded: the encrypt-to-self sub-decision (separate self copy) is replaced by [0004](0004-sender-in-recipient-message.md).
 - Blocks: nothing now. M1 builds it (one message per recipient).
 - SPEC refs: section 16 question 2, section 7 (crypto facade), FR-3, FR-11, UC-8
 

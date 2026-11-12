@@ -73,7 +73,7 @@ The same app opens secrets sent to you.
 - Text output: ASCII-armored (OpenPGP armor or age armor). File output: `.age` or `.asc` / `.gpg`.
 - A "how to open" note, generated per format.
 - Decrypt mode: paste text or drop a file. Uses the user's GnuPG keys or age/SSH identities.
-- Multiple recipients: every recipient gets their own message, in the best format for them (FR-3, FR-11). Recipients cannot see who else got it. A recipient's message holds only that recipient's keys, never the sender's (S-8). To read back what you sent, the app makes a separate self copy encrypted only to you (on by default, FR-12).
+- Multiple recipients: every recipient gets their own message, in the best format for them (FR-3, FR-11). Recipients cannot see who else got it. A recipient's message holds that recipient's keys plus the sender's key, so the sender can read it back (on by default, FR-12, S-8).
 - Clipboard auto-clear (default 60 seconds, can be turned off).
 - File manager integration that works everywhere: drag-and-drop onto the window, and a desktop "Open With" entry (MIME types for `.age`, `.asc`, `.gpg` to open/decrypt). An "Encrypt for…" Nautilus menu entry is optional extra for GNOME users.
 - Runs on GNOME and Niri (tier 1), with best effort on Sway/Hyprland and KDE (section 7.1).
@@ -108,8 +108,8 @@ The same app opens secrets sent to you.
 - **FR-8** Plaintext is never written to disk, except when the user saves a decrypted file explicitly.
 - **FR-9** Clipboard: copy output, then clear after the timeout only if the clipboard still holds our content.
 - **FR-10** Large content: if the armored text is longer than a configurable limit (default 20,000 characters), suggest file output instead.
-- **FR-11** Several recipients: make one message per recipient, always, even when they all share a format. Each message uses that recipient's format (FR-3) and holds only that recipient's keys, never the sender's (S-8). Each result names its recipient. A recipient with no usable key is an error that names them; never drop one silently. See [decision 0002](decisions/0002-mixed-recipients.md).
-- **FR-12** Self copy: to let the sender read back what they sent, make one extra message encrypted only to the sender (on by default, can be turned off). OpenPGP: the sender's default secret key. age: the sender's own native X25519 identity (section 9), never an SSH key, so the self copy carries no linkable SSH tag. Format: the forced format if set, else OpenPGP if the sender has a default secret key that can encrypt, else age (with a note saying why). The self key is settled before any output is written; a forced format the sender has no key for is an error before anything is written. One self copy per send, even with several recipients. See [decision 0002](decisions/0002-mixed-recipients.md).
+- **FR-11** Several recipients: make one message per recipient, always, even when they all share a format. Each message uses that recipient's format (FR-3) and holds only that recipient's keys plus the sender's key (FR-12, S-8). Each result names its recipient. A recipient with no usable key is an error that names them; never drop one silently. See [decision 0002](decisions/0002-mixed-recipients.md).
+- **FR-12** Read-back: to let the sender read back what they sent, the sender's key is added to every recipient's message (on by default, `--no-self` turns it off). OpenPGP: the sender's default secret key. age: the sender's own native X25519 identity (section 9), never an SSH key. If the sender has no key in a message's format (only possible for OpenPGP), that message is made without the sender and a note says so. No separate self copy file. See [decision 0004](decisions/0004-sender-in-recipient-message.md).
 
 ### Non-functional
 - **NFR-1** The whole send flow takes at most 3 interactions for a known contact.
@@ -172,7 +172,7 @@ pub fn plan(people: &[Person], force: Option<Format>) -> Result<Vec<MessagePlan>
 pub fn encrypt(input: impl Read + Send, output: impl Write + Send, plan: &MessagePlan, opts: &EncryptOpts) -> Result<()>;  // one message: one recipient's keys only
 pub fn decrypt(input: impl Read + Send, output: impl Write + Send, ctx: &DecryptCtx) -> Result<Decrypted>;  // includes signer info
 ```
-Streams from source to output, no temp files (S-4). Full sketch in `milestones/M1/plan.md`. Every recipient gets their own message (FR-11), so OpenPGP and age keys never mix in one output. The caller runs `encrypt` once per recipient and gets one result per recipient. The self copy (FR-12) is one more `encrypt` call with only the sender's key. See [decision 0002](decisions/0002-mixed-recipients.md).
+Streams from source to output, no temp files (S-4). Full sketch in `milestones/M1/plan.md`. Every recipient gets their own message (FR-11), so OpenPGP and age keys never mix in one output. The caller runs `encrypt` once per recipient and gets one result per recipient. Each call also gets the sender's key (FR-12). See [decision 0002](decisions/0002-mixed-recipients.md) and [decision 0004](decisions/0004-sender-in-recipient-message.md).
 
 ### 7.1 Desktop compatibility
 
@@ -217,7 +217,7 @@ Streams from source to output, no temp files (S-4). Full sketch in `milestones/M
 - **GitHub:** `https://github.com/<user>.keys` returns `authorized_keys` lines. `https://github.com/<user>.gpg` returns armored keys (may be empty). No token needed. Handle rate limits politely.
 - **SSH key caveats** (show as info text when an SSH recipient is used): people may treat SSH keys as short-lived login keys and may rotate them, and keys on hardware tokens cannot decrypt age files ([age README](https://github.com/FiloSottile/age)).
 - **Armor:** OpenPGP armor lines are 64 characters wide. Age armor is PEM-like. Both paste fine into Slack code blocks. Wrap the output in triple backticks when copying, as an option (on by default), so chat apps don't reformat it.
-- **Self copy (FR-12):** the sender's key never goes into a recipient's message (S-8). OpenPGP shows a key ID for every recipient key, and age SSH stanzas carry a tag that can be matched against public SSH keys, so a forwarded or leaked message would show who sent it. Instead the sender gets a separate self copy. OpenPGP: encrypted to the user's default secret key. age: encrypted to an age X25519 identity the app generates for the user on first use (stored with 0600 permissions, optionally passphrase-protected). Never use an SSH key for the self copy.
+- **Read-back (FR-12):** the sender's key goes into each recipient's message. OpenPGP shows a key ID for every recipient key, so a forwarded or leaked message shows who sent it. The human accepted this ([decision 0004](decisions/0004-sender-in-recipient-message.md)). OpenPGP: the user's default secret key. age: an age X25519 identity the app generates for the user on first use (stored with 0600 permissions, optionally passphrase-protected). Never use an SSH key for read-back.
 - **Signing:** OpenPGP messages are signed, then encrypted, in one gpgme operation. The signature and the sender's key ID are inside the encrypted part, so only the recipient sees them. Never put a signature outside the encryption.
 - **Decrypt identities for age:** read SSH private keys only when decrypting, and prompt for the passphrase with a libadwaita dialog. Never cache passphrases longer than the operation.
 
@@ -229,10 +229,10 @@ Streams from source to output, no temp files (S-4). Full sketch in `milestones/M
 - **S-2** A key change for a pinned contact blocks encryption until the user explicitly accepts it.
 - **S-3** Always show the source of a key (which URL or keyring) next to its fingerprint.
 - **S-4** Never write plaintext to temporary files. Stream file encryption from source to output.
-- **S-5** Zero plaintext buffers after use. Don't log plaintext, ciphertext or passphrases at any log level.
+- **S-5** Zero our own plaintext buffers after use. Known v1 gap, accepted: buffers inside the `age` crate, gpgme and gpg are not zeroed (section 16 question 7). Don't log plaintext, ciphertext or passphrases at any log level.
 - **S-6** Verify that the email on a WKD or keys.openpgp.org result matches the query. Reject keys whose user IDs don't match.
 - **S-7** Treat all fetched keys as hostile input. Parse them in Rust/gpgme with size limits (reject keys > 1 MB).
-- **S-8** A recipient's message holds only that recipient's keys. Never add the sender's key or anyone else's. Turn off gpg.conf `encrypt-to` for these messages (gpgme `GPGME_ENCRYPT_NO_ENCRYPT_TO`). That flag does not cover gpg.conf `recipient`, `hidden-recipient`, `recipient-file` and `hidden-recipient-file`, and `local-user` adds a second signer; gpgme can not turn these off, so OpenPGP encryption refuses to start while the gpg.conf gpg reads has them (`local-user` only when signing). Armor header lines (`Comment:`, `Version:`) come from the user's own gpg.conf and are kept as gpg writes them; we do not filter or rewrite gpg output ([decision 0003](decisions/0003-openpgp-armor-headers.md)). Read-back uses a separate self copy (FR-12).
+- **S-8** A recipient's message holds only that recipient's keys and the sender's own key (FR-12). Never add anyone else's. We add the sender's key ourselves. Turn off gpg.conf `encrypt-to` for these messages (gpgme `GPGME_ENCRYPT_NO_ENCRYPT_TO`). That flag does not cover gpg.conf `recipient`, `hidden-recipient`, `recipient-file` and `hidden-recipient-file`, and `local-user` adds a second signer; gpgme can not turn these off, so OpenPGP encryption refuses to start while the gpg.conf gpg reads has them (`local-user` only when signing). Armor header lines (`Comment:`, `Version:`) come from the user's own gpg.conf and are kept as gpg writes them; we do not filter or rewrite gpg output ([decision 0003](decisions/0003-openpgp-armor-headers.md)). Read-back: [decision 0004](decisions/0004-sender-in-recipient-message.md).
 
 ---
 
@@ -261,7 +261,7 @@ send-secret/
 ### M1: Crypto core + CLI
 - `send-secret encrypt --to-key alice.pub -i msg.txt` and `decrypt` work for OpenPGP and age (x25519, SSH Ed25519, SSH RSA).
 - Interop: files from our CLI decrypt with `gpg` and Go `age`, and the reverse.
-- Multiple recipients work, one message per recipient (FR-11). No recipient message holds the sender's key (S-8). The self copy (FR-12) opens with the sender's key.
+- Multiple recipients work, one message per recipient (FR-11). Each recipient's message opens with that recipient's key and with the sender's key, and holds no one else's (S-8, FR-12).
 
 ### M2: Resolver + trust
 - All sources in 4 work against the mocks, merged and ordered.
@@ -335,12 +335,12 @@ send-secret/
 ## 16. Open questions for the human
 
 1. Final name and app ID.
-2. ~~Mixed recipients: produce two outputs, or force one format?~~ Answered 2026-11-12: one message per recipient, always, and read-back through a separate self copy. See [decision 0002](decisions/0002-mixed-recipients.md).
+2. ~~Mixed recipients: produce two outputs, or force one format?~~ Answered 2026-11-12: one message per recipient, always. See [decision 0002](decisions/0002-mixed-recipients.md). Read-back changed on 2026-11-12: the sender's key goes into each message, see [decision 0004](decisions/0004-sender-in-recipient-message.md).
 3. Should age mode offer an optional SSH signature in v1 (non-standard for age, but it proves the sender)?
 4. Default clipboard clear time (proposed 60 s).
 5. Is a web decryptor for recipients without the app worth doing early? It helps adoption a lot.
 6. gpg.conf `comment` / `emit-version` armor headers: answered, keep what gpg writes. See [decision 0003](decisions/0003-openpgp-armor-headers.md).
-7. S-5 and the `age` crate: its encrypting `StreamWriter` does not zero its last plaintext chunk (up to 64 KiB) when it drops (SPEC 15 item 1). Accept this for v1, or report it upstream and carry a patch? We must not write our own stream code (section 14). The same holds for OpenPGP: plaintext passes through gpgme's and gpg's own buffers, which we can not zero (found in M1 T14). M1 acceptance waits for this answer.
+7. ~~S-5 and buffers inside `age`, gpgme and gpg.~~ Answered 2026-11-12: accepted for v1. S-5 zeroing covers our own buffers. Known gap: the `age` crate's encrypting `StreamWriter` keeps its last plaintext chunk (up to 64 KiB) unzeroed when it drops (SPEC 15 item 1), and OpenPGP plaintext passes through gpgme's and gpg's own buffers. We do not write our own stream code (section 14). Reporting the `age` gap upstream is a later task.
 
 ---
 

@@ -8,7 +8,8 @@ See "Blocked on a decision" in `../../workflow.md`.
 
 | No. | Title | Status | Blocks |
 |---|---|---|---|
-| [0002](0002-mixed-recipients.md) | Mixed OpenPGP and age recipients (SPEC 16 q2) | accepted (2026-11-12): one message per recipient, separate self copy | nothing (built in M1) |
+| [0002](0002-mixed-recipients.md) | Mixed OpenPGP and age recipients (SPEC 16 q2) | accepted (2026-11-12): one message per recipient. Self copy part superseded by 0004 | nothing (built in M1) |
+| [0004](0004-sender-in-recipient-message.md) | Sender's key goes into each recipient's message (FR-12) | accepted (2026-11-12) | M1 acceptance (code change) |
 | [0003](0003-openpgp-armor-headers.md) | OpenPGP armor header lines from gpg.conf (SPEC 16 q6, S-8) | accepted: keep gpg's armor unchanged, no filter | nothing |
 
 ## Pending (SPEC section 16, no record yet)
