@@ -3,6 +3,18 @@
 version = 4
 
 [[package]]
+name = "app"
+version = "0.1.0"
+
+[[package]]
+name = "cli"
+version = "0.1.0"
+
+[[package]]
+name = "crypto"
+version = "0.1.0"
+
+[[package]]
 name = "identity-core"
 version = "0.1.0"
 
@@ -23,5 +35,13 @@ name = "reminders"
 version = "0.1.0"
 
 [[package]]
+name = "resolver"
+version = "0.1.0"
+
+[[package]]
 name = "rotation"
+version = "0.1.0"
+
+[[package]]
+name = "trust"
 version = "0.1.0"

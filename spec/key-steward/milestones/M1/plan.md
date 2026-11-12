@@ -198,8 +198,8 @@ New facts to add to SPEC 15 (proposed, not added yet):
 
 - M1 has no UI in its acceptance criteria. This plan keeps M1 headless. The
   first window needs an app ID (SPEC 16 item 1).
-- `identity-core` may move to another repo (decision 0001). Keep its public API
-  small and documented.
+- `identity-core` is shared with Send Secret in this repo (decision 0001).
+  Keep its public API small and documented.
 
 ## Devcontainer packages to add
 

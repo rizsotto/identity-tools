@@ -1,6 +1,6 @@
 # M1: Crypto core and CLI
 
-Slice of `spec/SPEC.md` section 12 (M1). The spec wins if this file differs.
+Slice of `spec/send-secret/SPEC.md` section 12 (M1). The spec wins if this file differs.
 
 ## Goal
 

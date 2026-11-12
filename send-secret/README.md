@@ -16,37 +16,16 @@ Pre-alpha. We are at the spec stage. There is no working code yet.
 
 ## Develop
 
-All work happens in a devcontainer. It has Rust, GTK4, libadwaita, GnuPG and
-age.
-
-- **VS Code:** install the Dev Containers extension, open this folder, and
-  pick "Reopen in Container".
-- **Command line with podman:**
-
-  ```sh
-  devcontainer up --workspace-folder . --docker-path podman
-  devcontainer exec --workspace-folder . --docker-path podman bash
-  ```
-
-Inside the container:
-
-```sh
-cargo fmt --all
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-```
+See the [root README](../README.md).
 
 ## Docs
 
-- [Spec](spec/SPEC.md): what we build and the rules.
-- [Workflow](spec/workflow.md): how we work, spec first.
-- [Decisions](spec/decisions/README.md): open and settled questions.
-- [Milestone M1](spec/milestones/M1/spec.md): crypto core and CLI.
+- [Spec](../spec/send-secret/SPEC.md): what we build and the rules.
+- [Workflow](../spec/workflow.md): how we work, spec first.
+- [Decisions](../spec/send-secret/decisions/README.md): open and settled questions.
+- [Milestone M1](../spec/send-secret/milestones/M1/spec.md): crypto core and CLI.
 - [CLAUDE.md](CLAUDE.md): rules for coding agents.
-
-Sibling project: Key Steward, a key manager. The two share the
-`identity-core` crate.
 
 ## License
 
-GPL-3.0-or-later. See [LICENSE](LICENSE).
+GPL-3.0-or-later. See [LICENSE](../LICENSE).

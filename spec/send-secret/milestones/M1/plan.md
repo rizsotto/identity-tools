@@ -34,7 +34,7 @@ pub fn parse_public_keys(bytes: &[u8]) -> Result<Vec<PublicKey>>;
 - `Gpg` wrapper: builds a gpgme context with an explicit home dir. Tests
   always pass a temp dir. Production uses the default.
 - Names are a draft. Keep the crate free of send-secret specific logic, since
-  it may move out (decision 0001).
+  Key Steward uses it too (decision 0001).
 
 ## crypto facade
 

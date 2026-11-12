@@ -1,26 +1,6 @@
-# send-secret: notes for coding agents
+# Send Secret: rules for coding agents
 
-Read `spec/SPEC.md` fully before writing code. Then read `spec/workflow.md`.
-SPEC.md section 14 ("Instructions for agents") and section 10/11 (security
-rules) are binding.
-
-## Commands (run inside the devcontainer)
-
-- Format: `cargo fmt --all`
-- Lint: `cargo clippy --workspace --all-targets -- -D warnings`
-- Test: `cargo test --workspace`
-
-## Rules
-
-- Work on the current milestone only. Its files are in `spec/milestones/MN/`.
-- One task per branch and pull request. Test first.
-- Never use real keys, accounts, servers or the user's real home directory in
-  tests.
-- Missing decision: follow "Blocked on a decision" in `spec/workflow.md`.
-  Do not guess.
-- If a fact in SPEC.md section 15 turns out wrong, fix SPEC.md in the same PR.
-
-## Project rules (send-secret)
+Read the root `CLAUDE.md` first. The spec is `spec/send-secret/SPEC.md`.
 
 Short version of SPEC.md sections 10 and 14. The spec wins if they differ.
 
@@ -45,6 +25,6 @@ Short version of SPEC.md sections 10 and 14. The spec wins if they differ.
   SPEC.md section 16.
 - Desktop rules D-1 to D-3 (section 7.1): public interfaces only, detect
   features at runtime, every desktop feature has a fallback.
-- `crates/identity-core` may move out of this repo. See
-  `spec/decisions/0001-identity-core-sharing.md`. Keep it free of
-  send-secret specific code.
+- `crates/identity-core` (repo root) is shared with Key Steward. Keep it free
+  of Send Secret specific code. Run both apps' tests when you change it. See
+  `spec/decisions/0001-identity-core-sharing.md`.

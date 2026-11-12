@@ -19,33 +19,16 @@ Pre-alpha. Spec stage. There is no working code yet.
 
 ## Develop
 
-All work happens in a devcontainer (Fedora, Rust, GTK4, GnuPG, OpenSSH).
-
-- VS Code: install the Dev Containers extension, open this folder, then pick
-  "Reopen in Container".
-- CLI with podman:
-
-  ```sh
-  devcontainer up --workspace-folder . --docker-path podman
-  devcontainer exec --workspace-folder . --docker-path podman bash
-  ```
-
-Inside the container:
-
-```sh
-cargo fmt --all
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-```
+See the [root README](../README.md).
 
 ## Docs
 
-- [Spec](spec/SPEC.md): what we build and the rules.
-- [Workflow](spec/workflow.md): how work goes from spec to code.
-- [Current milestone: M1](spec/milestones/M1/): read-only inventory.
-- [Decisions](spec/decisions/README.md): open and settled questions.
+- [Spec](../spec/key-steward/SPEC.md): what we build and the rules.
+- [Workflow](../spec/workflow.md): how work goes from spec to code.
+- [Current milestone: M1](../spec/key-steward/milestones/M1/): read-only inventory.
+- [Decisions](../spec/key-steward/decisions/README.md): open and settled questions.
 - [Notes for coding agents](CLAUDE.md).
 
 ## License
 
-GPL-3.0-or-later. See [LICENSE](LICENSE).
+GPL-3.0-or-later. See [LICENSE](../LICENSE).

@@ -1,26 +1,6 @@
-# key-steward: notes for coding agents
+# Key Steward: rules for coding agents
 
-Read `spec/SPEC.md` fully before writing code. Then read `spec/workflow.md`.
-SPEC.md section 14 ("Instructions for agents") and section 10/11 (security
-rules) are binding.
-
-## Commands (run inside the devcontainer)
-
-- Format: `cargo fmt --all`
-- Lint: `cargo clippy --workspace --all-targets -- -D warnings`
-- Test: `cargo test --workspace`
-
-## Rules
-
-- Work on the current milestone only. Its files are in `spec/milestones/MN/`.
-- One task per branch and pull request. Test first.
-- Never use real keys, accounts, servers or the user's real home directory in
-  tests.
-- Missing decision: follow "Blocked on a decision" in `spec/workflow.md`.
-  Do not guess.
-- If a fact in SPEC.md section 15 turns out wrong, fix SPEC.md in the same PR.
-
-## Key Steward rules
+Read the root `CLAUDE.md` first. The spec is `spec/key-steward/SPEC.md`.
 
 Short form of SPEC.md sections 10 and 14. The spec wins if they differ.
 
@@ -51,5 +31,6 @@ Short form of SPEC.md sections 10 and 14. The spec wins if they differ.
   a fallback. (SPEC 7.4)
 - If a security rule fights convenience, follow the rule and add a note to
   SPEC section 16. (SPEC 14)
-- `identity-core` may move to its own repo. Keep its API small and free of
-  Key Steward types. See `spec/decisions/0001-identity-core-sharing.md`.
+- `crates/identity-core` (repo root) is shared with Send Secret. Keep its API
+  small and free of Key Steward types. Run both apps' tests when you change
+  it. See `spec/decisions/0001-identity-core-sharing.md`.

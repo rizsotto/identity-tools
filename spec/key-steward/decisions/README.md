@@ -1,13 +1,13 @@
 # Decisions
 
-One file per decision. Copy `0000-template.md` to the next free number. The
-process is in `../workflow.md`, "Blocked on a decision".
+One file per decision. Copy `../../decisions/0000-template.md` to the next free number.
+Repo-wide decisions (like 0001, sharing identity-core) are in `spec/decisions/`. The
+process is in `../../workflow.md`, "Blocked on a decision".
 
 ## Records
 
 | ID | Title | Status | Blocks |
 |---|---|---|---|
-| [0001](0001-identity-core-sharing.md) | How to share identity-core with Send Secret | deferred | when the second app needs the crate (M1 builds it in this repo) |
 | [0002](0002-ssh-test-servers.md) | How integration tests get real SSH servers | proposed | M1 T10, M2 |
 
 ## Pending (no record yet)

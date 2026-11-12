@@ -310,7 +310,7 @@ Section 13, replace the "Integration:" bullet with:
 >   `GlobalKnownHostsFile /dev/null`, `IdentitiesOnly yes`,
 >   `IdentityAgent none` and `BatchMode yes`, with `SSH_AUTH_SOCK` removed.
 >   Not covered: logging in as another user, root-only sshd code paths, and a
->   distro's own `sshd_config`. See `spec/decisions/0002-ssh-test-servers.md`.
+>   distro's own `sshd_config`. See `spec/key-steward/decisions/0002-ssh-test-servers.md`.
 
 Section 14, first bullet: replace "Use Docker, mocks and a temporary
 `GNUPGHOME` / `HOME`." with:
@@ -321,7 +321,7 @@ Section 14, first bullet: replace "Use Docker, mocks and a temporary
 Section 16, item 7: replace with:
 
 > 7. How integration tests get SSH servers. See
->    `spec/decisions/0002-ssh-test-servers.md`.
+>    `spec/key-steward/decisions/0002-ssh-test-servers.md`.
 
 ### Not verified
 

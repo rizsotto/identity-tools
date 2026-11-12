@@ -1,7 +1,7 @@
 # 0001: How to share identity-core between Key Steward and Send Secret
 
-- Status: deferred (research done, decide when the second app needs the crate)
-- Blocks: nothing in M1. Each M1 builds `crates/identity-core` in its own repo.
+- Status: accepted (option C, one repository for both apps)
+- Blocks: nothing anymore.
 - SPEC refs: key-manager.md 7.1, 7.3, 8, 11, 16 (Q2: Flatpak or host package first); send-secret.md 7, 8, 11
 
 ## Question
@@ -244,4 +244,17 @@ Phase 3, only if a publish trigger fires: change the dependency to `{ git = "...
 
 ## Human decision
 
-(empty)
+2026-11-12: start with **option C**, one repository for both apps, instead
+of the preferred E/B. Reasons: one commit can change the shared crate and
+both apps, one CI, no version pinning between repos. The cons of C (shared
+issue tracker, prefixed release tags, Flathub and Circle pages pointing at a
+two-app repo) only matter at release time.
+
+Layout: `crates/identity-core/` at the root, `key-steward/` and
+`send-secret/` for each app's code and data, `spec/<app>/` for each app's
+spec, milestones and decisions, `spec/decisions/` for repo-wide decisions.
+
+Way back out: if an app needs its own repo before 1.0 (for example for
+Circle review), split it with `git filter-repo` and use identity-core as a
+pinned git dependency (option B). The steps in "Preferred option" above
+still apply then.

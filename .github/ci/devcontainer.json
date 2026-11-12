@@ -1,5 +1,5 @@
 {
-  "name": "key-steward-ci",
+  "name": "identity-tools-ci",
   "build": {
     "dockerfile": "../../.devcontainer/Containerfile",
     "context": "../../.devcontainer"

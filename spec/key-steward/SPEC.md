@@ -3,7 +3,7 @@
 > Working name: **Key Steward**. Check for name clashes on Flathub before release.
 > Target desktops: GNOME first, and any Linux desktop where GTK4 apps, a Secret Service provider and notifications work (tested: Niri). See section 7.4.
 > This document is the spec for AI coding agents and human reviewers. Read all of it before writing code.
-> Related project: **Send Secret**, a sibling repository (its spec is `send-secret.md` there). The two can share a core crate (see 7.3).
+> Related project: **Send Secret** lives in the same repository (`spec/send-secret/SPEC.md`). Both use the shared `identity-core` crate (see 7.3).
 
 ---
 
@@ -176,7 +176,7 @@ Abort after Installed: offer to remove the new key from where it was added.
 - **Invariant:** the old private key is never deleted automatically.
 
 ### 7.3 Shared with Send Secret
-Send Secret lives in a sibling repository. How the two repos share `identity-core` is open: see `spec/decisions/0001-identity-core-sharing.md`. Until that is decided, the crate lives in this workspace at `crates/identity-core`.
+Send Secret lives in the same repository. Both apps use `crates/identity-core/` at the repo root, see `spec/decisions/0001-identity-core-sharing.md`.
 
 `identity-core` holds OpenPGP and SSH key parsing and fingerprints, the GnuPG wrapper (gpgme) and common error types. Keep it free of UI and network code.
 
@@ -264,6 +264,8 @@ Respect a non-default `AuthorizedKeysFile` only if the user configures it (v1: s
 
 ## 11. Repository layout
 
+> Changed by decision `spec/decisions/0001-identity-core-sharing.md`: this app lives in a shared repository with the other app. Its crates are in `key-steward/crates/`, the shared crate is `crates/identity-core/`, and specs are in `spec/key-steward/`. The tree below shows the app's own parts.
+
 ```
 key-steward/
 ├── Cargo.toml (workspace)
@@ -346,10 +348,10 @@ key-steward/
 3. Should "rotate" also offer to move the user to SSH signing for git commits?
 4. Default new subkey algorithm: Ed25519/Cv25519 (proposed), or offer post-quantum options when GnuPG supports them?
 5. Coordinate with the GNOME maintainers about the future of Seahorse's key features?
-6. How to share `identity-core` with the sibling Send Secret repo. See `spec/decisions/0001-identity-core-sharing.md`.
-7. Proposed: run integration test sshd as a plain process in the devcontainer instead of Docker containers (section 11 and 13). See `spec/milestones/M1/plan.md`, "Proposed SPEC change".
+6. How to share `identity-core` with Send Secret. Decided: one shared repository. See `spec/decisions/0001-identity-core-sharing.md`.
+7. Proposed: run integration test sshd as a plain process in the devcontainer instead of Docker containers (section 11 and 13). See `spec/key-steward/milestones/M1/plan.md`, "Proposed SPEC change".
 
-Status of each question: `spec/decisions/README.md`.
+Status of each question: `spec/key-steward/decisions/README.md`.
 
 ---
 

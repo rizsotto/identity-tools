@@ -3,7 +3,7 @@
 > Working name: **Send Secret**. Check for name clashes on Flathub before release.
 > Target desktops: GNOME first, and any Linux desktop where GTK4 apps run (tested: Niri). See section 7.1.
 > This document is the spec for AI coding agents and human reviewers. Read all of it before writing code.
-> Related project: **Key Steward**, our sibling repository. The two share the `identity-core` crate. How they share it is still open, see `spec/decisions/0001-identity-core-sharing.md`.
+> Related project: **Key Steward** lives in the same repository (`spec/key-steward/SPEC.md`). Both use the shared `identity-core` crate, see `spec/decisions/0001-identity-core-sharing.md`.
 
 ---
 
@@ -232,6 +232,8 @@ OpenPGP and age recipients cannot be mixed in one output. If the user picks a mi
 
 ## 11. Repository layout
 
+> Changed by decision `spec/decisions/0001-identity-core-sharing.md`: this app lives in a shared repository with the other app. Its crates are in `send-secret/crates/`, the shared crate is `crates/identity-core/`, and specs are in `spec/send-secret/`. The tree below shows the app's own parts.
+
 ```
 send-secret/
 ├── Cargo.toml (workspace)
@@ -310,7 +312,7 @@ send-secret/
 ## 16. Open questions for the human
 
 1. Final name and app ID.
-2. Mixed recipients (one with OpenPGP, one with only SSH keys): produce two outputs, or force one format? See `spec/decisions/0002-mixed-recipients.md`.
+2. Mixed recipients (one with OpenPGP, one with only SSH keys): produce two outputs, or force one format? See `spec/send-secret/decisions/0002-mixed-recipients.md`.
 3. Should age mode offer an optional SSH signature in v1 (non-standard for age, but it proves the sender)?
 4. Default clipboard clear time (proposed 60 s).
 5. Is a web decryptor for recipients without the app worth doing early? It helps adoption a lot.

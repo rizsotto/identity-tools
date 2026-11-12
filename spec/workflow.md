@@ -1,22 +1,27 @@
 # Development workflow (spec driven)
 
-The source of truth is `spec/SPEC.md`. Code follows the spec. If the code needs
+This repo holds two apps, Key Steward and Send Secret, and the shared
+`identity-core` crate. Each app has its own spec. `<app>` below is
+`key-steward` or `send-secret`.
+
+The source of truth is `spec/<app>/SPEC.md`. Code follows the spec. If the code needs
 to differ, change the spec first, in the same pull request.
 
 ## Layers
 
 | File | What it holds | Who writes it |
 |---|---|---|
-| `spec/SPEC.md` | Product spec: requirements (FR/NFR/S IDs), milestones, rules | Human, agents propose changes |
-| `spec/decisions/NNNN-*.md` | One decision each: options, preferred choice, status | Research agent proposes, human accepts |
-| `spec/milestones/MN/spec.md` | The slice of SPEC.md this milestone covers, acceptance criteria as checkboxes | Planner agent |
-| `spec/milestones/MN/plan.md` | Design: crates, types, traits, test strategy, facts verified (SPEC section 15) | Planner agent |
-| `spec/milestones/MN/tasks.md` | Ordered tasks, each one PR sized (under ~400 lines), each with its test | Planner agent |
+| `spec/<app>/SPEC.md` | Product spec: requirements (FR/NFR/S IDs), milestones, rules | Human, agents propose changes |
+| `spec/<app>/decisions/NNNN-*.md` | One app decision each: options, preferred choice, status | Research agent proposes, human accepts |
+| `spec/decisions/NNNN-*.md` | Decisions for the whole repo (shared crate, tooling) | Same |
+| `spec/<app>/milestones/MN/spec.md` | The slice of SPEC.md this milestone covers, acceptance criteria as checkboxes | Planner agent |
+| `spec/<app>/milestones/MN/plan.md` | Design: crates, types, traits, test strategy, facts verified (SPEC section 15) | Planner agent |
+| `spec/<app>/milestones/MN/tasks.md` | Ordered tasks, each one PR sized (under ~400 lines), each with its test | Planner agent |
 
 ## Loop for one milestone
 
 1. **Specify.** Copy the milestone's acceptance criteria from SPEC.md section 12
-   into `spec/milestones/MN/spec.md`. Link every FR/NFR/S ID it touches.
+   into `spec/<app>/milestones/MN/spec.md`. Link every FR/NFR/S ID it touches.
 2. **Verify facts.** For each SPEC section 15 item the milestone relies on,
    check it (docs, source, a small spike). Tick it in SPEC.md with a link.
 3. **Plan.** Write `plan.md`. Then `tasks.md`: small tasks, with dependencies
@@ -25,7 +30,7 @@ to differ, change the spec first, in the same pull request.
    task only if this milestone's acceptance criteria need the answer. If a
    simple, safe default meets the criteria (for example: refuse the case with
    a clear error), use it and defer the question. Deferred questions go in
-   `spec/decisions/README.md` with the milestone they block; do not research
+   `spec/<app>/decisions/README.md` with the milestone they block; do not research
    them yet. Only a real blocker goes to "Blocked on a decision" below.
 5. **Implement.** One task per branch (`mN/tNN-short-name`). Test first.
    `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings`,
@@ -39,7 +44,8 @@ to differ, change the spec first, in the same pull request.
 
 Do not guess. Instead:
 
-1. Copy `spec/decisions/0000-template.md` to the next free number.
+1. Copy `spec/decisions/0000-template.md` to the next free number in the
+   app's `decisions/` dir (or `spec/decisions/` for a repo-wide question).
    Status: `research`.
 2. A research agent (high effort) fills in context, options with trade offs,
    and a preferred option with reasons. Status: `proposed`.
