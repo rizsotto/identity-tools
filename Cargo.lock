@@ -2741,6 +2741,13 @@ dependencies = [
 [[package]]
 name = "rotation"
 version = "0.1.0"
+dependencies = [
+ "identity-core",
+ "inventory",
+ "libc",
+ "test-support",
+ "thiserror 2.0.21",
+]
 
 [[package]]
 name = "rpassword"

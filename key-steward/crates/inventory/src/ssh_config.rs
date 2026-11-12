@@ -157,6 +157,9 @@ pub struct ConfigScan {
     /// Why `ssh -G` may run commands: each `Match exec` (file and line), and
     /// each `Include` whose files we cannot list. Empty if none.
     pub runs_commands: Vec<String>,
+    /// The config file and every `Include` file read, in order, without
+    /// duplicates.
+    pub files: Vec<PathBuf>,
 }
 
 /// Reads the config and its `Include` files (also inside `Host` and
@@ -185,6 +188,9 @@ fn collect(
         return Err(ImportError::IncludeDepth(path.to_path_buf()));
     }
     let text = read_config(path)?;
+    if !scan.files.iter().any(|f| f == path) {
+        scan.files.push(path.to_path_buf());
+    }
     for (n, line) in text.lines().enumerate() {
         let Some((keyword, args)) = split_line(line) else {
             continue;
@@ -464,7 +470,8 @@ fn parse_g_output(text: &str) -> Resolved {
 
 /// Expands `~` and the `%d`, `%h`, `%r`, `%%` tokens in an identity file
 /// path. Returns `None` for other tokens; such a path matches no key.
-fn expand_identity(path: &str, home: &Path, r: &Resolved) -> Option<PathBuf> {
+/// With `Resolved::default()` only `~`, `%d` and `%%` expand.
+pub fn expand_identity(path: &str, home: &Path, r: &Resolved) -> Option<PathBuf> {
     let home_str = home.to_str()?;
     let path = match path.strip_prefix("~/") {
         Some(rest) => format!("{home_str}/{rest}"),
