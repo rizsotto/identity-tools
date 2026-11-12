@@ -1,8 +1,0 @@
-{
-  "name": "send-secret-ci",
-  "build": {
-    "dockerfile": "../../.devcontainer/Containerfile",
-    "context": "../../.devcontainer"
-  },
-  "remoteUser": "dev"
-}
