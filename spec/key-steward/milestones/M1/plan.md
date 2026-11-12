@@ -88,9 +88,7 @@ Use the `ssh-key` crate for public keys (`.pub` files) and fingerprints only.
   `user_default()` in the app) implements `OpenPgpBackend`: `public_keys`,
   `secret_keys`, `read_keys(bytes)` (no import, 1 MB limit, for forge
   `raw_key` / `key` fields) and `default_secret_key`. `OpenPgpKey` has user
-  IDs, subkeys with algo, dates and capabilities, and status flags. Send
-  Secret's encrypt-to-key-file helper (`RecipientFile`) is in the core too
-  but Key Steward does not need it.
+  IDs, subkeys with algo, dates and capabilities, and status flags.
 
 ## Location model (inventory)
 

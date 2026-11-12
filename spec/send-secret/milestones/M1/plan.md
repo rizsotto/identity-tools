@@ -51,19 +51,23 @@ Built in the core lane (T05), after review. Shared API:
   sign. Not `gpgconf`: it shows only the last value and does not skip
   expired keys. The self copy uses
   `default_secret_key()` and its `can_encrypt` to build `OpenPgpSelf`.
-- `RecipientFile` (T06, SPEC 15 F3): `RecipientFile::new(&mut gpg, bytes)`
-  checks size, exactly one key, and that it can encrypt, writes it 0600 in
-  a fresh 0700 dir (`$XDG_RUNTIME_DIR`, else the temp dir), and deletes it
-  on drop. `gpgme_recipients()` is the checked `--file\n<path>` string.
-- Where the encrypt call lives (decided in T06): in `crypto`, not in
-  identity-core. Decision 0001 keeps encrypt, sign and decrypt out of the
-  core, and the call needs gpgme `Data` streams and flags (sign,
-  `NO_ENCRYPT_TO`) that only `crypto` should know. So `crypto` depends on
-  `gpgme` and `gpgme-sys`, owns its context, and makes the one `unsafe`
-  call `gpgme_op_encrypt_sign_ext` (or `_encrypt_ext` with `--no-sign`)
+- `RecipientFile` lives in `crypto` (`src/recipient_file.rs`), not in
+  identity-core: it is Send Secret only (decision 0001, review of the
+  core lane round 2). `RecipientFile::new(&mut identity_core::Gpg, bytes)`
+  checks size, exactly one key, and that it can encrypt (refuses expired
+  encryption subkeys and revoked keys), writes it 0600 in a fresh 0700 dir
+  (`$XDG_RUNTIME_DIR`, else the temp dir), and deletes it on drop.
+  `gpgme_recipients()` is the checked `--file\n<path>` string. Errors:
+  `RecipientFileError`.
+- The encrypt call is in `crypto` too: decision 0001 keeps encrypt, sign
+  and decrypt out of the core, and the call needs gpgme `Data` streams
+  and flags (sign, `NO_ENCRYPT_TO`) that only `crypto` should know. So
+  `crypto` depends on `gpgme` and `gpgme-sys`, owns its context (same home
+  as `Gpg::home()`), and makes the one `unsafe` call
+  `gpgme_op_encrypt_sign_ext` (or `gpgme_op_encrypt_ext` without signing)
   with `RecipientFile::gpgme_recipients()`, keeping the `RecipientFile`
   alive until the call returns. Document the `unsafe` block with a
-  `SAFETY` comment. `crates/identity-core/tests/gpgme_spike.rs`
+  `SAFETY` comment. `send-secret/crates/crypto/tests/recipient_file.rs`
   (`encrypt_sign_to`) is the model.
 
 The sketch below is the first draft.
@@ -194,7 +198,7 @@ pub fn detect_format(head: &[u8]) -> Detection;  // format: OpenPgpArmor, AgeArm
 - gpgme, user's normal keyring and gpg-agent for signing and decrypting.
 - Encrypt to a key file without importing it into the user's keyring (fact
   F3, verified): `gpgme_op_encrypt_sign_ext` with `--file\n<path>`, one
-  `unsafe` call into `gpgme-sys`. Build the file with `identity_core::RecipientFile`
+  `unsafe` call into `gpgme-sys`. Build the file with `crypto::RecipientFile`
   (see identity-core above); the `unsafe` call is in `crypto`. The recipient string is an injection point
   (a newline adds recipients or keywords such as `--hidden`). So the wrapper
   takes key bytes, not a path: size check, exactly one key (`read_keys`),

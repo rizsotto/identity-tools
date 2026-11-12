@@ -6,27 +6,39 @@
 //! so a newline in the path adds recipients or `--hidden`. [`RecipientFile`]
 //! takes key bytes, never a path, and builds the string itself.
 //!
-//! The encryption call stays in Send Secret's `crypto` crate (decision 0001:
-//! encrypt, sign and decrypt are not in identity-core). That call is the one
-//! `unsafe` call into `gpgme-sys`, because the safe `gpgme` crate does not
-//! wrap the `_ext` functions. See `tests/gpgme_spike.rs` for how to make it.
+//! The OpenPGP backend makes the one `unsafe` call into `gpgme-sys` with
+//! [`RecipientFile::gpgme_recipients`], because the safe `gpgme` crate does
+//! not wrap the `_ext` functions. `tests/recipient_file.rs` shows the call.
 
 use std::ffi::{CStr, CString};
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
+use identity_core::{Gpg, GpgError, OpenPgpBackend, OpenPgpKey};
 use tempfile::TempDir;
 
-use crate::error::GpgError;
-use crate::key::OpenPgpKey;
-use crate::openpgp::{Gpg, OpenPgpBackend};
+/// Why a key can not be used as a recipient file. Fixed text, never the
+/// key input.
+#[derive(Debug, thiserror::Error)]
+pub enum RecipientFileError {
+    #[error(transparent)]
+    Gpg(#[from] GpgError),
+    #[error("key input must hold exactly one OpenPGP key")]
+    NotOneKey,
+    #[error("the OpenPGP key has no usable encryption subkey")]
+    CannotEncrypt,
+    #[error("unsafe path for a GnuPG recipient file")]
+    UnsafePath,
+    #[error("cannot write the recipient key file: {0}")]
+    Io(#[from] std::io::Error),
+}
 
 const FILE_NAME: &str = "recipient.pgp";
 
 /// One OpenPGP public key in a private temp file, ready to pass to gpgme.
 ///
-/// - The bytes must be at most [`crate::MAX_KEY_INPUT`] long and hold
+/// - The bytes must be at most [`identity_core::MAX_KEY_INPUT`] long and hold
 ///   exactly one key that can encrypt.
 /// - The file is `recipient.pgp`, mode 0600, in a fresh dir with mode 0700
 ///   under `$XDG_RUNTIME_DIR` (if set and absolute), else the system temp
@@ -51,7 +63,7 @@ impl std::fmt::Debug for RecipientFile {
 
 impl RecipientFile {
     /// Check `key` with `gpg` (nothing is imported) and write it out.
-    pub fn new(gpg: &mut Gpg, key: &[u8]) -> Result<Self, GpgError> {
+    pub fn new(gpg: &mut Gpg, key: &[u8]) -> Result<Self, RecipientFileError> {
         let parent = std::env::var_os("XDG_RUNTIME_DIR")
             .map(PathBuf::from)
             .filter(|p| p.is_absolute() && p.is_dir())
@@ -59,14 +71,14 @@ impl RecipientFile {
         Self::new_in(gpg, key, &parent)
     }
 
-    fn new_in(gpg: &mut Gpg, key: &[u8], parent: &Path) -> Result<Self, GpgError> {
+    fn new_in(gpg: &mut Gpg, key: &[u8], parent: &Path) -> Result<Self, RecipientFileError> {
         let mut keys = gpg.read_keys(key)?;
         if keys.len() != 1 {
-            return Err(GpgError::NotOneKey);
+            return Err(RecipientFileError::NotOneKey);
         }
         let parsed = keys.remove(0);
         if !parsed.can_encrypt {
-            return Err(GpgError::CannotEncrypt);
+            return Err(RecipientFileError::CannotEncrypt);
         }
 
         let dir = tempfile::Builder::new()
@@ -108,22 +120,22 @@ impl RecipientFile {
     }
 }
 
-fn recipient_string(path: &Path) -> Result<CString, GpgError> {
+fn recipient_string(path: &Path) -> Result<CString, RecipientFileError> {
     CString::new(format!("--file\n{}", checked_recipient_path(path)?))
-        .map_err(|_| GpgError::UnsafePath)
+        .map_err(|_| RecipientFileError::UnsafePath)
 }
 
 /// A path is safe in a gpgme recipient string only if it is absolute (so not
 /// a gpg special file name like `-&3`), UTF-8, has no control characters (a
 /// newline starts a new recipient or keyword line) and no leading or
 /// trailing spaces (gpgme trims them).
-fn checked_recipient_path(path: &Path) -> Result<&str, GpgError> {
-    let s = path.to_str().ok_or(GpgError::UnsafePath)?;
+fn checked_recipient_path(path: &Path) -> Result<&str, RecipientFileError> {
+    let s = path.to_str().ok_or(RecipientFileError::UnsafePath)?;
     let ok = path.is_absolute()
         && s.starts_with('/')
         && !s.chars().any(char::is_control)
         && s.trim() == s;
-    ok.then_some(s).ok_or(GpgError::UnsafePath)
+    ok.then_some(s).ok_or(RecipientFileError::UnsafePath)
 }
 
 #[cfg(test)]

@@ -43,13 +43,10 @@ pub enum GpgError {
     Gpgme(String),
     #[error("key input is larger than {limit} bytes")]
     TooLarge { limit: usize },
-    #[error("key input must hold exactly one OpenPGP key")]
-    NotOneKey,
-    #[error("the OpenPGP key has no usable encryption subkey")]
-    CannotEncrypt,
-    #[error("unsafe path for a GnuPG recipient file")]
+    /// A home dir path with a NUL byte.
+    #[error("unsafe GnuPG home dir path")]
     UnsafePath,
-    #[error("cannot write the recipient key file: {0}")]
+    #[error("cannot read the GnuPG config: {0}")]
     Io(#[from] std::io::Error),
 }
 
