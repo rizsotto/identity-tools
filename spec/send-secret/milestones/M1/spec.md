@@ -18,8 +18,9 @@ interoperates with `gpg` and Go `age`. No network, no UI, no TOFU store yet.
   Refs: FR-3, FR-4, FR-7
 - [ ] The same works for age with SSH RSA recipients.
   Refs: FR-3, FR-4, FR-7
-- [ ] Unsupported SSH key types (ECDSA, `sk-` keys) are skipped with a note.
-  Refs: FR-4
+- [ ] Unsupported SSH key types (ECDSA, `sk-` keys) and SSH RSA keys
+  outside 2048 to 4096 bits (the `age` crate limit) are skipped with a
+  note. Refs: FR-4
 - [ ] Interop: files from our CLI decrypt with `gpg`, and `gpg` output
   decrypts with our CLI.
 - [ ] Interop: files from our CLI decrypt with Go `age`, and Go `age` output
@@ -44,15 +45,34 @@ interoperates with `gpg` and Go `age`. No network, no UI, no TOFU store yet.
 - [ ] A key file with several keys of the chosen format (for example an
   `authorized_keys` list) gives one message that each of those keys can
   open. Refs: FR-4
-- [ ] Encrypt-to-self works in every message: OpenPGP messages add the
-  user's default secret key, age messages add the user's own age identity
-  (created on first run, mode 0600). `--no-self` turns it off.
-  Refs: SPEC section 4 ("Always add the sender"), section 9 ("Sender
-  recipient"), decision 0002 (sub-decision, applied default)
-- [ ] OpenPGP output is signed, and decrypt reports the verified signer.
-  Refs: UC-7, FR-7
-- [ ] Decrypt detects the format (OpenPGP armor, age armor, binary).
-  Refs: FR-7
+- [ ] No recipient's message holds the sender's key: an OpenPGP message
+  lists only that recipient's key IDs (also when gpg.conf has
+  `encrypt-to`), and an age message has no stanza for the sender.
+  Refs: [S-8](../../SPEC.md#10-security-rules-must), decision 0002
+  (encrypt-to-self sub-decision)
+- [ ] Armored OpenPGP output has no `Comment:` or `Version:` armor header,
+  also when gpg.conf sets `comment` or `emit-version`. Refs: S-8,
+  decision [0003](../../decisions/0003-openpgp-armor-headers.md) (research,
+  blocks armored OpenPGP output)
+- [ ] Self copy: a separate message encrypted only to the sender, on by
+  default, `--no-self-copy` skips it. OpenPGP uses the user's default
+  secret key. age uses the user's own native X25519 identity (created on
+  first use, mode 0600), never an SSH key. Format: `--format` if given,
+  else OpenPGP if the user's default secret key can encrypt, else age with
+  a note on stderr. The self key is settled before any output is written:
+  a forced format with no usable self key exits 1 and writes nothing.
+  Written to
+  `BASE.self.<ext>` next to the per-recipient files. With one recipient,
+  BASE is OUT without a trailing `.asc`, `.gpg` or `.age`. The self copy
+  needs `-i FILE` and `-o`; without them it is not written and stderr says
+  why (exit 0). A key file labeled `self` is a usage error (exit 2).
+  Refs: [FR-12](../../SPEC.md#functional), section 9, decision 0002
+- [ ] OpenPGP output is signed inside the encryption (sign and encrypt in
+  one operation), and decrypt reports the verified signer.
+  Refs: UC-7, FR-7, section 9 ("Signing")
+- [ ] Decrypt detects the format (OpenPGP armor, age armor, binary), also
+  when the armor follows a UTF-8 BOM, blank lines, triple backticks or a
+  header line. Refs: FR-7
 - [ ] No plaintext in temp files. Files stream from source to output. Plaintext
   buffers are zeroed. Refs: [S-4](../../SPEC.md#10-security-rules-must),
   [S-5](../../SPEC.md#10-security-rules-must), FR-8, NFR-3

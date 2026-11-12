@@ -71,7 +71,9 @@ default). The sender has an age identity for sure (made on first run,
 section 9). The sender may have no OpenPGP secret key. With two outputs the
 sender goes into both, so both stay readable by the sender, as long as the
 sender has an OpenPGP key. (The "sender has no OpenPGP key" case exists even
-without a mix. It is not decided here.)
+without a mix. It is not decided here.) Superseded: the sender's key is no
+longer put into recipients' messages. See the encrypt-to-self sub-decision
+under "Human decision".
 
 **Metadata.**
 
@@ -349,10 +351,11 @@ format. It is not one of the listed options as written.
    A forced format (`--format`) applies to all; a recipient with no key in
    that format is an error that names them. A recipient with no usable key
    at all is an error that names them. Nobody is dropped silently.
-3. **Privacy gain.** A message names only its own recipient (and the
-   sender, see below). Recipients cannot see who else got the secret. This
-   fixes the metadata issue in Context: no shared OpenPGP key ID list, and
-   no SSH tags of other people.
+3. **Privacy gain.** A message names only its own recipient. Recipients
+   cannot see who else got the secret. This fixes the metadata issue in
+   Context: no shared OpenPGP key ID list, and no SSH tags of other people.
+   The sender's key is not in it either (see the encrypt-to-self
+   sub-decision below).
 4. **One person's several keys stay in one message.** If one recipient has
    several keys of the chosen format (FR-4, for example a GitHub `.keys`
    list), they all go into that recipient's message, so any of their devices
@@ -360,32 +363,83 @@ format. It is not one of the listed options as written.
 5. **Signing differs per message.** OpenPGP messages are signed, age
    messages are not. Each result shows its own sign status.
 
-### Sub-decision: encrypt-to-self (applied default, confirm)
+### Sub-decision: encrypt-to-self as a separate self copy
 
-**Applied default, please confirm.** The sender's own key is added to every
-per-recipient message, in that message's format: the default OpenPGP secret
-key for OpenPGP messages, the sender's age identity for age messages
-(SPEC section 4, section 9). `--no-self` turns it off for all messages.
+> "if the goal is to be able to read it back, but don't expose the secret
+> or any sensitive info about me it is fine. The rule is: ensure good
+> security practices."
 
-Why: SPEC section 4 says always add the sender (on by default), and nothing
-in the spec argues against it here. It does not hurt privacy: an OpenPGP
-message is signed by the sender anyway, and age X25519 stanzas do not name
-the key. The cost is one extra stanza per message.
+Date: 2026-11-12. This replaces the earlier applied default (the sender's
+key inside every recipient's message).
 
-Not decided here (it exists without this decision too): what to do when the
-sender has no OpenPGP secret key and a recipient gets OpenPGP.
+Why the old default was wrong: a recipient's message is often forwarded or
+leaks (it is pasted into Slack or email). With the sender's key inside it,
+the message shows who sent it to anyone who sees it. OpenPGP lists a key ID
+for every recipient key (RFC 9580, 5.1). An age `ssh-ed25519` or `ssh-rsa`
+stanza carries a tag of the SSH public key, which anyone can match against
+public SSH key lists (GitHub). Only age X25519 stanzas are unlinkable.
+
+The rule:
+
+1. **A recipient's message holds only that recipient's key(s).** The
+   sender's key never goes into it. A forwarded or leaked message carries
+   no sender key ID and no sender SSH key tag. The OpenPGP backend also
+   turns off gpg.conf `encrypt-to` / `default-recipient-self` for these
+   messages (gpgme `GPGME_ENCRYPT_NO_ENCRYPT_TO`), so the user's gpg config
+   cannot add the sender key behind our back.
+   - Armor headers are outside the encryption too. gpg.conf `comment` and
+     `emit-version` add `Comment:` and `Version:` lines to the armor, and a
+     comment can name the sender. Output armor must have no header lines.
+     gpgme 2.0.1 has no way to pass `--no-comments` / `--no-emit-version`
+     (checked 2026-11-12), so how to enforce this is
+     [decision 0003](0003-openpgp-armor-headers.md) (research).
+2. **Read-back is a separate self copy**, one extra message encrypted only
+   to the sender. On by default.
+   - OpenPGP: the sender's default secret key.
+   - age: the sender's own native X25519 identity
+     (`$XDG_CONFIG_HOME/send-secret/identities`, created on first use, mode
+     0600). Never an SSH key, so the self copy carries no linkable tag.
+   - Format: the forced format (`--format`) if set. Else OpenPGP if the
+     sender has a default secret key that can encrypt, else age. One self
+     copy per run, even when the recipients use both formats (the plaintext
+     is the same).
+   - "A default secret key that can encrypt" means: gpg's default secret
+     key (gpg.conf `default-key`, else the first secret key) has a valid
+     (not expired, not revoked) encryption subkey we can use.
+   - The self key is settled before any output is written. Not forced and
+     no such key: fall back to age, with a note on stderr that says why.
+     Forced OpenPGP and no such key: an error before anything is written
+     (the CLI suggests `--no-self-copy`). A failing self copy never leaves
+     recipient files behind.
+3. **Signing stays inside the encryption.** OpenPGP messages are signed,
+   then encrypted (gpgme sign and encrypt in one operation). The signature,
+   with the sender's key ID, is inside the encrypted part, so only the
+   recipient sees it. A leaked message shows nothing about the sender. The
+   self copy follows the same signing setting.
 
 ### What it means for M1
 
-- Facade: `encrypt` makes one message for one recipient (plus the sender).
-  `encrypt_each` runs it for every recipient and returns one result per
-  recipient. See `milestones/M1/plan.md`.
+- Facade: `encrypt` makes one message for one recipient's keys, nothing
+  else. `encrypt_each` runs it for every recipient and for the self copy,
+  and returns one result per message. See `milestones/M1/plan.md`.
 - CLI: several `--to-key` files give one output per recipient.
   `-o BASE` writes `BASE.<label>.asc` (armored OpenPGP), `BASE.<label>.gpg`
   (binary OpenPGP) or `BASE.<label>.age`. The label is the key file name
   without its extension. Stdout is allowed only with one recipient. Stdin
   with several recipients is a usage error in M1 (the input must be read
   once per message, and we do not buffer it).
+- Self copy: `BASE.self.<ext>` next to the per-recipient files, on by
+  default, `--no-self-copy` skips it. The label `self` is reserved: a key
+  file named `self.*` is a usage error (exit 2).
+- One recipient: `-o OUT` is the exact message file. The self copy goes to
+  `BASE.self.<ext>`, where BASE is OUT without a trailing `.asc`, `.gpg` or
+  `.age`, and `<ext>` follows the self copy's own format and armor
+  (`-o msg.age` gives `msg.self.age` for an age self copy, `msg.self.asc`
+  for an armored OpenPGP one). The self copy needs a second
+  read of the input and a file to write to, so it needs both `-i FILE` and
+  `-o OUT`. Without them (stdin or stdout), the run still succeeds, writes
+  no self copy, and prints a note on stderr that names the missing option
+  and `--no-self-copy`. `--no-self-copy` silences the note.
 
 ### What it means for M3
 
@@ -395,3 +449,5 @@ sender has no OpenPGP secret key and a recipient gets OpenPGP.
 - Pasted text is encrypted once per recipient from the zeroized in-memory
   buffer the app already holds. Files are opened once per recipient.
 - The label comes from the contact name or the key's user ID.
+- The self copy is not a result to send. Where the app keeps it is
+  decided in M3.

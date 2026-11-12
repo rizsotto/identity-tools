@@ -8,7 +8,8 @@ See "Blocked on a decision" in `../../workflow.md`.
 
 | No. | Title | Status | Blocks |
 |---|---|---|---|
-| [0002](0002-mixed-recipients.md) | Mixed OpenPGP and age recipients (SPEC 16 q2) | accepted (2026-11-12): one message per recipient | nothing (built in M1) |
+| [0002](0002-mixed-recipients.md) | Mixed OpenPGP and age recipients (SPEC 16 q2) | accepted (2026-11-12): one message per recipient, separate self copy | nothing (built in M1) |
+| [0003](0003-openpgp-armor-headers.md) | Keep gpg.conf `comment` / `emit-version` armor headers out of OpenPGP output (SPEC 16 q6, S-8) | research | M1 T08b armored output, T11 |
 
 ## Pending (SPEC section 16, no record yet)
 
