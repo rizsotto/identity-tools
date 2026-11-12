@@ -231,7 +231,7 @@ Every recipient gets their own message (FR-11), so OpenPGP and age keys never mi
 - **S-5** Zero plaintext buffers after use. Don't log plaintext, ciphertext or passphrases at any log level.
 - **S-6** Verify that the email on a WKD or keys.openpgp.org result matches the query. Reject keys whose user IDs don't match.
 - **S-7** Treat all fetched keys as hostile input. Parse them in Rust/gpgme with size limits (reject keys > 1 MB).
-- **S-8** A recipient's message holds only that recipient's keys. Never add the sender's key or anyone else's. Turn off gpg.conf `encrypt-to` for these messages (gpgme `GPGME_ENCRYPT_NO_ENCRYPT_TO`). Armored output has no armor header lines (`Comment:`, `Version:`): they sit outside the encryption and gpg.conf `comment` can name the sender. How to enforce that with gpgme is [decision 0003](decisions/0003-openpgp-armor-headers.md). Read-back uses a separate self copy (FR-12).
+- **S-8** A recipient's message holds only that recipient's keys. Never add the sender's key or anyone else's. Turn off gpg.conf `encrypt-to` for these messages (gpgme `GPGME_ENCRYPT_NO_ENCRYPT_TO`). Armor header lines (`Comment:`, `Version:`) come from the user's own gpg.conf and are kept as gpg writes them; we do not filter or rewrite gpg output ([decision 0003](decisions/0003-openpgp-armor-headers.md)). Read-back uses a separate self copy (FR-12).
 
 ---
 
@@ -334,7 +334,7 @@ send-secret/
 3. Should age mode offer an optional SSH signature in v1 (non-standard for age, but it proves the sender)?
 4. Default clipboard clear time (proposed 60 s).
 5. Is a web decryptor for recipients without the app worth doing early? It helps adoption a lot.
-6. How to keep gpg.conf `comment` / `emit-version` armor headers out of OpenPGP output, since gpgme cannot pass `--no-comments` (S-8). See [decision 0003](decisions/0003-openpgp-armor-headers.md) (research).
+6. gpg.conf `comment` / `emit-version` armor headers: answered, keep what gpg writes. See [decision 0003](decisions/0003-openpgp-armor-headers.md).
 
 ---
 

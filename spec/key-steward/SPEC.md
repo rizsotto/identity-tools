@@ -260,6 +260,7 @@ Respect a non-default `AuthorizedKeysFile` only if the user configures it (v1: s
 - **S-5** Use `ssh -o BatchMode=yes` for checks. Never accept new host keys silently: if a host key is unknown, ask the user to connect once in a terminal, or show the fingerprint and ask.
 - **S-6** Remote scripts are static files in the repo. User data reaches them only through stdin, never by string interpolation in a command line.
 - **S-7** Every workflow shows a dry-run first. The user confirms before any change.
+- **S-8** The local database stores configuration and references only: locations, their settings and status, check results, the rotation journal, and keys by fingerprint. It never stores key material (public or private) and never tokens. Keys are always read from their source (`~/.ssh`, GnuPG, the forge). The database file is 0600 in a 0700 dir.
 
 ---
 

@@ -210,11 +210,8 @@ pub fn detect_format(head: &[u8]) -> Detection;  // format: OpenPgpArmor, AgeArm
   sender's key ID) is inside the encryption. Only the recipient sees it.
 - Encrypt with `GPGME_ENCRYPT_NO_ENCRYPT_TO`, so gpg.conf `encrypt-to` or
   `default-recipient-self` never adds the sender key (S-8).
-- Armored output must have no armor header lines (S-8): gpg.conf `comment`
-  and `emit-version` add `Comment:` / `Version:` lines outside the
-  encryption. gpgme 2.0.1 cannot pass `--no-comments`. How to enforce it is
-  decision 0003 (research). Until it is accepted, T08b builds binary
-  OpenPGP output and armored output waits.
+- Armored output: use gpg's own armor through gpgme, unchanged (decision
+  0003). Header lines from the user's gpg.conf are kept.
 - Sign with the default secret key. Set the signer explicitly
   (`Context::add_signer`) to the key from
   `identity_core::OpenPgpBackend::default_secret_key()`, the same key the
@@ -284,9 +281,8 @@ Lives in `crates/cli/tests/` (integration tests that run the built binary).
   shows only that recipient's key IDs, even with `encrypt-to` in the temp
   `gpg.conf`. An age recipient's message does not open with the sender's
   self identity, and the self copy has one X25519 stanza only.
-- Armor header check (S-8, decision 0003): with `comment` and
-  `emit-version` in the temp `gpg.conf`, our armored OpenPGP output has no
-  `Comment:` or `Version:` line.
+- Armor (decision 0003): armored OpenPGP output is gpg's output unchanged;
+  plain `gpg --decrypt` and `gpg --verify` open it (covered by T11 interop).
 - Plaintext marker: a random string per test, so the S-4 test can scan the
   temp `HOME` for it after a run.
 - Tests skip with a loud failure (not a silent pass) if `gpg` or `age` is

@@ -1,8 +1,7 @@
 # 0003: Keep armor header lines out of OpenPGP output
 
-- Status: proposed
-- Blocks: M1 T08b (armored OpenPGP output), T11 interop on armor headers.
-  Binary OpenPGP output and age are not affected.
+- Status: accepted (keep gpg's armor as it is; no filter)
+- Blocks: nothing.
 - SPEC refs: S-8, FR-12, decision 0002 (encrypt-to-self sub-decision),
   section 14 (no own armor code), section 16 question 6
 
@@ -330,3 +329,25 @@ Unverified:
 - How common `comment` or `emit-version` is among real users is not known.
 
 ## Human decision
+
+2026-11-12, the human: "if the CLI tool exposes the sender, let's keep
+that. We also should not invent new formats, and allow receivers to use CLI
+commands to reveal the secret. If signing with our public key allows the
+receiver to validate the sender, allow this option too. I think this is part
+of a good security practice and does not contradict my previous advice."
+
+Applied:
+- None of options A to F. We use gpg's own armor through gpgme and do not
+  filter or rewrite its output. `Comment:` / `Version:` lines come from the
+  user's own gpg.conf, so they are the user's choice.
+- Output stays standard OpenPGP and standard age. Recipients can always
+  open it with plain `gpg --decrypt` or `age --decrypt` (T11 interop).
+- OpenPGP sign-and-encrypt stays (SPEC 9): the recipient checks the sender
+  with `gpg --verify` / `gpg --decrypt`. The signature is inside the
+  encryption.
+- Not changed: S-8 still keeps the sender's key out of recipient messages
+  (`GPGME_ENCRYPT_NO_ENCRYPT_TO`); read-back is the separate self copy.
+- An age-mode sender signature (SPEC 16 q3) must use a standard format
+  that recipients can check with a common tool, for example a detached
+  `ssh-keygen -Y sign` signature (verify with `ssh-keygen -Y verify`). It
+  stays M3 scope.
