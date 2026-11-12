@@ -4,7 +4,7 @@ use std::fmt;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use identity_core::{Fingerprint, PublicKey, UserId};
+use identity_core::{Fingerprint, LineError, PublicKey, UserId};
 use tokio::time::Instant;
 
 use crate::net::{Net, NetError};
@@ -93,6 +93,8 @@ pub enum Unusable {
     SkKey,
     #[error("RSA {0} bits: age takes RSA keys from 2048 to 4096 bits")]
     RsaSize(u32),
+    #[error("this SSH key type is not an age recipient")]
+    SshType,
     #[error("the key has no usable encryption subkey")]
     NoEncryptionSubkey,
     #[error("the key is revoked")]
@@ -143,6 +145,9 @@ pub enum RejectReason {
     EmailMismatch,
     #[error("the answer holds too many keys")]
     TooManyKeys,
+    /// A line of a `.keys` list that holds no usable key.
+    #[error("line {line}: {error}")]
+    BadLine { line: usize, error: LineError },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

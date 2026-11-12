@@ -2,12 +2,15 @@
 
 use std::time::Duration;
 
+mod forge;
+mod found;
 mod model;
 mod net;
 mod netlog;
 mod query;
 mod resolve;
 
+pub use forge::{GitHubSource, GitLabSource};
 pub use model::{
     Found, FoundKey, KeyBytes, KeySource, RejectReason, Rejected, Source, SourceError, SourceKind,
     Unusable,
