@@ -46,22 +46,48 @@ pub enum Recipient {
     Age(age::x25519::Recipient),
     Ssh(age::ssh::Recipient),
 }
+pub enum Format { OpenPgp, Age }
 pub struct EncryptOpts { pub armor: bool, pub to_self: bool, pub sign: bool }
+
+/// One recipient. In M1, one `--to-key` file. May hold keys of both formats.
+pub struct Person { pub label: String, pub keys: Vec<Recipient> }
+
+/// One message: one format, that person's keys of that format.
+pub struct MessagePlan { pub label: String, pub format: Format, pub keys: Vec<Recipient> }
+
+/// Pure: FR-3 per person, or the forced format. Err names unreachable people.
+pub fn plan(people: &[Person], force: Option<Format>) -> Result<Vec<MessagePlan>, PlanError>;
+
+/// One message. Adds the sender key of `plan.format` if `opts.to_self`.
 pub fn encrypt(input: impl Read, output: impl Write,
-               recipients: &[Recipient], opts: &EncryptOpts) -> Result<()>;
+               plan: &MessagePlan, opts: &EncryptOpts) -> Result<()>;
+
+/// One result per recipient, in input order.
+pub struct Sent { pub label: String, pub format: Format }
+pub fn encrypt_each<R: Read, W: Write>(
+    open_input: impl FnMut() -> io::Result<R>,
+    open_output: impl FnMut(&MessagePlan) -> io::Result<W>,
+    plans: &[MessagePlan], opts: &EncryptOpts) -> Vec<Result<Sent>>;
 pub fn decrypt(input: impl Read, output: impl Write,
                ctx: &DecryptCtx) -> Result<Decrypted>;  // format, signer
-pub fn detect_format(head: &[u8]) -> Format;  // OpenPgpArmor, AgeArmor, OpenPgpBinary, AgeBinary, Unknown
+pub fn detect_format(head: &[u8]) -> Detected;  // OpenPgpArmor, AgeArmor, OpenPgpBinary, AgeBinary, Unknown
 ```
 
 - Streaming `Read` to `Write`, never a temp file (S-4). The spec sketch uses
   `Input`/`Output` types. Streams are simpler for M1. Change SPEC section 7 in
   the same PR if we keep this.
 - In-memory plaintext uses `secrecy`/`zeroize` (NFR-3, S-5).
-- Mixed OpenPGP and age recipients: error until decision 0002 is accepted.
-  The return type may change to a list of outputs if 0002 picks "two outputs".
-- Format choice: all recipients OpenPGP, use OpenPGP. All age/SSH, use age.
-  FR-3's "prefer OpenPGP if the person has one" is a resolver concern (M2).
+- One message per recipient, always (decision 0002, FR-11). `encrypt_each`
+  opens the input once per message, so no plaintext is buffered and no
+  temp file is used (S-4). The caller checks `plan` first, so an
+  unreachable person stops the run before any output is written.
+- Format choice per person (FR-3): OpenPGP if the person has an OpenPGP
+  key, else age with all their age/SSH keys. `force` overrides; a person
+  with no key in that format is `PlanError::Unreachable` naming them.
+- `encrypt` refuses a plan whose keys are not all of `plan.format`
+  (`Error::WrongFormat`). This is a guard; `plan` never builds such a plan.
+- Encrypt-to-self: the sender key goes into every message, in that
+  message's format (decision 0002 sub-decision, applied default).
 - Errors never contain plaintext or key material.
 
 ### age backend
@@ -91,7 +117,19 @@ send-secret decrypt [-i IN] [-o OUT] [--identity FILE ...]
 ```
 
 - `-i`/`-o` default to stdin/stdout. `--armor` like `age -a` and `gpg -a`.
-- `--format` only checks the auto choice. It never converts keys.
+- Each `--to-key FILE` is one recipient. Label: the file name without its
+  extension, with any character outside `[A-Za-z0-9._-]` turned into `_`.
+  Two files with the same label: usage error (exit 2).
+- One recipient: `-o OUT` is the exact output file; no `-o` means stdout.
+- Several recipients: one output per recipient. `-o BASE` is required and
+  writes `BASE.<label>.asc` (OpenPGP, armored), `BASE.<label>.gpg` (OpenPGP,
+  binary) or `BASE.<label>.age` (age, armored or binary). No `-o` (stdout)
+  or no `-i` (stdin) is a usage error (exit 2): stdout cannot hold several
+  messages, and stdin cannot be read twice without buffering plaintext.
+- Stderr prints one line per output: label, file, format.
+- If a write fails midway, stderr names the outputs already written and
+  the exit code is 1.
+- `--format` forces the format for all recipients. It never converts keys.
 - `decrypt` with no `--identity` uses FR-7 defaults: `~/.ssh/id_ed25519`,
   `~/.ssh/id_rsa`, `$XDG_CONFIG_HOME/send-secret/identities`, and gpg.
 - Skipped keys (unsupported SSH types) print a note to stderr.

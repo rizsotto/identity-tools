@@ -25,18 +25,34 @@ interoperates with `gpg` and Go `age`. No network, no UI, no TOFU store yet.
 - [ ] Interop: files from our CLI decrypt with Go `age`, and Go `age` output
   decrypts with our CLI. For each of x25519, SSH Ed25519, SSH RSA.
 - [ ] Both armored text and binary output interoperate.
-- [ ] Multiple recipients work: each recipient can decrypt alone.
-  Refs: UC-8, FR-4
-- [ ] Encrypt-to-self works: OpenPGP adds the user's default secret key, age
-  adds the user's own age identity (created on first run, mode 0600).
-  Refs: SPEC section 4 ("Always add the sender"), section 9 ("Sender recipient")
+- [ ] Several `--to-key` files give one message per recipient, always,
+  even when all share a format. Each recipient can decrypt their own
+  message and cannot decrypt the others'.
+  Refs: UC-8, [FR-11](../../SPEC.md#functional),
+  decision [0002](../../decisions/0002-mixed-recipients.md)
+- [ ] Each message uses that recipient's format: OpenPGP if their key file
+  has an OpenPGP key, else age. A mix of OpenPGP and age recipients works
+  and gives OpenPGP and age outputs. `--format` forces one format; a
+  recipient with no key in it is an error that names them. Refs: FR-3, FR-11
+- [ ] Output naming: with one recipient, `-o OUT` is the exact file, or
+  stdout if `-o` is not given. With several recipients, `-o BASE` is
+  required and writes `BASE.<label>.asc` (armored OpenPGP),
+  `BASE.<label>.gpg` (binary OpenPGP) or `BASE.<label>.age`. The label is
+  the key file name without its extension. Stdout or stdin with several
+  recipients is a usage error (exit 2). Stderr lists each output and who
+  it is for. Refs: FR-11
+- [ ] A key file with several keys of the chosen format (for example an
+  `authorized_keys` list) gives one message that each of those keys can
+  open. Refs: FR-4
+- [ ] Encrypt-to-self works in every message: OpenPGP messages add the
+  user's default secret key, age messages add the user's own age identity
+  (created on first run, mode 0600). `--no-self` turns it off.
+  Refs: SPEC section 4 ("Always add the sender"), section 9 ("Sender
+  recipient"), decision 0002 (sub-decision, applied default)
 - [ ] OpenPGP output is signed, and decrypt reports the verified signer.
   Refs: UC-7, FR-7
 - [ ] Decrypt detects the format (OpenPGP armor, age armor, binary).
   Refs: FR-7
-- [ ] Mixed OpenPGP and age recipients are refused with a clear error. The
-  final behavior is decision [0002](../../decisions/0002-mixed-recipients.md),
-  deferred to M3.
 - [ ] No plaintext in temp files. Files stream from source to output. Plaintext
   buffers are zeroed. Refs: [S-4](../../SPEC.md#10-security-rules-must),
   [S-5](../../SPEC.md#10-security-rules-must), FR-8, NFR-3

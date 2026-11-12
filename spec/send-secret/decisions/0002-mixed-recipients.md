@@ -1,9 +1,8 @@
 # 0002: Mixed OpenPGP and age recipients
 
-- Status: deferred (research done, decide before M3)
-- Blocks: M3 Send flow. M1 only needs one format per message: a mix of
-  formats is refused with a clear error. That meets the M1 criteria.
-- SPEC refs: section 16 question 2, section 7 (crypto facade), FR-3, UC-8
+- Status: accepted (2026-11-12)
+- Blocks: nothing now. M1 builds it (one message per recipient).
+- SPEC refs: section 16 question 2, section 7 (crypto facade), FR-3, FR-11, UC-8
 
 ## Question
 
@@ -17,9 +16,8 @@ pass a mix. The answer also decides the facade shape: `encrypt` returns one
 `Output` (force one format) or a list of outputs (two outputs). Encrypt-to-self
 is part of this too, since the sender may need a key in both formats.
 
-Interim rule until this is accepted: the CLI and the facade refuse a mixed
-set with a clear error that names the recipients of each format. This keeps
-both answers open. M1 can be accepted with this rule if the human agrees.
+The old interim rule (refuse a mixed set with an error) is gone. See "Human
+decision" at the end.
 
 ## Context
 
@@ -206,6 +204,10 @@ Cons:
 
 ## Preferred option and why
 
+> Research note, kept for the record. The human picked a different answer:
+> one message per recipient, always. See "Human decision" below. The M1 and
+> M3 sketches in this section are replaced by that section.
+
 **E, with the split (A) as its fallback. The CLI refuses the split unless
 asked (D-style), the app does the split with a clear notice.**
 
@@ -331,11 +333,65 @@ Unverified, check before relying on it:
 
 ## Human decision
 
-Pending. Points to decide:
-1. Accept E with split fallback, or pick another option.
-2. CLI default on a mix: refuse unless `--split` (proposed), or split by
-   default like the app.
-3. People who have both formats in a split: FR-3 order (proposed, simpler) or
-   always put them in the OpenPGP group (more signed output).
-4. Whether `--split` ships in M1, or M1 keeps only the refusal and `plan()`,
-   with `--split` added in M3.
+> "generate separate messages for each recipient"
+
+Date: 2026-11-12. This is close to option A, but split by person, not by
+format. It is not one of the listed options as written.
+
+### How it was applied
+
+1. **One message per recipient, always.** Every recipient gets their own
+   message: their own output file, or their own clipboard block in the app.
+   This holds even when all recipients share a format. There is no "mixed
+   set" case any more, so the old interim refusal is gone.
+2. **Format per recipient.** Each message uses the best format for that
+   recipient by FR-3: OpenPGP if the recipient has an OpenPGP key, else age.
+   A forced format (`--format`) applies to all; a recipient with no key in
+   that format is an error that names them. A recipient with no usable key
+   at all is an error that names them. Nobody is dropped silently.
+3. **Privacy gain.** A message names only its own recipient (and the
+   sender, see below). Recipients cannot see who else got the secret. This
+   fixes the metadata issue in Context: no shared OpenPGP key ID list, and
+   no SSH tags of other people.
+4. **One person's several keys stay in one message.** If one recipient has
+   several keys of the chosen format (FR-4, for example a GitHub `.keys`
+   list), they all go into that recipient's message, so any of their devices
+   can open it.
+5. **Signing differs per message.** OpenPGP messages are signed, age
+   messages are not. Each result shows its own sign status.
+
+### Sub-decision: encrypt-to-self (applied default, confirm)
+
+**Applied default, please confirm.** The sender's own key is added to every
+per-recipient message, in that message's format: the default OpenPGP secret
+key for OpenPGP messages, the sender's age identity for age messages
+(SPEC section 4, section 9). `--no-self` turns it off for all messages.
+
+Why: SPEC section 4 says always add the sender (on by default), and nothing
+in the spec argues against it here. It does not hurt privacy: an OpenPGP
+message is signed by the sender anyway, and age X25519 stanzas do not name
+the key. The cost is one extra stanza per message.
+
+Not decided here (it exists without this decision too): what to do when the
+sender has no OpenPGP secret key and a recipient gets OpenPGP.
+
+### What it means for M1
+
+- Facade: `encrypt` makes one message for one recipient (plus the sender).
+  `encrypt_each` runs it for every recipient and returns one result per
+  recipient. See `milestones/M1/plan.md`.
+- CLI: several `--to-key` files give one output per recipient.
+  `-o BASE` writes `BASE.<label>.asc` (armored OpenPGP), `BASE.<label>.gpg`
+  (binary OpenPGP) or `BASE.<label>.age`. The label is the key file name
+  without its extension. Stdout is allowed only with one recipient. Stdin
+  with several recipients is a usage error in M1 (the input must be read
+  once per message, and we do not buffer it).
+
+### What it means for M3
+
+- The Send flow shows one result per recipient, each with its own copy
+  button, the recipient's name and the format. Only OpenPGP results show a
+  signature line.
+- Pasted text is encrypted once per recipient from the zeroized in-memory
+  buffer the app already holds. Files are opened once per recipient.
+- The label comes from the contact name or the key's user ID.

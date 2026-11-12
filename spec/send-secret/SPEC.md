@@ -73,7 +73,7 @@ The same app opens secrets sent to you.
 - Text output: ASCII-armored (OpenPGP armor or age armor). File output: `.age` or `.asc` / `.gpg`.
 - A "how to open" note, generated per format.
 - Decrypt mode: paste text or drop a file. Uses the user's GnuPG keys or age/SSH identities.
-- Multiple recipients. Always add the sender as a recipient too (on by default), so you can read what you sent.
+- Multiple recipients: every recipient gets their own message, in the best format for them (FR-3, FR-11). Recipients cannot see who else got it. Always add the sender to each message too (on by default), so you can read what you sent.
 - Clipboard auto-clear (default 60 seconds, can be turned off).
 - File manager integration that works everywhere: drag-and-drop onto the window, and a desktop "Open With" entry (MIME types for `.age`, `.asc`, `.gpg` to open/decrypt). An "Encrypt for…" Nautilus menu entry is optional extra for GNOME users.
 - Runs on GNOME and Niri (tier 1), with best effort on Sway/Hyprland and KDE (section 7.1).
@@ -100,7 +100,7 @@ The same app opens secrets sent to you.
 ### Functional
 - **FR-1** The recipient box accepts: an email, `github:user`, `gitlab:user`, `gitlab:host/user`, a contact name, a fingerprint, or a pasted key. The type is detected automatically.
 - **FR-2** For each candidate key, show: source, key type, fingerprint (short and full), creation date, and whether it is pinned, new or changed.
-- **FR-3** Format choice: if the recipient has an OpenPGP key, use OpenPGP (sign + encrypt). Else if they have age or SSH keys, use age. The user can switch.
+- **FR-3** Format choice, per recipient: if the recipient has an OpenPGP key, use OpenPGP (sign + encrypt). Else if they have age or SSH keys, use age. The user can switch.
 - **FR-4** GitHub/GitLab `.keys` can list several keys. Encrypt to all supported ones (any of their devices can open it). Skip unsupported types with a note (for example ECDSA and `sk-` keys are not age recipients).
 - **FR-5** TOFU: on first use, show the fingerprint and ask "Use this key for Alice?". Store the pin. On change: block with a red warning, show old and new fingerprints, and require an explicit "I verified the new key" action.
 - **FR-6** Output text has a short header the user can remove: `Encrypted for Alice (github:alice) with age. Open with: Send Secret, or 'age -d -i ~/.ssh/id_ed25519'.`
@@ -108,6 +108,7 @@ The same app opens secrets sent to you.
 - **FR-8** Plaintext is never written to disk, except when the user saves a decrypted file explicitly.
 - **FR-9** Clipboard: copy output, then clear after the timeout only if the clipboard still holds our content.
 - **FR-10** Large content: if the armored text is longer than a configurable limit (default 20,000 characters), suggest file output instead.
+- **FR-11** Several recipients: make one message per recipient, always, even when they all share a format. Each message uses that recipient's format (FR-3) and holds only that recipient's keys plus the sender's. Each result names its recipient. A recipient with no usable key is an error that names them; never drop one silently. See [decision 0002](decisions/0002-mixed-recipients.md).
 
 ### Non-functional
 - **NFR-1** The whole send flow takes at most 3 interactions for a known contact.
@@ -134,6 +135,7 @@ The same app opens secrets sent to you.
 │                         [ Encrypt and copy ]               │
 └────────────────────────────────────────────────────────────┘
 ```
+- Several recipients: the result shows one block per recipient, each with the recipient's name, the format and its own copy button (FR-11). The output header (FR-6) names that recipient.
 - "Open" tab: one big paste/drop area. The result appears below, with a sign status line for OpenPGP ("Signed by Bob, key pinned ✓").
 - The key change warning is a full-width red banner (AdwBanner) plus a dialog. It is never a small toast.
 
@@ -165,10 +167,10 @@ Resolution runs the sources that accept the query in parallel, with a timeout pe
 Crypto facade:
 ```rust
 pub enum Recipient { OpenPgp(Cert), Age(age::x25519::Recipient), Ssh(age::ssh::Recipient) }
-pub fn encrypt(input: Input, recipients: &[Recipient], opts: EncryptOpts) -> Result<Output>;
+pub fn encrypt(input: Input, keys: &[Recipient], opts: EncryptOpts) -> Result<Output>;  // one message: one recipient's keys (+ sender)
 pub fn decrypt(input: Input, ctx: &DecryptCtx) -> Result<Decrypted>;  // includes signer info
 ```
-OpenPGP and age recipients cannot be mixed in one output. If the user picks a mix, produce two outputs or ask the user to choose (see 16).
+Every recipient gets their own message (FR-11), so OpenPGP and age keys never mix in one output. The caller runs `encrypt` once per recipient and gets one result per recipient. See [decision 0002](decisions/0002-mixed-recipients.md).
 
 ### 7.1 Desktop compatibility
 
@@ -213,7 +215,7 @@ OpenPGP and age recipients cannot be mixed in one output. If the user picks a mi
 - **GitHub:** `https://github.com/<user>.keys` returns `authorized_keys` lines. `https://github.com/<user>.gpg` returns armored keys (may be empty). No token needed. Handle rate limits politely.
 - **SSH key caveats** (show as info text when an SSH recipient is used): people may treat SSH keys as short-lived login keys and may rotate them, and keys on hardware tokens cannot decrypt age files ([age README](https://github.com/FiloSottile/age)).
 - **Armor:** OpenPGP armor lines are 64 characters wide. Age armor is PEM-like. Both paste fine into Slack code blocks. Wrap the output in triple backticks when copying, as an option (on by default), so chat apps don't reformat it.
-- **Sender recipient:** in OpenPGP mode use the user's default secret key. In age mode generate an age identity for the user on first run (stored with 0600 permissions, optionally passphrase-protected) and add it as a recipient.
+- **Sender recipient:** in OpenPGP mode use the user's default secret key. In age mode generate an age identity for the user on first run (stored with 0600 permissions, optionally passphrase-protected) and add it as a recipient. With several recipients the sender is added to every message, in that message's format.
 - **Decrypt identities for age:** read SSH private keys only when decrypting, and prompt for the passphrase with a libadwaita dialog. Never cache passphrases longer than the operation.
 
 ---
@@ -255,7 +257,7 @@ send-secret/
 ### M1: Crypto core + CLI
 - `send-secret encrypt --to-key alice.pub -i msg.txt` and `decrypt` work for OpenPGP and age (x25519, SSH Ed25519, SSH RSA).
 - Interop: files from our CLI decrypt with `gpg` and Go `age`, and the reverse.
-- Multiple recipients and encrypt-to-self work.
+- Multiple recipients work, one message per recipient (FR-11), and encrypt-to-self works in each message.
 
 ### M2: Resolver + trust
 - All sources in 4 work against the mocks, merged and ordered.
@@ -263,7 +265,7 @@ send-secret/
 - TOFU: first use, same key, changed key (blocked), accepted change (history kept).
 
 ### M3: App
-- Send and Open flows as in 6. Clipboard auto-clear. Large-content suggestion.
+- Send and Open flows as in 6. With several recipients, one result and one copy button per recipient. Clipboard auto-clear. Large-content suggestion.
 - Key change banner and dialog.
 - Keyboard-only and Orca walkthrough.
 
@@ -312,7 +314,7 @@ send-secret/
 ## 16. Open questions for the human
 
 1. Final name and app ID.
-2. Mixed recipients (one with OpenPGP, one with only SSH keys): produce two outputs, or force one format? See `spec/send-secret/decisions/0002-mixed-recipients.md`.
+2. ~~Mixed recipients: produce two outputs, or force one format?~~ Answered 2026-11-12: one message per recipient, always. See [decision 0002](decisions/0002-mixed-recipients.md).
 3. Should age mode offer an optional SSH signature in v1 (non-standard for age, but it proves the sender)?
 4. Default clipboard clear time (proposed 60 s).
 5. Is a web decryptor for recipients without the app worth doing early? It helps adoption a lot.

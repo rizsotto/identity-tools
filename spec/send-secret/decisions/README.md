@@ -8,7 +8,7 @@ See "Blocked on a decision" in `../../workflow.md`.
 
 | No. | Title | Status | Blocks |
 |---|---|---|---|
-| [0002](0002-mixed-recipients.md) | Mixed OpenPGP and age recipients (SPEC 16 q2) | deferred | M3 (M1 refuses a mix of formats) |
+| [0002](0002-mixed-recipients.md) | Mixed OpenPGP and age recipients (SPEC 16 q2) | accepted (2026-11-12): one message per recipient | nothing (built in M1) |
 
 ## Pending (SPEC section 16, no record yet)
 
