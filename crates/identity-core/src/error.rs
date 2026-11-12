@@ -55,3 +55,12 @@ impl From<gpgme::Error> for GpgError {
         GpgError::Gpgme(e.to_string())
     }
 }
+
+/// Why WKD URLs cannot be built for an address. Fixed text, never the input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum WkdError {
+    #[error("not an email address")]
+    NotAnAddress,
+    #[error("the address's domain is not a plain ASCII host name")]
+    BadDomain,
+}
