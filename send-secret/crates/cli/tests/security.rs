@@ -4,9 +4,11 @@
 
 mod common;
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use common::{TestEnv, assert_success, fixture, marker, run_with_input};
 
@@ -17,10 +19,18 @@ fn stderr(out: &Output) -> String {
 }
 
 /// Our binary with `TMPDIR` inside the env, so its temp files can be
-/// scanned too.
-fn ours(env: &TestEnv) -> Command {
-    let mut cmd = env.ours();
-    cmd.env("TMPDIR", env.path("tmp"));
+/// scanned too, run under `strace`. Every file our binary or its children
+/// (gpg) create is logged to a new file in `trace`.
+fn ours(env: &TestEnv, trace: &Path) -> Command {
+    static RUNS: AtomicUsize = AtomicUsize::new(0);
+    let log = trace.join(RUNS.fetch_add(1, Ordering::Relaxed).to_string());
+    let mut cmd = env.command("strace");
+    cmd.args(["-f", "-qq", "-y", "-e", "trace=open,openat,openat2,creat"])
+        .args(["-e", "status=successful", "-o"])
+        .arg(log)
+        .arg("--")
+        .arg(env!("CARGO_BIN_EXE_send-secret"))
+        .env("TMPDIR", env.path("tmp"));
     cmd
 }
 
@@ -40,6 +50,10 @@ struct Session {
 }
 
 impl Session {
+    fn trace_dir(&self) -> PathBuf {
+        self._inputs.path().join("trace")
+    }
+
     fn run(&mut self, what: &str, cmd: &mut Command, ok: bool) -> Output {
         let out = cmd.output().unwrap();
         self.check(what, &out, ok);
@@ -67,6 +81,16 @@ fn session() -> Session {
         .prefix("ss-input-")
         .tempdir()
         .unwrap();
+    let trace = inputs.path().join("trace");
+    fs::create_dir(&trace).unwrap();
+    // Started before the traced runs, so gpg finds it and does not start
+    // its own (a traced daemon would keep strace waiting).
+    let out = env
+        .command("gpgconf")
+        .args(["--launch", "gpg-agent"])
+        .output()
+        .unwrap();
+    assert_success(&out, "gpgconf --launch gpg-agent");
     let secret = marker();
     let msg = inputs.path().join("msg.txt");
     fs::write(&msg, format!("password: {secret}\n")).unwrap();
@@ -92,7 +116,7 @@ fn session() -> Session {
 
     // Encrypt: three recipients, OpenPGP self copy; armored; age self copy.
     let mut runs: Vec<(&str, Command)> = Vec::new();
-    let mut cmd = ours(env);
+    let mut cmd = ours(env, &trace);
     cmd.args(["encrypt", "--to-key", &key("openpgp/alice.asc")])
         .args(["--to-key", &key("ssh/erin_ed25519.pub")])
         .args(["--to-key", &key("age/dave.pub"), "-i"])
@@ -100,14 +124,14 @@ fn session() -> Session {
         .arg("-o")
         .arg(o("m"));
     runs.push(("encrypt three", cmd));
-    let mut cmd = ours(env);
+    let mut cmd = ours(env, &trace);
     cmd.args(["encrypt", "--armor", "--to-key", &key("openpgp/alice.asc")])
         .args(["--to-key", &key("age/dave.pub"), "-i"])
         .arg(&msg)
         .arg("-o")
         .arg(o("a"));
     runs.push(("encrypt armored", cmd));
-    let mut cmd = ours(env);
+    let mut cmd = ours(env, &trace);
     cmd.args([
         "encrypt",
         "--format",
@@ -120,7 +144,7 @@ fn session() -> Session {
     .arg("-o")
     .arg(o("big.age"));
     runs.push(("encrypt age self copy", cmd));
-    let mut cmd = ours(env);
+    let mut cmd = ours(env, &trace);
     cmd.args(["encrypt", "--to-key", &key("openpgp/alice.asc"), "-i"])
         .arg(&big)
         .arg("-o")
@@ -132,13 +156,13 @@ fn session() -> Session {
     let env = &s.env;
 
     // Stdin to stdout.
-    let mut cmd = ours(env);
+    let mut cmd = ours(env, &trace);
     cmd.args(["encrypt", "--to-key", &key("age/dave.pub")]);
     let out = run_with_input(&mut cmd, format!("piped {secret}").as_bytes());
     s.check("encrypt stdin", &out, true);
     let piped = out.stdout;
     let env = &s.env;
-    let mut cmd = ours(env);
+    let mut cmd = ours(env, &trace);
     cmd.args(["decrypt", "--identity", &key("age/dave.txt")]);
     let out = run_with_input(&mut cmd, &piped);
     s.check("decrypt stdin", &out, true);
@@ -158,7 +182,7 @@ fn session() -> Session {
     ];
     for (file, extra) in opens {
         let env = &s.env;
-        let mut cmd = ours(env);
+        let mut cmd = ours(env, &trace);
         cmd.arg("decrypt").arg("-i").arg(o(file)).args(extra);
         let out = s.run(&format!("decrypt {file}"), &mut cmd, true);
         assert!(String::from_utf8_lossy(&out.stdout).contains(&secret));
@@ -175,7 +199,7 @@ fn session() -> Session {
         let damaged = o(&format!("damaged-{file}"));
         fs::write(&damaged, bytes).unwrap();
         let env = &s.env;
-        let mut cmd = ours(env);
+        let mut cmd = ours(env, &trace);
         cmd.arg("decrypt")
             .arg("-i")
             .arg(&damaged)
@@ -185,7 +209,7 @@ fn session() -> Session {
         s.run(&format!("decrypt damaged {file} to file"), &mut cmd, false);
         assert!(!o("plain-damaged").exists());
         let env = &s.env;
-        let mut cmd = ours(env);
+        let mut cmd = ours(env, &trace);
         cmd.arg("decrypt").arg("-i").arg(&damaged).args(extra);
         s.run(
             &format!("decrypt damaged {file} to stdout"),
@@ -196,7 +220,7 @@ fn session() -> Session {
 
     // Wrong key.
     let env = &s.env;
-    let mut cmd = ours(env);
+    let mut cmd = ours(env, &trace);
     cmd.arg("decrypt")
         .arg("-i")
         .arg(o("m.dave.age"))
@@ -209,7 +233,7 @@ fn session() -> Session {
     let junk_key = s._inputs.path().join("junk.pub");
     fs::write(&junk_key, format!("ssh-ed25519 {secret} comment\n")).unwrap();
     let env = &s.env;
-    let mut cmd = ours(env);
+    let mut cmd = ours(env, &trace);
     cmd.arg("encrypt")
         .arg("--to-key")
         .arg(&junk_key)
@@ -227,7 +251,7 @@ fn session() -> Session {
     )
     .unwrap();
     let env = &s.env;
-    let mut cmd = ours(env);
+    let mut cmd = ours(env, &trace);
     cmd.arg("encrypt")
         .arg("--to-key")
         .arg(&junk_pgp)
@@ -252,7 +276,7 @@ fn session() -> Session {
         let junk = s._inputs.path().join(name);
         fs::write(&junk, text).unwrap();
         let env = &s.env;
-        let mut cmd = ours(env);
+        let mut cmd = ours(env, &trace);
         cmd.arg("decrypt").arg("-i").arg(&junk);
         s.run(&format!("decrypt {name}"), &mut cmd, false);
     }
@@ -293,16 +317,212 @@ fn scan_finds_marker() {
     );
 }
 
+/// Files opened with `O_CREAT`, `O_TMPFILE` or `creat` in the strace logs
+/// in `dir`, as the paths strace shows for the new fds (`-y`). A
+/// `O_TMPFILE` file has no name, so it is reported as `O_TMPFILE <dir>`.
+fn created_files(dir: &Path) -> Vec<String> {
+    let mut found = Vec::new();
+    for entry in fs::read_dir(dir).unwrap() {
+        let log = fs::read_to_string(entry.unwrap().path()).unwrap();
+        // With -f, a call can be split into "<unfinished ...>" and
+        // "<... openat resumed>" lines; join them by pid.
+        let mut pending: HashMap<String, String> = HashMap::new();
+        for line in log.lines() {
+            let (pid, rest) = line.split_once(' ').unwrap_or(("", line));
+            let rest = rest.trim_start();
+            let call = if let Some(head) = rest.strip_suffix(" <unfinished ...>") {
+                pending.insert(pid.to_owned(), head.to_owned());
+                continue;
+            } else if rest.starts_with("<... ") {
+                let tail = rest.split_once("resumed>").map_or("", |(_, t)| t);
+                pending.remove(pid).unwrap_or_default() + tail
+            } else {
+                rest.to_owned()
+            };
+            let creates = call.starts_with("creat(")
+                || ["open(", "openat(", "openat2("]
+                    .iter()
+                    .any(|c| call.starts_with(c))
+                    && (call.contains("O_CREAT") || call.contains("O_TMPFILE"));
+            if !creates {
+                continue;
+            }
+            let ret = call.rsplit_once(") = ").map_or("", |(_, r)| r);
+            let path = ret
+                .split_once('<')
+                .and_then(|(_, p)| p.rsplit_once('>'))
+                .map_or(call.as_str(), |(p, _)| p);
+            if call.contains("O_TMPFILE") {
+                found.push(format!("O_TMPFILE {path}"));
+            } else {
+                found.push(path.to_owned());
+            }
+        }
+    }
+    found
+}
+
+/// The files a session may create: outputs (incl. decrypted `-o` files
+/// that failed runs remove), recipient key files in their own temp dirs,
+/// the self identity, and gpg's own files in `GNUPGHOME`.
+fn allowed_creation(env: &TestEnv, path: &str) -> bool {
+    let path = Path::new(path);
+    let tmp = env.path("tmp");
+    let name = path
+        .file_name()
+        .map_or(String::new(), |n| n.to_string_lossy().into_owned());
+    let under = |dir: &Path| path.starts_with(dir);
+    let tmp_child = path
+        .strip_prefix(&tmp)
+        .ok()
+        .and_then(|p| p.components().next())
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let gpg_file = [
+        "pubring.kbx",
+        "trustdb.gpg",
+        "random_seed",
+        ".#lk",
+        "S.gpg-agent",
+        "tofu.db",
+    ]
+    .iter()
+    .any(|p| name.starts_with(p))
+        || name.ends_with(".lock");
+    path == Path::new("/dev/null")
+        || path == Path::new("/dev/tty")
+        || under(&env.path("out"))
+        || under(&env.config_home().join("send-secret"))
+        || (under(&tmp)
+            && ["ic-recp", "ss-split"]
+                .iter()
+                .any(|p| tmp_child.starts_with(p)))
+        || (path.parent() == Some(&env.gnupg_home()) && gpg_file)
+}
+
+/// Regular files under the shared temp dirs that contain `needle`.
+/// Unreadable or vanishing entries (other tests run at the same time) are
+/// skipped, and so is `skip`.
+fn shared_files_containing(dirs: &[PathBuf], skip: &Path, needle: &[u8]) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut todo: Vec<PathBuf> = dirs.to_vec();
+    while let Some(dir) = todo.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path == skip {
+                continue;
+            }
+            match entry.file_type() {
+                Ok(t) if t.is_dir() => todo.push(path),
+                Ok(t) if t.is_file() => {
+                    if let Ok(bytes) = fs::read(&path)
+                        && bytes.windows(needle.len()).any(|w| w == needle)
+                    {
+                        found.push(path);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    found
+}
+
+#[test]
+fn shared_scan_finds_dev_shm() {
+    let secret = marker();
+    let file = PathBuf::from(format!("/dev/shm/ss-scan-test-{secret}"));
+    fs::write(&file, &secret).unwrap();
+    let skip = tempfile::tempdir().unwrap();
+    let found =
+        shared_files_containing(&[PathBuf::from("/dev/shm")], skip.path(), secret.as_bytes());
+    fs::remove_file(&file).unwrap();
+    assert_eq!(found, [file]);
+}
+
+/// S-4 and FR-8: the session writes no plaintext to disk.
+///
+/// - strace logs every file our binary and its children (gpg) create;
+///   any file outside `allowed_creation` fails, even if it was deleted
+///   again, and so does any `O_TMPFILE` file.
+/// - The env root (HOME, GNUPGHOME, XDG dirs, TMPDIR, outputs), the
+///   system temp dir, `/var/tmp` and `/dev/shm` hold no marker at the end.
+///
+/// What it can not catch: plaintext written into an allowed file (an
+/// output path, gpg's own files) other than the ones the marker scan
+/// sees at the end; writes by processes not traced (the gpg-agent is
+/// started before the session, so files it creates are not logged);
+/// writes through fds created other ways (`memfd_create`, `io_uring`,
+/// inherited fds); swap and core dumps.
 #[test]
 fn no_plaintext_on_disk() {
     let s = session();
-    // HOME, GNUPGHOME, the XDG dirs, TMPDIR and the output dir all live
-    // under the env root.
+    let created = created_files(&s.trace_dir());
+    // The trace covered our binary: outputs and recipient key files.
+    for want in ["/out/m.alice.gpg", "/out/plain-damaged", "/tmp/ic-recp"] {
+        assert!(
+            created.iter().any(|p| p.contains(want)),
+            "{want}: {created:?}"
+        );
+    }
+    let bad: Vec<&String> = created
+        .iter()
+        .filter(|p| !allowed_creation(&s.env, p))
+        .collect();
+    assert!(bad.is_empty(), "unexpected files created: {bad:?}");
+
     let found = files_containing(s.env.root(), s.secret.as_bytes());
+    assert!(found.is_empty(), "plaintext found in {found:?}");
+    let shared = [
+        std::env::temp_dir(),
+        PathBuf::from("/var/tmp"),
+        PathBuf::from("/dev/shm"),
+    ];
+    let found = shared_files_containing(&shared, s._inputs.path(), s.secret.as_bytes());
     assert!(found.is_empty(), "plaintext found in {found:?}");
     // Nothing is left in TMPDIR (the OpenPGP key files are removed).
     let left: Vec<_> = fs::read_dir(s.env.path("tmp")).unwrap().collect();
     assert!(left.is_empty(), "{left:?}");
+}
+
+#[test]
+fn trace_sees_created_files() {
+    // The strace check itself works: a file created and deleted again by a
+    // traced child, and one in /dev/shm, are both reported.
+    let env = TestEnv::new();
+    let trace = tempfile::tempdir().unwrap();
+    fs::create_dir(env.path("tmp")).unwrap();
+    let shm = format!("/dev/shm/ss-trace-test-{}", marker());
+    let mut cmd = ours(&env, trace.path());
+    let script = format!("echo x > tmp/leak; rm tmp/leak; echo x > {shm}; rm {shm}");
+    cmd.args(["--version"]);
+    let out = cmd.output().unwrap();
+    assert_success(&out, "traced --version");
+    let out = env
+        .command("strace")
+        .args(["-f", "-qq", "-y", "-e", "trace=open,openat,openat2,creat"])
+        .args(["-e", "status=successful", "-o"])
+        .arg(trace.path().join("sh"))
+        .args(["--", "sh", "-c", &script])
+        .output()
+        .unwrap();
+    assert_success(&out, "traced sh");
+    let created = created_files(trace.path());
+    let leak = env.path("tmp/leak");
+    assert!(
+        created.contains(&leak.to_string_lossy().into_owned()),
+        "{created:?}"
+    );
+    assert!(created.contains(&shm), "{created:?}");
+    assert!(!allowed_creation(&env, leak.to_str().unwrap()));
+    assert!(!allowed_creation(&env, &shm));
+    assert!(allowed_creation(
+        &env,
+        env.path("out/m.age").to_str().unwrap()
+    ));
 }
 
 #[test]

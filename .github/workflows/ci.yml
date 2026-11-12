@@ -17,6 +17,7 @@ jobs:
             id
             getent passwd "$(id -un)"
             stat -c '%u %g %a %n' "$PWD" "$(dirname "$PWD")" /
+            .github/ci/check-tests-ran-selftest.sh
             cargo fmt --all -- --check
             cargo clippy --locked --workspace --all-targets -- -D warnings
             cargo test --locked --workspace 2>&1 | tee target/test.log

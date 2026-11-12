@@ -9,7 +9,7 @@ log=$1
 # Minimum test count per suite. Raise it when you add tests.
 declare -A want=(
     [send-secret/crates/cli/tests/interop.rs]=11
-    [send-secret/crates/cli/tests/security.rs]=4
+    [send-secret/crates/cli/tests/security.rs]=6
 )
 
 fail=0
@@ -23,6 +23,7 @@ for suite in "${!want[@]}"; do
     fi
     result=$(awk -v s="Running $short " '
         index($0, s) { found = 1; next }
+        found && /^ *(Running|Doc-tests) / { exit }
         found && /^test result:/ { print; exit }
     ' "$log")
     if [[ -z $result ]]; then

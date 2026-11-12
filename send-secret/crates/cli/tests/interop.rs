@@ -467,16 +467,16 @@ fn interop_per_recipient_outputs() {
         let out = gpg_decrypt(&alice, &to_dave);
         assert!(!out.status.success());
         assert!(out.stdout.is_empty());
-        let out = age_decrypt(&alice, &dave, &to_alice);
+        let other = alice.private_copy("ssh/erin_ed25519");
+        let out = age_decrypt(&alice, &other, &to_dave);
         assert!(!out.status.success());
+        assert!(out.stdout.is_empty());
         let out = gpg_decrypt(&alice, &to_self);
         assert!(!out.status.success());
         assert!(out.stdout.is_empty());
         let out = gpg_decrypt(&from, &to_alice);
         assert!(!out.status.success());
         assert!(out.stdout.is_empty());
-        let out = age_decrypt(&from, &dave, &to_self);
-        assert!(!out.status.success());
     }
 }
 
