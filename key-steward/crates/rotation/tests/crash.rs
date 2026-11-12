@@ -24,20 +24,19 @@ const ID: RotationId = 1;
 enum Scenario {
     /// The full rotation.
     Forward,
-    /// The removal at `srv-b` fails, then abort with rollback: config
-    /// restore and one rollback; the other locations keep the new key.
+    /// Every removal fails, then abort with rollback: config restore,
+    /// then a rollback at every location.
     Abort,
 }
 
 fn fixture(s: Scenario) -> Fixture {
     let f = Fixture::new();
     if s == Scenario::Abort {
-        f.world
-            .faults
-            .lock()
-            .unwrap()
-            .remove_fails
-            .insert("srv-b".into());
+        let mut faults = f.world.faults.lock().unwrap();
+        for (target, ..) in common::sites() {
+            faults.remove_fails.insert(target.label());
+        }
+        drop(faults);
     }
     f
 }

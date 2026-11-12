@@ -18,7 +18,7 @@ use inventory::{
 use providers::{AddOpts, KeyRef, Provider, ProviderError, PublicKeyRef, RemoveOpts, VerifyStatus};
 use rotation::{
     Confirm, Crash, Ctx, Engine, EngineEnv, EngineError, Hooks, JournalPoint, KeyPresence,
-    Passphrase, Providers, Removed, RotationLock, Summary,
+    OldKeyCheck, Passphrase, Providers, Removed, RotationLock, Summary,
 };
 use test_support::TempHome;
 
@@ -63,6 +63,9 @@ pub struct Faults {
     /// GitLab adds the new key for the one purpose asked, not like the
     /// old key's object.
     pub gitlab_add_one_purpose: bool,
+    /// What `check_old_key` says at an SSH site. Default: `Refused` if
+    /// the old key is gone, else `StillAccepted`.
+    pub old_key_check: HashMap<String, OldKeyCheck>,
 }
 
 #[derive(Default)]
@@ -351,6 +354,38 @@ impl Providers for MockProviders {
         self.map.get(&kind).map(|p| p as &dyn Provider)
     }
 
+    async fn list_as(
+        &self,
+        kind: LocationKind,
+        target: &Target,
+        login: &KeyRef,
+    ) -> Result<Vec<PublicKeyRef>, ProviderError> {
+        let site = target.label();
+        if kind == LocationKind::SshServer
+            && !self.world.has(&site, &login.fingerprint, Purpose::SshAuth)
+        {
+            return Err(fail("the login key is not accepted"));
+        }
+        self.map[&kind].list(target).await
+    }
+
+    async fn check_old_key(
+        &self,
+        _kind: LocationKind,
+        target: &Target,
+        old: &KeyRef,
+    ) -> Result<OldKeyCheck, ProviderError> {
+        let site = target.label();
+        if let Some(c) = self.world.faults.lock().unwrap().old_key_check.get(&site) {
+            return Ok(c.clone());
+        }
+        Ok(if self.world.has(&site, &old.fingerprint, old.purpose) {
+            OldKeyCheck::StillAccepted
+        } else {
+            OldKeyCheck::Refused
+        })
+    }
+
     async fn remove_key(
         &self,
         kind: LocationKind,
@@ -482,6 +517,14 @@ pub fn fingerprint(pub_path: &Path) -> Fingerprint {
 
 pub const CONFIG: &str =
     "Host srv-a\n    IdentityFile ~/.ssh/id_old\nHost srv-b\n    IdentityFile ~/.ssh/id_old\n";
+
+/// [`CONFIG`] after the config step: the new key above the old one.
+pub const CONFIG_BOTH: &str = "Host srv-a\n    IdentityFile ~/.ssh/id_new\n    IdentityFile ~/.ssh/id_old\n\
+                               Host srv-b\n    IdentityFile ~/.ssh/id_new\n    IdentityFile ~/.ssh/id_old\n";
+
+/// [`CONFIG`] after retire: only the new key.
+pub const CONFIG_NEW: &str =
+    "Host srv-a\n    IdentityFile ~/.ssh/id_new\nHost srv-b\n    IdentityFile ~/.ssh/id_new\n";
 
 /// A temp home with an old key, a database with its locations, a mock
 /// world holding the old key, and an ssh config naming it.

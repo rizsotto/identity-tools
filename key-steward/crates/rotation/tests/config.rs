@@ -5,8 +5,8 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use rotation::{
-    ConfigError, LineChange, apply_config_update, backup_path, plan_config_update, restore_config,
-    update_text,
+    ConfigError, ConfigMode, LineChange, apply_config_update, backup_path, change_text,
+    plan_config_change, plan_config_update, restore_config, restore_config_change, update_text,
 };
 use test_support::TempHome;
 
@@ -285,4 +285,93 @@ fn restore_goes_on_after_a_changed_file() {
     assert_eq!(fs::read_to_string(&a).unwrap(), "mine\n");
     assert_eq!(fs::read_to_string(&b).unwrap(), text);
     assert_eq!(fs::read_to_string(&c).unwrap(), text);
+}
+
+#[test]
+fn insert_above_then_remove_paired_is_byte_exact() {
+    let text = "Host a\r\n  IdentityFile ~/.ssh/id_work\r\nHost b\n\tidentityfile=\"/home/t/.ssh/id_work\" # q\n\
+                Host c\n    IdentityFile ~/.ssh/other\nHost d\n    IdentityFile ~/.ssh/id_work";
+    let both = change_text(
+        text,
+        &old(),
+        &new(),
+        Path::new(HOME),
+        ConfigMode::InsertAbove,
+    );
+    assert_eq!(
+        both.updated,
+        "Host a\r\n  IdentityFile ~/.ssh/id_work-20261112\r\n  IdentityFile ~/.ssh/id_work\r\nHost b\n\
+         \tidentityfile=\"/home/t/.ssh/id_work-20261112\" # q\n\tidentityfile=\"/home/t/.ssh/id_work\" # q\n\
+         Host c\n    IdentityFile ~/.ssh/other\nHost d\n    IdentityFile ~/.ssh/id_work-20261112\n\
+         \x20   IdentityFile ~/.ssh/id_work"
+    );
+    assert_eq!(both.changes.len(), 3);
+    let back = change_text(
+        &both.updated,
+        &old(),
+        &new(),
+        Path::new(HOME),
+        ConfigMode::RemovePaired,
+    );
+    assert_eq!(
+        back.updated,
+        update_text(text, &old(), &new(), Path::new(HOME)).updated,
+        "only the paired old lines go"
+    );
+}
+
+#[test]
+fn remove_paired_keeps_unpaired_old_lines() {
+    let text = "Host a\n    IdentityFile ~/.ssh/id_work-20261112\n    IdentityFile ~/.ssh/id_work\n\
+                Host b\n    IdentityFile ~/.ssh/id_work\n";
+    let u = change_text(
+        text,
+        &old(),
+        &new(),
+        Path::new(HOME),
+        ConfigMode::RemovePaired,
+    );
+    assert_eq!(
+        u.updated,
+        "Host a\n    IdentityFile ~/.ssh/id_work-20261112\nHost b\n    IdentityFile ~/.ssh/id_work\n"
+    );
+    assert_eq!(u.changes.len(), 1);
+    assert_eq!(u.changes[0].line, 3);
+}
+
+#[test]
+fn restore_after_insert_above_gives_original_back() {
+    let home = TempHome::new(BASE);
+    let cfg = home.path().join("config");
+    let old = home.path().join(".ssh/id_work");
+    let new = home.path().join(".ssh/id_work-new");
+    let text = "Host a\n    IdentityFile ~/.ssh/id_work\n";
+    fs::write(&cfg, text).unwrap();
+    let files = vec![cfg.clone()];
+    let plan = plan_config_change(
+        &files,
+        &old,
+        &new,
+        home.path(),
+        "s1",
+        ConfigMode::InsertAbove,
+    )
+    .unwrap();
+    assert!(plan.diff().contains("-    IdentityFile ~/.ssh/id_work\n+    IdentityFile ~/.ssh/id_work-new\n+    IdentityFile ~/.ssh/id_work\n"), "{}", plan.diff());
+    apply_config_update(&plan, "s1").unwrap();
+    assert!(
+        fs::read_to_string(&cfg)
+            .unwrap()
+            .contains("id_work-new\n    IdentityFile ~/.ssh/id_work\n")
+    );
+    restore_config_change(
+        &files,
+        &old,
+        &new,
+        home.path(),
+        "s1",
+        ConfigMode::InsertAbove,
+    )
+    .unwrap();
+    assert_eq!(fs::read_to_string(&cfg).unwrap(), text);
 }

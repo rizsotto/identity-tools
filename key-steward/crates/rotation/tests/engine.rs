@@ -6,7 +6,7 @@ use std::fs;
 
 use common::{Fixture, Op, Recorder, assert_removals_after_fresh_verify};
 use inventory::{Event, LocationKind, Phase, Purpose, SshHost, Step, Target};
-use rotation::{CA_REASON, Ending, NoHooks, Point};
+use rotation::{CA_REASON, Ending, NoHooks, OldKeyCheck, Point, STILL_ACCEPTED, UNCHECKED};
 
 fn step_order(steps: &[inventory::StepEntry]) -> Vec<(Step, Event)> {
     steps.iter().map(|e| (e.step, e.event)).collect()
@@ -85,12 +85,9 @@ async fn rotation_runs_all_steps_with_mocks() {
     assert_eq!(rows.len(), n);
     assert!(rows.iter().all(|r| r.status == inventory::Status::Verified));
 
-    // Config updated, old key files retired, rotation finished.
+    // Config: new line added, then the paired old line dropped at retire.
     let config = fs::read_to_string(f.home.ssh_dir().join("config")).unwrap();
-    assert!(
-        config.contains("~/.ssh/id_new") && !config.contains("id_old\n"),
-        "{config}"
-    );
+    assert_eq!(config, common::CONFIG_NEW);
     assert!(!f.old_path.exists());
     assert!(f.home.ssh_dir().join("retired/id_old").exists());
     assert!(f.home.ssh_dir().join("retired/id_old.pub").exists());
@@ -198,7 +195,7 @@ async fn gitlab_shared_key_waits_for_both_purposes() {
 }
 
 #[tokio::test]
-async fn failed_verify_keeps_old_key_and_skips_config() {
+async fn failed_verify_keeps_old_key_and_config_has_both_lines() {
     let f = Fixture::new();
     let new_missing = "srv-b".to_string();
     f.world
@@ -223,22 +220,21 @@ async fn failed_verify_keeps_old_key_and_skips_config() {
     // The others went on to removal.
     let others = s.locations.iter().filter(|l| l.target.label() != "srv-b");
     assert!(others.clone().all(|l| l.phase == Phase::OldRemoved));
-    // Config left alone, and the summary says why.
+    // Config has both lines, the new key first: every host works.
     assert_eq!(
         fs::read_to_string(f.home.ssh_dir().join("config")).unwrap(),
-        common::CONFIG
+        common::CONFIG_BOTH
     );
     assert!(
         s.notes
             .iter()
-            .any(|n| n.contains("ssh config not updated") && n.contains("srv-b"))
+            .any(|n| n.starts_with("old key files kept") && n.contains("srv-b"))
     );
     assert!(f.old_path.exists());
     assert_eq!(s.failures.len(), 1);
     assert_eq!(s.failures[0].step, Step::Verify);
 
-    // Retry: verified, old key removed, config still not updated (removals
-    // already ran), retire runs.
+    // Retry: verified, old key removed, retire drops the old lines.
     let s = f
         .with_engine(s.rotation, &NoHooks, true, async |e| {
             e.retry(Some(b.location_id)).await
@@ -249,7 +245,7 @@ async fn failed_verify_keeps_old_key_and_skips_config() {
     assert!(!f.world.has("srv-b", &f.old_fpr, Purpose::SshAuth));
     assert_eq!(
         fs::read_to_string(f.home.ssh_dir().join("config")).unwrap(),
-        common::CONFIG
+        common::CONFIG_NEW
     );
     assert!(!f.old_path.exists());
 }
@@ -312,4 +308,69 @@ async fn same_fingerprint_after_generate_is_refused() {
             .iter()
             .all(|c| c.op != Op::Add && c.op != Op::Remove)
     );
+}
+
+#[tokio::test]
+async fn ssh_old_key_not_refused_blocks_retire() {
+    for (check, want) in [
+        (OldKeyCheck::StillAccepted, STILL_ACCEPTED.to_string()),
+        (
+            OldKeyCheck::Unknown("no answer".into()),
+            format!("{UNCHECKED}: no answer"),
+        ),
+    ] {
+        let f = Fixture::new();
+        f.world
+            .faults
+            .lock()
+            .unwrap()
+            .old_key_check
+            .insert("srv-a".into(), check);
+        let s = f.start(&NoHooks, true).await.unwrap();
+        assert_eq!(s.ending, Ending::Done, "{s:?}");
+        let a = s
+            .locations
+            .iter()
+            .find(|l| l.target.label() == "srv-a")
+            .unwrap();
+        assert_eq!(a.phase, Phase::OldRemoved);
+        assert_eq!(a.reason.as_deref(), Some(want.as_str()));
+        assert!(s.notes.iter().any(|n| n.contains(&want)));
+        assert!(f.old_path.exists(), "no retire");
+        assert_eq!(
+            fs::read_to_string(f.home.ssh_dir().join("config")).unwrap(),
+            common::CONFIG_BOTH
+        );
+    }
+}
+
+#[tokio::test]
+async fn ssh_g_offers_new_key_before_old() {
+    let f = Fixture::new();
+    // Retire declined: both lines stay.
+    let s = f.start(&NoHooks, false).await.unwrap();
+    assert_eq!(s.ending, Ending::Done);
+    let cfg = f.home.ssh_dir().join("config");
+    assert_eq!(fs::read_to_string(&cfg).unwrap(), common::CONFIG_BOTH);
+    let out = std::process::Command::new("ssh")
+        .arg("-G")
+        .arg("-F")
+        .arg(&cfg)
+        .arg("srv-a")
+        .env("HOME", f.home.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let ids: Vec<String> = String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .filter_map(|l| l.strip_prefix("identityfile "))
+        .map(str::to_string)
+        .collect();
+    let pos = |name: &str| ids.iter().position(|i| i.ends_with(name)).unwrap();
+    assert!(pos("/id_new") < pos("/id_old"), "{ids:?}");
 }

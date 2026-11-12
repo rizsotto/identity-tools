@@ -11,11 +11,13 @@ mod lock;
 mod sites;
 
 pub use config::{
-    ConfigError, ConfigPlan, FileUpdate, LineChange, ListedLine, TextUpdate, apply_config_update,
-    backup_path, plan_config_update, restore_config, update_text,
+    ConfigError, ConfigMode, ConfigPlan, FileUpdate, LineChange, ListedLine, TextUpdate,
+    apply_config_update, backup_path, change_text, plan_config_change, plan_config_update,
+    restore_config, restore_config_change, update_text,
 };
 pub use engine::{
-    CA_REASON, Ctx, Ending, Engine, EngineEnv, EngineError, Failure, RotationState, Summary,
+    CA_REASON, Ctx, Ending, Engine, EngineEnv, EngineError, Failure, RotationState, STILL_ACCEPTED,
+    Summary, UNCHECKED,
 };
 pub use files::{Moved, RETIRED_DIR, retire};
 pub use hooks::{Confirm, Crash, Hooks, JournalPoint, NoHooks, Point};
@@ -25,4 +27,4 @@ pub use keygen::{
     generate, recover,
 };
 pub use lock::{LockError, RotationLock};
-pub use sites::{ProviderMap, Providers, Removed};
+pub use sites::{OldKeyCheck, ProviderMap, Providers, Removed};

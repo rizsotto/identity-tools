@@ -12,26 +12,34 @@ use std::time::SystemTime;
 
 use identity_core::{Fingerprint, PublicKey};
 use inventory::{
-    Event, LocationId, NewLocation, NewRotation, Phase, Rotation, RotationId, RotationLocation,
-    Status, Step, StepEntry, Store, StoreError, Target,
+    Event, LocationId, LocationKind, NewLocation, NewRotation, Phase, Rotation, RotationId,
+    RotationLocation, Status, Step, StepEntry, Store, StoreError, Target,
 };
 use providers::{AddOpts, Provider, VerifyStatus};
 
-use crate::config::restore_config;
+use crate::config::{ConfigMode, plan_config_change, restore_config_change};
 use crate::gate::{listed, may_roll_back, roll_back};
 use crate::keygen::{Recovered, recover};
 use crate::lock::RotationLock;
 
-use crate::config::{apply_config_update, plan_config_update};
+use crate::config::apply_config_update;
 use crate::files::{pub_path, retire};
 use crate::gate::{may_remove_old, new_ref, old_ref, remove_old, status_text};
 use crate::hooks::{Confirm, Crash, Hooks, JournalPoint, Point};
 use crate::keygen::{KeyType, KeygenRequest, Passphrase, generate, read_public};
-use crate::sites::Providers;
+use crate::sites::{OldKeyCheck, Providers};
 
 /// Shown for a location whose `authorized_keys` still trusts the old key
 /// as a CA. It blocks retire.
 pub const CA_REASON: &str = "old key still trusted as a certificate authority";
+
+/// Shown for an SSH location where the old key still logs in after its
+/// removal. It blocks retire.
+pub const STILL_ACCEPTED: &str = "old key still logs in here after its removal";
+
+/// Shown for an SSH location where a check that the old key is refused
+/// gave no answer. It blocks retire.
+pub const UNCHECKED: &str = "cannot check that the old key is refused";
 
 /// Local settings of a run. Not stored: they come from the command line.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -634,29 +642,12 @@ impl<'a> Engine<'a> {
         Ok(ConfigGate::Run)
     }
 
-    /// Why the config update does not run, if it does not: it runs only
-    /// before any removal, and only if every location is verified.
+    /// Why the config step does not run, if it does not. It runs before
+    /// any removal; it does not wait for every location, since the old
+    /// key stays in the config below the new one until retire.
     fn config_skip_reason(&self, j: &Journal) -> Result<Option<String>, EngineError> {
-        let open: Vec<String> = self
-            .locations()?
-            .iter()
-            .filter(|l| !matches!(l.phase, Phase::Verified | Phase::OldRemoved))
-            .map(|l| format!("{} ({})", l.target.label(), l.phase.as_str()))
-            .collect();
-        if !open.is_empty() {
-            return Ok(Some(format!(
-                "ssh config not updated: the new key is not verified at {}; the old key \
-                 still works there",
-                open.join(", ")
-            )));
-        }
-        if j.started_anywhere(Step::RemoveOld) {
-            return Ok(Some(
-                "ssh config not updated: removals started before every location was verified"
-                    .into(),
-            ));
-        }
-        Ok(None)
+        Ok(j.started_anywhere(Step::RemoveOld)
+            .then(|| "ssh config not updated: removals started before the config step".to_string()))
     }
 
     fn stamp(&self) -> String {
@@ -667,12 +658,13 @@ impl<'a> Engine<'a> {
         self.begin(Step::Config, None, RotationState::ConfigUpdated)?;
         let env = self.ctx.env;
         let stamp = self.stamp();
-        let result = plan_config_update(
+        let result = plan_config_change(
             &env.config_files,
             &self.rot.old_key_path,
             &self.rot.new_key_path,
             &env.home,
             &stamp,
+            ConfigMode::InsertAbove,
         )
         .and_then(|plan| apply_config_update(&plan, &stamp));
         let end = match result {
@@ -691,23 +683,28 @@ impl<'a> Engine<'a> {
         self.begin(Step::RemoveOld, l, RotationState::RemovingOld)?;
         let end = match self.provider(loc) {
             Err(e) => End::failed(e),
-            Ok(p) => match may_remove_old(p, &self.rot, loc).await {
+            Ok(p) => match may_remove_old(self.ctx.providers, p, &self.rot, loc).await {
                 Err(reason) => End::failed(reason),
                 Ok(permit) => match remove_old(self.ctx.providers, permit, &self.rot, loc).await {
                     Err(e) => End::failed(e.to_string()),
-                    Ok(r) if r.ca_lines_with_old_key.is_empty() => End {
-                        remove_row: Some(loc.location_id),
-                        ..End::done().phase(Phase::OldRemoved)
-                    },
                     Ok(r) => {
-                        let lines: Vec<String> = r
-                            .ca_lines_with_old_key
-                            .iter()
-                            .map(|n| n.to_string())
-                            .collect();
+                        let mut flags = Vec::new();
+                        let mut detail = None;
+                        if !r.ca_lines_with_old_key.is_empty() {
+                            let lines: Vec<String> = r
+                                .ca_lines_with_old_key
+                                .iter()
+                                .map(|n| n.to_string())
+                                .collect();
+                            detail = Some(format!("cert-authority lines {}", lines.join(",")));
+                            flags.push(CA_REASON.to_string());
+                        }
+                        if loc.kind == LocationKind::SshServer {
+                            flags.extend(self.old_key_flag(loc).await);
+                        }
                         End {
-                            detail: Some(format!("cert-authority lines {}", lines.join(","))),
-                            reason: Some(CA_REASON.into()),
+                            detail,
+                            reason: (!flags.is_empty()).then(|| flags.join("; ")),
                             remove_row: Some(loc.location_id),
                             ..End::done().phase(Phase::OldRemoved)
                         }
@@ -721,6 +718,24 @@ impl<'a> Engine<'a> {
             end
         };
         self.end(Step::RemoveOld, l, end)
+    }
+
+    /// SSH: does the old key still log in after its removal? Only
+    /// `Refused` clears; anything else flags the location and blocks
+    /// retire.
+    async fn old_key_flag(&self, loc: &RotationLocation) -> Option<String> {
+        let old = old_ref(&self.rot, loc.purpose);
+        match self
+            .ctx
+            .providers
+            .check_old_key(loc.kind, &loc.target, &old)
+            .await
+        {
+            Ok(OldKeyCheck::Refused) => None,
+            Ok(OldKeyCheck::StillAccepted) => Some(STILL_ACCEPTED.into()),
+            Ok(OldKeyCheck::Unknown(why)) => Some(format!("{UNCHECKED}: {why}")),
+            Err(e) => Some(format!("{UNCHECKED}: {e}")),
+        }
     }
 
     /// Retire runs once, when the old key is gone from every location and
@@ -753,13 +768,37 @@ impl<'a> Engine<'a> {
 
     async fn retire(&mut self) -> Result<(), EngineError> {
         self.begin(Step::Retire, None, RotationState::Retired)?;
-        let end = match retire(&self.ctx.env.ssh_dir, &self.rot.old_key_path) {
-            Ok(moved) => End {
-                detail: Some(format!("{} files moved", moved.len())),
+        // First the old `IdentityFile` lines the config step paired with
+        // new ones, then the files they name.
+        let env = self.ctx.env;
+        let lines = if self.journal()?.has(Step::Config, None, Event::Done) {
+            let stamp = format!("{}-retire", self.stamp());
+            plan_config_change(
+                &env.config_files,
+                &self.rot.old_key_path,
+                &self.rot.new_key_path,
+                &env.home,
+                &stamp,
+                ConfigMode::RemovePaired,
+            )
+            .and_then(|plan| apply_config_update(&plan, &stamp))
+            .map(|w| w.len())
+            .map_err(|e| e.to_string())
+        } else {
+            Ok(0)
+        };
+        let moved = lines.and_then(|n| {
+            retire(&env.ssh_dir, &self.rot.old_key_path)
+                .map(|m| (n, m.len()))
+                .map_err(|e| e.to_string())
+        });
+        let end = match moved {
+            Ok((n, moved)) => End {
+                detail: Some(format!("{n} config files updated, {moved} files moved")),
                 state: Some(RotationState::Retired),
                 ..End::done()
             },
-            Err(e) => End::failed(e.to_string()),
+            Err(e) => End::failed(e),
         };
         self.end(Step::Retire, None, end)
     }
@@ -831,7 +870,7 @@ impl<'a> Engine<'a> {
                 let Some(new) = self.rot.new_fingerprint.clone() else {
                     return Ok(Settled::RunAgain);
                 };
-                match self.list(&rl).await {
+                match self.list(&rl, false).await {
                     Err(e) => Settled::Unsettled(e),
                     Ok(keys) if listed(&keys, &new, rl.purpose) => {
                         Settled::Done(End::done().phase(Phase::Installed))
@@ -839,18 +878,18 @@ impl<'a> Engine<'a> {
                     Ok(_) => Settled::RunAgain,
                 }
             }
-            (Step::RemoveOld, Some(rl)) => match self.list(&rl).await {
+            (Step::RemoveOld, Some(rl)) => match self.list(&rl, true).await {
                 Err(e) => Settled::Unsettled(e),
                 Ok(keys) if listed(&keys, &self.rot.old_fingerprint, rl.purpose) => {
                     Settled::RunAgain
                 }
                 // SSH: run the gated removal again (it changes nothing
                 // now) to learn about `cert-authority` lines.
-                Ok(_) if rl.kind == inventory::LocationKind::SshServer && !self.aborting() => {
+                Ok(_) if rl.kind == LocationKind::SshServer && !self.aborting() => {
                     Settled::RunAgain
                 }
                 Ok(_) => Settled::Done(End {
-                    reason: (rl.kind == inventory::LocationKind::SshServer).then(|| {
+                    reason: (rl.kind == LocationKind::SshServer).then(|| {
                         "old key removed before a restart; cert-authority lines not checked".into()
                     }),
                     remove_row: Some(rl.location_id),
@@ -861,7 +900,7 @@ impl<'a> Engine<'a> {
                 let Some(new) = self.rot.new_fingerprint.clone() else {
                     return Ok(Settled::RunAgain);
                 };
-                match self.list(&rl).await {
+                match self.list(&rl, false).await {
                     Err(e) => Settled::Unsettled(e),
                     Ok(keys) if listed(&keys, &new, rl.purpose) => Settled::RunAgain,
                     Ok(_) => Settled::Done(End {
@@ -876,9 +915,20 @@ impl<'a> Engine<'a> {
         })
     }
 
-    async fn list(&self, loc: &RotationLocation) -> Result<Vec<providers::PublicKeyRef>, String> {
-        let p = self.provider(loc)?;
-        p.list(&loc.target)
+    /// Lists `loc`, logging in with the old key or, with `as_new`, the new
+    /// key (SSH).
+    async fn list(
+        &self,
+        loc: &RotationLocation,
+        as_new: bool,
+    ) -> Result<Vec<providers::PublicKeyRef>, String> {
+        let login = match new_ref(&self.rot, loc.purpose) {
+            Some(new) if as_new => new,
+            _ => old_ref(&self.rot, loc.purpose),
+        };
+        self.ctx
+            .providers
+            .list_as(loc.kind, &loc.target, &login)
             .await
             .map_err(|e| format!("cannot list the keys at {}: {e}", loc.target.label()))
     }
@@ -974,7 +1024,16 @@ impl<'a> Engine<'a> {
     async fn continue_abort(&mut self) -> Result<Summary, EngineError> {
         let j = self.journal()?;
         // The config first, so it never names a key no location accepts.
-        if j.has(Step::Config, None, Event::Start) && !j.has(Step::Rollback, None, Event::Done) {
+        // If the old key is gone somewhere, those hosts need the new line:
+        // both lines stay.
+        let old_removed = self
+            .locations()?
+            .iter()
+            .any(|l| l.phase == Phase::OldRemoved);
+        if j.has(Step::Config, None, Event::Start)
+            && !old_removed
+            && !j.has(Step::Rollback, None, Event::Done)
+        {
             if !self.flagged_step(&j, Step::Rollback, None) {
                 self.restore_config().await?;
             }
@@ -996,12 +1055,13 @@ impl<'a> Engine<'a> {
     async fn restore_config(&mut self) -> Result<(), EngineError> {
         self.begin(Step::Rollback, None, RotationState::Aborting)?;
         let env = self.ctx.env;
-        let end = match restore_config(
+        let end = match restore_config_change(
             &env.config_files,
             &self.rot.old_key_path,
             &self.rot.new_key_path,
             &env.home,
             &self.stamp(),
+            ConfigMode::InsertAbove,
         ) {
             Ok(files) => End {
                 detail: Some(format!("{} config files restored", files.len())),
@@ -1017,7 +1077,7 @@ impl<'a> Engine<'a> {
         self.begin(Step::Rollback, l, RotationState::Aborting)?;
         let end = match self.provider(loc) {
             Err(e) => End::failed(e),
-            Ok(p) => match may_roll_back(p, &self.rot, loc).await {
+            Ok(p) => match may_roll_back(self.ctx.providers, p, &self.rot, loc).await {
                 Err(reason) => End::failed(reason),
                 Ok(permit) => match roll_back(self.ctx.providers, permit, &self.rot, loc).await {
                     Err(e) => End::failed(e.to_string()),
@@ -1049,11 +1109,12 @@ impl<'a> Engine<'a> {
                 "the new key stays at {}: the old key is already gone there",
                 kept.join(", ")
             ));
-            if self.journal()?.has(Step::Rollback, None, Event::Done) {
-                summary.notes.push(format!(
-                    "the ssh config names the old key again; fix the entries for {} by hand",
-                    kept.join(", ")
-                ));
+            if self.journal()?.has(Step::Config, None, Event::Done) {
+                summary.notes.push(
+                    "the ssh config keeps both IdentityFile lines, the new key first; \
+                     remove the old one by hand once it is no longer needed"
+                        .into(),
+                );
             }
         }
         let mut tx = self.store.journal_tx()?;
@@ -1108,8 +1169,8 @@ impl<'a> Engine<'a> {
             notes.push(r);
         }
         for l in self.locations()? {
-            if l.reason.as_deref() == Some(CA_REASON) {
-                notes.push(format!("{}: {CA_REASON}", l.target.label()));
+            if let (Phase::OldRemoved, Some(r)) = (l.phase, &l.reason) {
+                notes.push(format!("{}: {r}", l.target.label()));
             }
         }
         if !j.has(Step::Retire, None, Event::Done) {

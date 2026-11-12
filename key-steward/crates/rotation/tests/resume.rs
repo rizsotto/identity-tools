@@ -5,7 +5,7 @@ mod common;
 use std::fs;
 use std::process::Command;
 
-use common::{CONFIG, Fixture, Op, Recorder};
+use common::{CONFIG, CONFIG_BOTH, Fixture, Op, Recorder};
 use inventory::{Event, Phase, Purpose, RotationId, Step, StoreError};
 use rotation::{Ending, EngineError, LockError, NoHooks, RotationLock};
 
@@ -63,19 +63,20 @@ async fn rollback_never_touches_old_removed_location() {
     assert_eq!(removes[0].site, "srv-b");
     assert_eq!(removes[0].key, new.to_string());
 
-    // Config restored before any rollback removed the new key.
-    assert_eq!(config(&f), CONFIG);
+    // Hosts without the old key need the new line: both lines stay.
+    assert_eq!(config(&f), CONFIG_BOTH);
     let steps = f.store().steps(ID).unwrap();
-    let restored = steps
-        .iter()
-        .position(|e| e.step == Step::Rollback && e.location_id.is_none() && e.event == Event::Done)
-        .unwrap();
-    let first_rollback = steps
-        .iter()
-        .position(|e| e.step == Step::Rollback && e.location_id.is_some())
-        .unwrap();
-    assert!(restored < first_rollback);
+    assert!(
+        !steps
+            .iter()
+            .any(|e| e.step == Step::Rollback && e.location_id.is_none())
+    );
     assert!(s.notes.iter().any(|n| n.contains("new key stays at")));
+    assert!(
+        s.notes
+            .iter()
+            .any(|n| n.contains("keeps both IdentityFile lines"))
+    );
     assert!(f.old_path.exists(), "no retire on abort");
     // The new key's row at srv-b went with the rollback.
     let rows = f.store().list_for_key(&new).unwrap();
@@ -160,7 +161,7 @@ async fn skip_keeps_old_key_and_no_retire() {
             .iter()
             .any(|n| n.starts_with("old key files kept") && n.contains("srv-b"))
     );
-    assert_eq!(config(&f), CONFIG);
+    assert_eq!(config(&f), CONFIG_BOTH);
 }
 
 #[tokio::test]
@@ -281,5 +282,43 @@ async fn unsettled_step_flags_location_and_changes_nothing() {
             .as_deref()
             .unwrap()
             .contains("settled after a restart")
+    );
+}
+
+#[tokio::test]
+async fn abort_before_any_removal_restores_config() {
+    let f = Fixture::new();
+    // Points: generate 4, six installs 24, six verifies 24, config 4; 56
+    // is the first removal's BeforeStart.
+    let rec = Recorder::crash_at(56);
+    let r = f.start(&rec, true).await;
+    assert!(matches!(r, Err(EngineError::Crashed)));
+    assert_eq!(rec.points()[56].step, Step::RemoveOld);
+    assert_eq!(config(&f), CONFIG_BOTH);
+
+    let s = f
+        .with_engine(ID, &NoHooks, true, async |e| e.abort(true).await)
+        .await
+        .unwrap();
+    assert_eq!(s.ending, Ending::Aborted, "{s:?}");
+    assert!(s.locations.iter().all(|l| l.phase == Phase::RolledBack));
+    assert_eq!(config(&f), CONFIG);
+    // Config restored before any rollback removed the new key.
+    let steps = f.store().steps(ID).unwrap();
+    let restored = steps
+        .iter()
+        .position(|e| e.step == Step::Rollback && e.location_id.is_none() && e.event == Event::Done)
+        .unwrap();
+    let first_rollback = steps
+        .iter()
+        .position(|e| e.step == Step::Rollback && e.location_id.is_some())
+        .unwrap();
+    assert!(restored < first_rollback);
+    let old = f.old_fpr.to_string();
+    assert!(
+        f.world
+            .calls()
+            .iter()
+            .all(|c| c.op != Op::Remove || c.key != old)
     );
 }

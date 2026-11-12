@@ -97,6 +97,7 @@ pub(crate) fn status_text(v: &VerifyStatus) -> String {
 /// SSH: the removal itself logs in with the new key and keeps it in the
 /// file (`RemoveOpts::keep`); if that login fails, nothing is removed.
 pub(crate) async fn may_remove_old(
+    providers: &dyn Providers,
     p: &dyn Provider,
     rot: &Rotation,
     loc: &RotationLocation,
@@ -120,8 +121,8 @@ pub(crate) async fn may_remove_old(
     verified(p, loc, &new)
         .await
         .map_err(|e| format!("the new key does not log in at {label} right now: {e}"))?;
-    let keys = p
-        .list(&loc.target)
+    let keys = providers
+        .list_as(loc.kind, &loc.target, &new)
         .await
         .map_err(|e| format!("cannot list the keys at {label}: {e}"))?;
     for purpose in served_purposes(&keys, &rot.old_fingerprint, loc.purpose) {
@@ -170,6 +171,7 @@ pub(crate) async fn remove_old(
 /// not `OldRemoved`, the old key is listed there and logs in right now,
 /// for every purpose the new key's remote object serves.
 pub(crate) async fn may_roll_back(
+    providers: &dyn Providers,
     p: &dyn Provider,
     rot: &Rotation,
     loc: &RotationLocation,
@@ -184,8 +186,8 @@ pub(crate) async fn may_roll_back(
     let Some(new) = &rot.new_fingerprint else {
         return Err("the new key has not been made yet".into());
     };
-    let keys = p
-        .list(&loc.target)
+    let keys = providers
+        .list_as(loc.kind, &loc.target, &old_ref(rot, loc.purpose))
         .await
         .map_err(|e| format!("cannot list the keys at {label}: {e}"))?;
     if !listed(&keys, &rot.old_fingerprint, loc.purpose) {
