@@ -168,7 +168,9 @@ impl Query { pub fn contact_key(&self) -> Option<String> }  // canonical form, t
 pub trait KeySource: Send + Sync {
     fn kind(&self) -> SourceKind;                     // Contacts, Keyring, Wkd, Vks, GitHub, GitLab, Pasted
     fn accepts(&self, q: &Query) -> bool;
-    async fn lookup(&self, q: &Query, net: &Net, deadline: Instant) -> Result<Found, SourceError>;
+    /// `net` is Some only for network sources in Mode::Full (T07), so a
+    /// LocalOnly resolver can be built with no Net at all.
+    async fn lookup(&self, q: &Query, net: Option<&Net>, deadline: Instant) -> Result<Found, SourceError>;
 }
 
 pub struct Found { pub keys: Vec<FoundKey>, pub rejected: Vec<Rejected> }

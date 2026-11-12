@@ -2703,7 +2703,9 @@ dependencies = [
 name = "resolver"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "dns-lookup",
+ "futures-util",
  "identity-core",
  "reqwest",
  "thiserror 2.0.21",
