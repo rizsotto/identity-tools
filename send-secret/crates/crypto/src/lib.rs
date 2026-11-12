@@ -1,13 +1,16 @@
 //! Encrypt and decrypt facade over OpenPGP (gpgme) and age.
 
-pub fn version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
+mod detect;
+mod error;
+
+pub use detect::{DETECT_LEN, Detected, detect_format};
+pub use error::{Error, PlanError};
+
+/// The two message formats (SPEC section 4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Format {
+    OpenPgp,
+    Age,
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn version_is_set() {
-        assert!(!super::version().is_empty());
-    }
-}
+pub type Result<T, E = Error> = std::result::Result<T, E>;
