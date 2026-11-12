@@ -7,6 +7,7 @@ publish.workspace = true
 
 [dependencies]
 identity-core = { path = "../../../crates/identity-core" }
+inventory = { path = "../inventory" }
 thiserror = "2"
 
 [dev-dependencies]

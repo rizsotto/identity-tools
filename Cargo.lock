@@ -2720,6 +2720,7 @@ name = "rotation"
 version = "0.1.0"
 dependencies = [
  "identity-core",
+ "inventory",
  "test-support",
  "thiserror 2.0.21",
 ]
