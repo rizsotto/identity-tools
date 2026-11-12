@@ -1,7 +1,7 @@
 //! OpenPGP helpers shared by the sources: split a fetched or pasted blob
 //! under the source's deadline, and the FR-4 skip note for a key.
 
-use identity_core::{Gpg, GpgError, OpenPgpKey};
+use identity_core::{Gpg, GpgError, OpenPgpKey, UserId};
 use tokio::time::{Instant, timeout_at};
 
 use crate::model::{SourceError, Unusable};
@@ -49,4 +49,13 @@ pub(crate) fn usable(key: &OpenPgpKey) -> Result<(), Unusable> {
     } else {
         Err(Unusable::NoEncryptionSubkey)
     }
+}
+
+/// User IDs that are not revoked and not invalid.
+pub(crate) fn valid_user_ids(key: &OpenPgpKey) -> Vec<UserId> {
+    key.user_ids
+        .iter()
+        .filter(|u| !u.revoked && !u.invalid)
+        .cloned()
+        .collect()
 }

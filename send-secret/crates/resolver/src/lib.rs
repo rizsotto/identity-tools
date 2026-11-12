@@ -2,20 +2,24 @@
 
 use std::time::Duration;
 
+mod keyring;
 mod model;
 mod net;
 mod netlog;
 mod openpgp;
+mod pasted;
 mod query;
 mod resolve;
 mod wkd;
 
+pub use keyring::KeyringSource;
 pub use model::{
     Found, FoundKey, KeyBytes, KeySource, RejectReason, Rejected, Source, SourceError, SourceKind,
     Unusable,
 };
 pub use net::{Fetched, Net, NetError, OriginMap};
 pub use netlog::{NetLog, NetLogEntry};
+pub use pasted::PastedSource;
 pub use query::{Email, Host, Query, QueryError, parse_query};
 pub use resolve::{Candidate, Mode, Resolution, Resolver};
 pub use wkd::WkdSource;
