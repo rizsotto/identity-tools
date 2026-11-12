@@ -2710,6 +2710,7 @@ dependencies = [
  "identity-core",
  "percent-encoding",
  "reqwest",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "url",
