@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use crate::age_backend::AgeKey;
 use crate::detect::{Detected, open_message};
 use crate::openpgp_backend::{self, Signer};
-use crate::plan::{MessagePlan, Recipient};
+use crate::plan::{MessagePlan, OpenPgpCert, Recipient};
 use crate::self_identity::SelfIdentity;
 use crate::{Error, Format, Result, age_backend};
 
@@ -105,12 +105,14 @@ fn prepare(plan: &MessagePlan, opts: &EncryptOpts) -> Result<Prepared> {
     }
     match plan.format {
         Format::OpenPgp => {
-            let [Recipient::OpenPgp(cert)] = &plan.keys[..] else {
-                return Err(Error::BadKey {
-                    label: plan.label.clone(),
-                    reason: "one OpenPGP key per message only".into(),
-                });
-            };
+            let certs: Vec<&OpenPgpCert> = plan
+                .keys
+                .iter()
+                .filter_map(|k| match k {
+                    Recipient::OpenPgp(cert) => Some(cert),
+                    Recipient::Age(_) => None,
+                })
+                .collect();
             let signer = match (opts.sign, &opts.signer) {
                 (false, _) => None,
                 (true, Some(fpr)) => Some(fpr.as_str()),
@@ -118,7 +120,7 @@ fn prepare(plan: &MessagePlan, opts: &EncryptOpts) -> Result<Prepared> {
             };
             openpgp_backend::prepare(
                 &plan.label,
-                cert,
+                &certs,
                 opts.gnupg_home.as_deref(),
                 signer,
                 opts.armor,

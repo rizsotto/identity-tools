@@ -585,3 +585,42 @@ fn relative_xdg_config_home_ignored() {
     assert!(env.config_home().join("send-secret/identities").is_file());
     assert!(!env.path("rel-config").exists());
 }
+
+#[test]
+fn encrypt_refuses_existing_output() {
+    let env = TestEnv::new();
+    let (msg, _) = message(&env);
+    let dir = out_dir(&env);
+    // The self copy path exists: nothing is written, not even m.age.
+    fs::write(dir.join("m.self.age"), "keep").unwrap();
+    let out = encrypt(&env, &["--to-key", &key("age/dave.pub"), "-i"])
+        .arg(&msg)
+        .arg("-o")
+        .arg(dir.join("m.age"))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("file exists"), "{}", stderr(&out));
+    assert_eq!(names(&dir), ["m.self.age"]);
+    assert_eq!(fs::read_to_string(dir.join("m.self.age")).unwrap(), "keep");
+}
+
+#[test]
+fn self_copy_note_not_printed_when_run_fails() {
+    // No secret key: the self copy would be age, but signing the OpenPGP
+    // message fails first, so no note about the self copy.
+    let env = TestEnv::new();
+    let (msg, _) = message(&env);
+    let dir = out_dir(&env);
+    let out = encrypt(&env, &["--to-key", &key("openpgp/alice.asc"), "-i"])
+        .arg(&msg)
+        .arg("-o")
+        .arg(dir.join("m.gpg"))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let err = stderr(&out);
+    assert!(err.contains("--no-sign"), "{err}");
+    assert!(!err.contains("self copy uses age"), "{err}");
+    assert!(names(&dir).is_empty());
+}

@@ -204,18 +204,26 @@ fn encrypt(args: EncryptArgs) -> Result<(), Fail> {
     let sign = !args.no_sign;
     let need_signer = sign && plans.iter().any(|p| p.format == Format::OpenPgp);
     let need_user = need_signer || (make_self && force != Some(Format::Age));
+    // Set if gpg can not be used at all and is only needed for the self
+    // copy: it then falls back to age, and the note says why.
+    let mut gpg_failed = None;
     let user = if need_user {
         match crypto::openpgp_user(None) {
             Ok(user) => Some(user),
             Err(e) if need_signer => return Err(error(e)),
-            // No usable gpg: the self copy falls back to age.
-            Err(_) => None,
+            Err(e) => {
+                gpg_failed = Some(e);
+                None
+            }
         }
     } else {
         None
     };
     let signer = user.as_ref().and_then(|u| u.signer.clone());
 
+    // Printed only once every message is checked, so a failing run does
+    // not first talk about the self copy.
+    let mut self_note = None;
     if make_self {
         let self_key = user.map_or(OpenPgpSelf::NoSecretKey, |u| u.self_key);
         let (format, why) = crypto::self_format(&self_key, force)
@@ -236,9 +244,13 @@ fn encrypt(args: EncryptArgs) -> Result<(), Fail> {
             age,
         };
         let (self_copy, _) = crypto::self_plan(&sender, force).map_err(error)?;
-        if let Some(why) = why {
-            note(why);
-        }
+        self_note = match (why, gpg_failed) {
+            (None, _) => None,
+            (Some(_), Some(e)) => Some(format!(
+                "GnuPG can not be used ({e}), so the self copy uses age"
+            )),
+            (Some(why), None) => Some(why.to_string()),
+        };
         plans.push(self_copy);
     }
 
@@ -283,6 +295,9 @@ fn encrypt(args: EncryptArgs) -> Result<(), Fail> {
         &opts,
     )
     .map_err(encrypt_error)?;
+    if let Some(msg) = self_note {
+        note(msg);
+    }
 
     let mut written = Vec::new();
     let mut failed = false;
@@ -462,9 +477,8 @@ impl age::Callbacks for TtyPrompt {
     }
 
     fn request_passphrase(&self, description: &str) -> Option<age::secrecy::SecretString> {
-        rpassword::prompt_password(format!("{description}: "))
-            .ok()
-            .map(age::secrecy::SecretString::from)
+        let typed = Zeroizing::new(rpassword::prompt_password(format!("{description}: ")).ok()?);
+        Some(age::secrecy::SecretString::from(typed.as_str()))
     }
 }
 

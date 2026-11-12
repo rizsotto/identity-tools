@@ -316,10 +316,46 @@ fn signing_without_signer_writes_nothing() {
 }
 
 #[test]
-fn key_file_with_two_keys_is_refused_before_output() {
+fn key_file_with_two_keys_gives_one_message_both_open() {
     let sender = Home::with(&["sender.sec.asc"]);
     let mut two = read("openpgp/alice.asc");
     two.extend(read("openpgp/bob-rsa.asc"));
+    let p = MessagePlan {
+        label: "pair".into(),
+        format: Format::OpenPgp,
+        keys: vec![Recipient::OpenPgp(OpenPgpCert::new(two).unwrap())],
+    };
+    let ct = encrypt_to(&p, &sender.opts(false));
+    let mut ids = packet_keyids(&ct);
+    ids.sort();
+    let mut want = vec![enc_keyid("alice.asc"), enc_keyid("bob-rsa.asc")];
+    want.sort();
+    assert_eq!(ids, want);
+    for home in [
+        Home::with(&["alice.sec.asc"]),
+        Home::with(&["bob-rsa.sec.asc"]),
+    ] {
+        assert_eq!(open(&ct, &home).unwrap().0, MSG);
+    }
+    assert!(matches!(open(&ct, &sender), Err(Error::NoMatchingKey)));
+    // Nothing was imported into the sender's keyring.
+    let listed = String::from_utf8(sender.gpg(&["--with-colons", "--list-keys"])).unwrap();
+    assert!(!listed.contains(&fpr("alice.asc")) && !listed.contains(&fpr("bob-rsa.asc")));
+}
+
+#[test]
+fn key_file_with_an_unusable_key_is_refused_before_output() {
+    let sender = Home::with(&["sender.sec.asc"]);
+    let signonly = Home::with(&[]);
+    signonly.gpg(&[
+        "--quick-gen-key",
+        "Sign Only (test fixture) <signonly@example.org>",
+        "ed25519",
+        "sign",
+        "1y",
+    ]);
+    let mut two = read("openpgp/alice.asc");
+    two.extend(signonly.gpg(&["--armor", "--export"]));
     let p = MessagePlan {
         label: "pair".into(),
         format: Format::OpenPgp,
@@ -335,6 +371,96 @@ fn key_file_with_two_keys_is_refused_before_output() {
     assert!(
         matches!(&err, Error::BadKey { label, .. } if label == "pair"),
         "{err:?}"
+    );
+}
+
+/// Signatures gpg finds in `ct`, as the fingerprints of VALIDSIG lines.
+fn valid_signers(ct: &[u8], home: &Home) -> Vec<String> {
+    let path = home.path().join("signed.msg");
+    std::fs::write(&path, ct).unwrap();
+    let out = Command::new("gpg")
+        .arg("--homedir")
+        .arg(home.path())
+        .args(["--batch", "--status-fd", "1", "--decrypt"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    let status = String::from_utf8_lossy(&out.stdout).into_owned();
+    let sigs = status.lines().filter(|l| l.contains("NEWSIG")).count();
+    let valid: Vec<String> = status
+        .lines()
+        .filter_map(|l| l.strip_prefix("[GNUPG:] VALIDSIG "))
+        .map(|l| l.split(' ').next().unwrap().to_string())
+        .collect();
+    assert_eq!(sigs, valid.len(), "{status}");
+    valid
+}
+
+#[test]
+fn explicit_signer_wins_over_default_key() {
+    let sender = Home::with(&["bob-rsa.sec.asc", "sender.sec.asc"]);
+    std::fs::write(
+        sender.path().join("gpg.conf"),
+        format!("default-key {}\n", fpr("bob-rsa.asc")),
+    )
+    .unwrap();
+    let opts = EncryptOpts {
+        signer: Some(fpr("sender.asc")),
+        ..sender.opts(false)
+    };
+    let ct = encrypt_to(&alice_plan(), &opts);
+    let alice = Home::with(&["alice.sec.asc", "sender.asc", "bob-rsa.asc"]);
+    assert_eq!(valid_signers(&ct, &alice), [fpr("sender.asc")]);
+}
+
+#[test]
+fn gpg_conf_options_that_add_keys_are_refused() {
+    let sender = Home::with(&["sender.sec.asc", "bob-rsa.sec.asc"]);
+    let me = fpr("sender.asc");
+    let file = fixture("openpgp/sender.asc");
+    let file = file.to_str().unwrap();
+    for (conf, option) in [
+        (format!("recipient {me}"), "recipient"),
+        (format!("  hidden-recipient\t{me}"), "hidden-recipient"),
+        (format!("recipient-file {file}"), "recipient-file"),
+        (
+            format!("hidden-recipient-file {file}"),
+            "hidden-recipient-file",
+        ),
+        (format!("local-user {}", fpr("bob-rsa.asc")), "local-user"),
+    ] {
+        // gpg reads gpg.conf-2 before gpg.conf; the check reads the same.
+        for name in ["gpg.conf", "gpg.conf-2"] {
+            let _ = std::fs::remove_file(sender.path().join("gpg.conf"));
+            let _ = std::fs::remove_file(sender.path().join("gpg.conf-2"));
+            std::fs::write(sender.path().join(name), format!("# x\n{conf}\n")).unwrap();
+            let err = encrypt_each(
+                || -> std::io::Result<&[u8]> { panic!("input opened") },
+                |_| -> std::io::Result<Vec<u8>> { panic!("output opened") },
+                &[alice_plan()],
+                &sender.opts(true),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(&err, Error::GpgConf { option: o, .. } if o == option),
+                "{conf} in {name}: {err:?}"
+            );
+            assert!(err.to_string().contains(name), "{err}");
+        }
+    }
+    // local-user only matters when signing, and comments do not count.
+    std::fs::write(
+        sender.path().join("gpg.conf-2"),
+        format!("local-user {}\n# recipient {me}\n", fpr("bob-rsa.asc")),
+    )
+    .unwrap();
+    let opts = EncryptOpts {
+        sign: false,
+        ..sender.opts(false)
+    };
+    assert_eq!(
+        packet_keyids(&encrypt_to(&alice_plan(), &opts)),
+        [enc_keyid("alice.asc")]
     );
 }
 

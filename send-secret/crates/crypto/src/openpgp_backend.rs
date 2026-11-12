@@ -60,23 +60,75 @@ pub fn openpgp_user(home: Option<&Path>) -> Result<OpenPgpUser> {
 /// and can encrypt, and the signer (if any) is set.
 pub(crate) struct Prepared {
     ctx: Context,
-    recipient: RecipientFile,
+    /// Kept alive until the operation is done: `recipients` names them.
+    _files: Vec<RecipientFile>,
+    recipients: CString,
     sign: bool,
 }
 
-/// Checks the key and the signer before any output is written.
+/// gpg.conf options that add a recipient. `GPGME_ENCRYPT_NO_ENCRYPT_TO`
+/// only turns off `encrypt-to` and `hidden-encrypt-to`. gpg takes no
+/// abbreviated option names in gpg.conf (checked with gpg 2.4.9).
+const ADDS_RECIPIENT: [&str; 4] = [
+    "recipient",
+    "hidden-recipient",
+    "recipient-file",
+    "hidden-recipient-file",
+];
+
+/// Refuses a gpg.conf that would add keys to the message, or (when
+/// signing) a second signer, since gpgme can not turn those off (S-8).
+/// Reads the same file gpg reads (versioned names first).
+fn check_gpg_conf(gpg: &Gpg, sign: bool) -> Result<()> {
+    let Some(file) = gpg.conf_file() else {
+        return Ok(());
+    };
+    let mut bytes = Vec::new();
+    match std::fs::File::open(&file) {
+        Ok(f) => {
+            f.take(identity_core::MAX_KEY_INPUT as u64)
+                .read_to_end(&mut bytes)?;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    for line in text.lines() {
+        let name = line
+            .trim_start_matches([' ', '\t'])
+            .split([' ', '\t'])
+            .next()
+            .unwrap_or_default();
+        if ADDS_RECIPIENT.contains(&name) || (sign && name == "local-user") {
+            return Err(Error::GpgConf {
+                file,
+                option: name.to_owned(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Checks the keys, the user's gpg.conf and the signer before any output
+/// is written. All `certs` go into one message (one person's keys, FR-4).
 pub(crate) fn prepare(
     label: &str,
-    cert: &OpenPgpCert,
+    certs: &[&OpenPgpCert],
     home: Option<&Path>,
     signer: Option<&str>,
     armor: bool,
 ) -> Result<Prepared> {
-    let recipient =
-        RecipientFile::new(&mut gpg(home)?, cert.as_bytes()).map_err(|e| Error::BadKey {
+    let mut gpg = gpg(home)?;
+    check_gpg_conf(&gpg, signer.is_some())?;
+    let mut files = Vec::new();
+    for cert in certs {
+        let found = RecipientFile::all(&mut gpg, cert.as_bytes()).map_err(|e| Error::BadKey {
             label: label.to_owned(),
             reason: e.to_string(),
         })?;
+        files.extend(found);
+    }
+    let recipients = RecipientFile::joined(&files);
     let mut ctx = context(home)?;
     ctx.set_armor(armor);
     if let Some(fpr) = signer {
@@ -88,16 +140,18 @@ pub(crate) fn prepare(
     }
     Ok(Prepared {
         ctx,
-        recipient,
+        _files: files,
+        recipients,
         sign: signer.is_some(),
     })
 }
 
 impl Prepared {
-    /// Encrypts (and signs, if a signer was set) `input` to the one
-    /// recipient key. gpgme fails the operation if the signer can not
-    /// sign (`GPG_ERR_UNUSABLE_SECKEY`). `GPGME_ENCRYPT_NO_ENCRYPT_TO` keeps gpg.conf
-    /// `encrypt-to` keys out (S-8).
+    /// Encrypts (and signs, if a signer was set) `input` to the recipient
+    /// keys only. gpgme fails the operation if the signer can not sign
+    /// (`GPG_ERR_UNUSABLE_SECKEY`). `GPGME_ENCRYPT_NO_ENCRYPT_TO` keeps
+    /// gpg.conf `encrypt-to` keys out; `check_gpg_conf` refused the other
+    /// options that add keys (S-8).
     pub(crate) fn encrypt(
         self,
         input: impl Read + Send,
@@ -115,13 +169,14 @@ impl Prepared {
             // owned by safe wrappers that outlive the call. Both functions
             // take the same arguments. A null key array is allowed with a
             // recipient string; the string is the NUL-terminated
-            // `--file\n<path>` from `RecipientFile` (path checked there),
-            // which lives as long as `self.recipient`, past the call.
+            // `--file\n<path>` lines from `RecipientFile::joined` (paths
+            // checked there), owned by `self` past the call, and the files
+            // it names live in `self._files`.
             let err = unsafe {
                 op(
                     self.ctx.as_raw(),
                     std::ptr::null_mut(),
-                    self.recipient.gpgme_recipients().as_ptr(),
+                    self.recipients.as_ptr(),
                     EncryptFlags::NO_ENCRYPT_TO.bits(),
                     plain.as_raw(),
                     cipher.as_raw(),

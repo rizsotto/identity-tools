@@ -87,6 +87,14 @@ impl Gpg {
         }
     }
 
+    /// The gpg.conf gpg reads in the effective home: the first existing
+    /// of `gpg.conf-<major.minor.micro>`, `gpg.conf-<major.minor>`,
+    /// `gpg.conf-<major>`, `gpg.conf` (the last also if none exists).
+    /// `None` if the home is unknown.
+    pub fn conf_file(&self) -> Option<PathBuf> {
+        self.effective_home().map(|home| self.conf_path(&home))
+    }
+
     fn collect(
         keys: impl Iterator<Item = gpgme::Result<gpgme::Key>>,
     ) -> Result<Vec<OpenPgpKey>, GpgError> {
