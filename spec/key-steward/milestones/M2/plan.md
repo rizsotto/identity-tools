@@ -223,14 +223,18 @@ so a crash never leaves a stale lock.
    1 MB.
 2. **Edit locally** in Rust (`authorized_keys.rs`, pure, fixture tested).
 3. **Apply.** Same login, `authorized_keys_apply.sh`. Stdin: one header
-   line `<expected cksum> <expected size>`, then the new content. The script:
+   line `<old cksum> <old size> <new cksum> <new size>`, then the new
+   content. The script:
    - `cd "$HOME"` (the session starts in the passwd home, decision 0002),
      `umask 077`.
    - Refuses if `.ssh/authorized_keys` is a symlink or not a regular file.
    - Compares `cksum < .ssh/authorized_keys` with the header. Different:
      prints `changed` and exits 3, writes nothing.
    - Writes stdin to `.ssh/authorized_keys.keysteward-tmp.$$` with
-     `set -C` (no clobber: fails if the name exists).
+     `set -C` (no clobber: fails if the name exists). If the temp file's
+     `cksum` is not the new one from the header (the upload was cut),
+     removes it, prints `short` and exits 6. Without this check a broken
+     connection would install a truncated file.
    - Copies the current file to
      `.ssh/authorized_keys.keysteward-<UTC timestamp>-$$` (FR-6 backup).
    - `mv -f` the temp file over `.ssh/authorized_keys` (rename in one dir,

@@ -17,6 +17,7 @@
 pub mod authorized_keys;
 mod classify;
 mod config;
+pub mod remote;
 
 use std::collections::{HashSet, VecDeque};
 use std::ffi::OsString;
