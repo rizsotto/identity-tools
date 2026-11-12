@@ -28,7 +28,7 @@ gpg_q() {
 # name, primary algo, encryption subkey algo, passphrase
 gen_openpgp() {
     local name="$1" primary="$2" sub="$3" pass="$4"
-    local uid="${name^} Example <${name%%-*}@example.org>"
+    local uid="${name^} Example (test fixture) <${name%%-*}@example.org>"
     gpg_q --passphrase "$pass" --quick-gen-key "$uid" "$primary" sign,cert never
     local fpr
     fpr="$(gpg --batch --with-colons --list-keys "$uid" | awk -F: '$1 == "fpr" { print $10; exit }')"
@@ -54,6 +54,9 @@ ssh-keygen -q -t ecdsa -b 256 -N "" -C "heidi@example.org" -f ssh/heidi_ecdsa
 # Valid SSH RSA key that the age crate rejects (over 4096 bits).
 ssh-keygen -q -t rsa -b 8192 -N "" -C "ivan@example.org" -f "$work/ivan_rsa8192"
 cp "$work/ivan_rsa8192.pub" ssh/ivan_rsa8192.pub
+# Valid SSH RSA key that the age crate rejects (under 2048 bits).
+ssh-keygen -q -t rsa -b 1024 -N "" -C "kim@example.org" -f "$work/kim_rsa1024"
+cp "$work/kim_rsa1024.pub" ssh/kim_rsa1024.pub
 
 # Fake security key line (sk-ssh-ed25519): well-formed wire format,
 # random point, no private key exists.
@@ -65,8 +68,10 @@ cp "$work/ivan_rsa8192.pub" ssh/ivan_rsa8192.pub
 } > "$work/sk.bin"
 echo "sk-ssh-ed25519@openssh.com $(base64 -w0 "$work/sk.bin") judy@example.org" > ssh/judy_sk.pub
 
-# A GitHub style .keys list: two usable keys and two unsupported ones.
-cat ssh/erin_ed25519.pub ssh/frank_rsa.pub ssh/heidi_ecdsa.pub ssh/judy_sk.pub > ssh/multi.keys
+# A GitHub style .keys list: two usable keys, then ECDSA, sk- and two RSA
+# keys of a size the age crate rejects.
+cat ssh/erin_ed25519.pub ssh/frank_rsa.pub ssh/heidi_ecdsa.pub ssh/judy_sk.pub \
+    ssh/ivan_rsa8192.pub ssh/kim_rsa1024.pub > ssh/multi.keys
 
 # Sample ciphertexts made by the reference tools.
 printf '%s' "$MESSAGE" | gpg_q --trust-model always --armor -r alice@example.org -e > ciphertext/openpgp-armored.asc

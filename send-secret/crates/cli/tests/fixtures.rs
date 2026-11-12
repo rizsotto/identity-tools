@@ -58,6 +58,7 @@ const FILES: &[&str] = &[
     "ssh/heidi_ecdsa",
     "ssh/heidi_ecdsa.pub",
     "ssh/ivan_rsa8192.pub",
+    "ssh/kim_rsa1024.pub",
     "ssh/judy_sk.pub",
     "ssh/multi.keys",
     "ciphertext/openpgp-armored.asc",
@@ -182,7 +183,7 @@ fn openpgp_fixtures_have_expected_algorithms() {
             .collect();
         assert_eq!(uids.len(), 1, "{file} uids");
         assert!(
-            uids[0].ends_with(&format!("<{email}>")),
+            uids[0].ends_with(&format!(" Example (test fixture) <{email}>")),
             "{file} uid {}",
             uids[0]
         );
@@ -197,6 +198,7 @@ fn ssh_fixtures_have_expected_types() {
         ("grace_ed25519_pw.pub", "256", "ED25519"),
         ("heidi_ecdsa.pub", "256", "ECDSA"),
         ("ivan_rsa8192.pub", "8192", "RSA"),
+        ("kim_rsa1024.pub", "1024", "RSA"),
         ("judy_sk.pub", "256", "ED25519-SK"),
         ("erin_ed25519", "256", "ED25519"),
         ("frank_rsa", "3072", "RSA"),
@@ -253,12 +255,14 @@ fn ssh_private_keys_have_expected_protection() {
 }
 
 #[test]
-fn multi_keys_lists_four_keys() {
+fn multi_keys_lists_six_keys() {
     let expected: String = [
         "erin_ed25519.pub",
         "frank_rsa.pub",
         "heidi_ecdsa.pub",
         "judy_sk.pub",
+        "ivan_rsa8192.pub",
+        "kim_rsa1024.pub",
     ]
     .iter()
     .map(|f| read(&format!("ssh/{f}")))
