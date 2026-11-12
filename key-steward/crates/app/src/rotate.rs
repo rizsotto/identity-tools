@@ -8,7 +8,7 @@ use inventory::{LocationKind, Phase, RotationId, Store, StoreError, Target};
 use providers::NetLog;
 use rotation::{
     Ctx, Ending, Engine, EngineError, KeyType, LockError, Passphrase, Plan, PlanError, PlanRequest,
-    RotationLock, Summary, find_key,
+    RotationLock, Summary, find_key, terminal_usable,
 };
 
 use crate::cli::{NewKeyType, PlanArgs, RotateCmd};
@@ -149,6 +149,13 @@ async fn start(paths: &Paths, args: &PlanArgs, yes: bool) -> Result<u8, Fail> {
                 .into(),
         ));
     }
+    if !args.no_passphrase && !terminal_usable() {
+        return Err(Fail::Refused(
+            "no terminal to ask for the new key's passphrase; run this in a terminal, or pass \
+             --no-passphrase to make the new key without one"
+                .into(),
+        ));
+    }
     if !yes && !confirm_start() {
         return Err(Fail::Refused("not confirmed; nothing was changed".into()));
     }
@@ -158,7 +165,8 @@ async fn start(paths: &Paths, args: &PlanArgs, yes: bool) -> Result<u8, Fail> {
     }
     let env = paths.env(passphrase(args), args.comment.clone())?;
     let offer = (env.passphrase == Passphrase::Terminal).then(|| plan.new_path.clone());
-    let hooks = RunHooks::new(&netlog, offer);
+    let keys = vec![plan.old_path.clone(), plan.new_path.clone()];
+    let hooks = RunHooks::new(&netlog, secrets.clone(), keys, offer);
     let confirm = RetireConfirm { yes };
     let ctx = Ctx {
         providers: &providers,
@@ -169,7 +177,7 @@ async fn start(paths: &Paths, args: &PlanArgs, yes: bool) -> Result<u8, Fail> {
     };
     let mut engine = Engine::start(&mut store, &plan.new_rotation(), ctx).map_err(engine_fail)?;
     let id = engine.id();
-    hooks.set_file(paths.netlog_path(id));
+    hooks.set_file(paths.netlog_path(engine.rotation()));
     println!("\nRotation {id} started.");
     let summary = engine.run().await;
     hooks.flush();
@@ -203,12 +211,11 @@ async fn answer(paths: &Paths, id: RotationId, yes: bool, what: Answer) -> Resul
     let netlog = NetLog::new();
     let providers = setup::providers(paths, &netlog, tokens);
     let env = paths.env(Passphrase::Terminal, None)?;
-    let offer = rot
-        .new_fingerprint
-        .is_none()
-        .then(|| rot.new_key_path.clone());
-    let hooks = RunHooks::new(&netlog, offer);
-    hooks.set_file(paths.netlog_path(id));
+    let offer =
+        (rot.new_fingerprint.is_none() && !rot.no_passphrase).then(|| rot.new_key_path.clone());
+    let keys = vec![rot.old_key_path.clone(), rot.new_key_path.clone()];
+    let hooks = RunHooks::new(&netlog, secrets.clone(), keys, offer);
+    hooks.set_file(paths.netlog_path(&rot));
     let confirm = RetireConfirm { yes };
     let ctx = Ctx {
         providers: &providers,
@@ -361,9 +368,10 @@ fn status(paths: &Paths, id: Option<RotationId>) -> Result<u8, Fail> {
 
 fn log(paths: &Paths, id: RotationId) -> Result<u8, Fail> {
     let store = paths.existing_store()?;
-    if store.rotation(id).map_err(Fail::error)?.is_none() {
-        return Err(Fail::Refused(format!("no rotation with id {id}")));
-    }
+    let rot = store
+        .rotation(id)
+        .map_err(Fail::error)?
+        .ok_or_else(|| Fail::Refused(format!("no rotation with id {id}")))?;
     println!("Journal of rotation {id}:");
     for e in store.steps(id).map_err(Fail::error)? {
         let loc = e
@@ -379,7 +387,7 @@ fn log(paths: &Paths, id: RotationId) -> Result<u8, Fail> {
         );
     }
     println!("Network log:");
-    match setup::read_netlog(&paths.netlog_path(id)) {
+    match setup::read_netlog(&paths.netlog_path(&rot)) {
         Some(t) => {
             for l in t.lines() {
                 println!("  {l}");

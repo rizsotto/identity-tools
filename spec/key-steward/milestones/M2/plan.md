@@ -497,9 +497,19 @@ key-steward rotate log    <rotation id>      # journal and network log
   Skipped and refused ones keep the old key; the engine then keeps the
   old key files (retire checks every stored location of the old key).
 - The network log of each run is appended to
-  `rotation-<id>.netlog` (0600) next to the database at every journal
-  point; `rotate log` shows it with the journal. It holds no key blob or
-  token (the providers scrub them).
+  `rotation-<id>-<created>.netlog` (0600, opened with `O_NOFOLLOW`) next
+  to the database at every journal point; `rotate log` shows it with the
+  journal. Known tokens and both key blobs are cut out before writing,
+  on top of the providers' scrubbing.
+- A passphrase for the new key needs a terminal: without `--no-passphrase`
+  and with no terminal, `start` refuses and the generate step fails
+  (`ssh-keygen` with no terminal silently makes a key without one). After
+  `ssh-keygen`, the private key header must show encryption, else the
+  files go to `retired/` and the step fails. The choice and the comment
+  are stored in the rotation row, so resume and retry make the same key.
+- `locations remove <id>` (asks, or `--yes`) forgets a location that is
+  gone for good, so it no longer blocks retire. Refused while the
+  location is in the open rotation.
 - Tokens come from Secret Service (`SecretServiceTokens`), read once per
   run and only when a forge location is involved; each is registered
   with `Store::add_secret` before the first journal write. Storing a token

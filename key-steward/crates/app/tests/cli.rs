@@ -8,7 +8,11 @@ use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
+use identity_core::{Fingerprint, parse_public_keys};
+use inventory::{NewRotation, RotationLocation, Store};
+use providers::authorized_keys::AuthorizedKeys;
 use providers::remote::APPLY;
+use rotation::{EngineEnv, KeyPresence, check_invariants};
 use test_support::{ClientConfig, Sshd, TempHome};
 
 const BASE: &str = env!("CARGO_TARGET_TMPDIR");
@@ -77,6 +81,30 @@ fn world() -> World {
     w
 }
 
+/// Server `authorized_keys` files by alias.
+struct Servers(Vec<(String, PathBuf)>);
+
+impl KeyPresence for Servers {
+    fn has_key(&self, loc: &RotationLocation, key: &Fingerprint) -> bool {
+        let Some((_, path)) = self.0.iter().find(|(a, _)| *a == loc.target.label()) else {
+            return false;
+        };
+        let bytes = fs::read(path).unwrap();
+        AuthorizedKeys::parse(&bytes)
+            .unwrap()
+            .keys()
+            .any(|k| !k.cert_authority && &k.key.fingerprint == key)
+    }
+}
+
+fn fingerprint(pub_path: &Path) -> Fingerprint {
+    parse_public_keys(&fs::read(pub_path).unwrap()).unwrap()[0]
+        .key
+        .as_ref()
+        .unwrap()
+        .fingerprint()
+}
+
 fn stdout(o: &Output) -> String {
     String::from_utf8_lossy(&o.stdout).into_owned()
 }
@@ -109,7 +137,17 @@ impl World {
     }
 
     fn command(&self, ssh_program: Option<&Path>) -> Command {
-        let mut cmd = Command::new(BIN);
+        self.with_globals(Command::new(BIN), ssh_program)
+    }
+
+    /// The app in a new session with no controlling terminal, like cron.
+    fn no_tty(&self) -> Command {
+        let mut cmd = Command::new("setsid");
+        cmd.arg("-w").arg(BIN);
+        self.with_globals(cmd, None)
+    }
+
+    fn with_globals(&self, mut cmd: Command, ssh_program: Option<&Path>) -> Command {
         cmd.arg("--db")
             .arg(self.db())
             .arg("--ssh-dir")
@@ -193,6 +231,44 @@ impl World {
         for b in [&new_blob, &self.old_blob] {
             assert!(!db.windows(b.len()).any(|w| w == b.as_bytes()));
         }
+    }
+
+    fn assert_invariants(&self) {
+        let store = Store::open(&self.db()).unwrap();
+        let mut env = EngineEnv::new(self.ssh_dir(), self.home.path());
+        env.config_files = vec![self.ssh_dir().join("config")];
+        let servers = Servers(vec![
+            ("srv-a".into(), self.a.authorized_keys()),
+            ("srv-b".into(), self.b.authorized_keys()),
+        ]);
+        let bad = check_invariants(&store, 1, &env, &servers).unwrap();
+        assert!(bad.is_empty(), "{bad:#?}");
+    }
+
+    /// Puts a rotation row in the database as `rotate start` would, with
+    /// the given key choices, without running it.
+    fn insert_rotation(&self, no_passphrase: bool, comment: &str) {
+        let mut store = Store::open(&self.db()).unwrap();
+        let old = fingerprint(&self.ssh_dir().join("id_old.pub"));
+        let locations = store
+            .list_for_key(&old)
+            .unwrap()
+            .iter()
+            .map(|l| l.id)
+            .collect();
+        store
+            .start_rotation(&NewRotation {
+                old_fingerprint: old,
+                old_key_path: self.old_path.clone(),
+                new_key_path: self.new_path(),
+                new_key_type: "ed25519".into(),
+                update_config: true,
+                no_passphrase,
+                new_key_comment: Some(comment.into()),
+                state: "planned".into(),
+                locations,
+            })
+            .unwrap();
     }
 
     /// An ssh wrapper that runs the real ssh, then kills its parent (the
@@ -315,7 +391,26 @@ fn cli_start_needs_yes() {
         log.contains("ssh_server srv-a: ") && log.contains("BatchMode=yes"),
         "{log}"
     );
-    assert!(!log.contains(&w.old_blob));
+    let new_blob = blob(&w.ssh_dir().join("id_new.pub"));
+    assert!(!log.contains(&w.old_blob) && !log.contains(&new_blob));
+    // The log file itself: private, and no key blob.
+    let file = fs::read_dir(w.home.path().join("data"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.to_string_lossy().ends_with(".netlog"))
+        .unwrap();
+    assert!(
+        file.file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("rotation-1-")
+    );
+    assert_eq!(
+        fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let text = fs::read_to_string(&file).unwrap();
+    assert!(!text.contains(&w.old_blob) && !text.contains(&new_blob));
 }
 
 /// Starts with the kill wrapper, checks the app died by SIGKILL, then
@@ -333,13 +428,9 @@ fn kill_then_resume(w: &World, kill_at: u32) -> String {
         stdout(&out),
         stderr(&out)
     );
-    // Every location still has a key that logs in (S-3).
-    for s in [&w.a, &w.b] {
-        let keys = w.keys_on(s);
-        assert!(
-            keys.contains(&w.old_blob) || keys.contains(&blob(&w.ssh_dir().join("id_new.pub")))
-        );
-    }
+    // Every location still has a key that logs in (S-3), and the other
+    // invariants hold at the kill point.
+    w.assert_invariants();
     let out = w.run(&["rotate", "status"]);
     assert_ok(&out);
     let status = stdout(&out);
@@ -376,4 +467,70 @@ fn cli_kill_after_remove_then_resume() {
     assert!(status.contains("last: remove_old start"), "{status}");
     let keys = fs::read_to_string(w.a.authorized_keys()).unwrap();
     assert!(!keys.contains(&w.old_blob));
+}
+
+#[test]
+fn cli_no_terminal_needs_no_passphrase() {
+    let w = world();
+    // `rotate start --yes` from cron: no terminal for a passphrase.
+    let args: Vec<String> = w
+        .rotate_args("start")
+        .into_iter()
+        .filter(|a| a != "--no-passphrase")
+        .chain(["--yes".to_string()])
+        .collect();
+    let before_db = fs::read(w.db()).unwrap();
+    let out = w.no_tty().args(&args).output().unwrap();
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(stderr(&out).contains("--no-passphrase"), "{}", stderr(&out));
+    assert_eq!(fs::read(w.db()).unwrap(), before_db);
+    assert!(!w.new_path().exists());
+
+    // A rotation that asked for a passphrase, resumed with no terminal:
+    // the generate step fails cleanly and makes no key.
+    w.insert_rotation(false, "new@test");
+    let out = w
+        .no_tty()
+        .args(["rotate", "resume", "1", "--yes"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "{}\n{}",
+        stdout(&out),
+        stderr(&out)
+    );
+    assert!(stdout(&out).contains("--no-passphrase"), "{}", stdout(&out));
+    assert!(!w.new_path().exists());
+    assert!(!w.ssh_dir().join("retired").exists());
+    assert!(w.keys_on(&w.a).contains(&w.old_blob));
+}
+
+#[test]
+fn cli_resume_uses_stored_key_choices() {
+    let w = world();
+    w.insert_rotation(true, "stored@test");
+    let out = w
+        .no_tty()
+        .args(["rotate", "resume", "1", "--yes"])
+        .output()
+        .unwrap();
+    assert_ok(&out);
+    let new_pub = fs::read_to_string(w.ssh_dir().join("id_new.pub")).unwrap();
+    assert!(new_pub.trim_end().ends_with("stored@test"), "{new_pub}");
+    w.assert_rotated();
+}
+
+#[test]
+fn cli_locations_remove_needs_confirm() {
+    let w = world();
+    let out = w.run(&["locations", "remove", "2"]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(stdout(&w.run(&["locations", "list"])).contains("[2] "));
+    let out = w.run(&["locations", "remove", "2", "--yes"]);
+    assert_ok(&out);
+    let list = stdout(&w.run(&["locations", "list"]));
+    assert!(!list.contains("[2] ") && list.contains("[1] "), "{list}");
+    assert!(w.run(&["locations", "remove", "2", "--yes"]).status.code() == Some(2));
 }

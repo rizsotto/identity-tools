@@ -53,6 +53,8 @@ pub struct EngineEnv {
     /// (`inventory::scan_config`), for the config update.
     pub config_files: Vec<PathBuf>,
     pub keygen_program: PathBuf,
+    /// For the dry-run and a new rotation. A running rotation uses the
+    /// choices stored in its row.
     pub passphrase: Passphrase,
     pub comment: Option<String>,
 }
@@ -320,6 +322,11 @@ impl<'a> Engine<'a> {
         self.rot.id
     }
 
+    /// The rotation row as last read.
+    pub fn rotation(&self) -> &Rotation {
+        &self.rot
+    }
+
     /// Runs every step that is left, in order. A failed step stops its
     /// location, not the others.
     pub async fn run(&mut self) -> Result<Summary, EngineError> {
@@ -528,8 +535,14 @@ impl<'a> Engine<'a> {
         let env = self.ctx.env;
         let mut req = KeygenRequest::new(&env.ssh_dir, &self.rot.new_key_path);
         req.key_type = key_type;
-        req.comment = env.comment.clone();
-        req.passphrase = env.passphrase;
+        // The choices stored with the rotation, so a resume makes the key
+        // the user asked for.
+        req.comment = self.rot.new_key_comment.clone();
+        req.passphrase = if self.rot.no_passphrase {
+            Passphrase::Empty
+        } else {
+            Passphrase::Terminal
+        };
         req.program = env.keygen_program.clone();
         Ok(req)
     }

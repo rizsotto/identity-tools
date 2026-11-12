@@ -137,6 +137,10 @@ pub struct NewRotation {
     pub new_key_path: PathBuf,
     pub new_key_type: String,
     pub update_config: bool,
+    /// Make the new key without a passphrase (`ssh-keygen -N ''`).
+    pub no_passphrase: bool,
+    /// The new key's comment; `None`: ssh-keygen's default.
+    pub new_key_comment: Option<String>,
     /// Initial state text, owned by the `rotation` crate.
     pub state: String,
     pub locations: Vec<LocationId>,
@@ -152,6 +156,8 @@ pub struct Rotation {
     pub new_key_type: String,
     pub new_fingerprint: Option<Fingerprint>,
     pub update_config: bool,
+    pub no_passphrase: bool,
+    pub new_key_comment: Option<String>,
     pub state: String,
     pub finished_at: Option<SystemTime>,
 }
@@ -181,7 +187,8 @@ pub struct StepEntry {
 }
 
 const ROTATION_COLUMNS: &str = "id, created_at, old_fingerprint, old_key_path, new_key_path, \
-                                new_key_type, new_fingerprint, update_config, state, finished_at";
+                                new_key_type, new_fingerprint, update_config, state, finished_at, \
+                                no_passphrase, new_comment";
 
 impl Store {
     /// Creates a rotation and its locations in one transaction. Refused
@@ -201,7 +208,8 @@ impl Store {
         let (_, old_fpr) = fingerprint_columns(&new.old_fingerprint);
         tx.execute(
             "INSERT INTO rotations (created_at, old_fingerprint, old_key_path, new_key_path, \
-             new_key_type, update_config, state) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             new_key_type, update_config, state, no_passphrase, new_comment) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 to_unix(SystemTime::now()),
                 old_fpr,
@@ -209,7 +217,9 @@ impl Store {
                 path_text(&new.new_key_path)?,
                 new.new_key_type,
                 new.update_config,
-                new.state
+                new.state,
+                new.no_passphrase,
+                new.new_key_comment
             ],
         )?;
         let id = tx.last_insert_rowid();
@@ -456,6 +466,8 @@ fn read_rotation(r: &Row<'_>) -> rusqlite::Result<Result<Rotation>> {
         new_key_type: r.get("new_key_type")?,
         new_fingerprint: new_fpr.map(Fingerprint::Ssh),
         update_config: r.get("update_config")?,
+        no_passphrase: r.get("no_passphrase")?,
+        new_key_comment: r.get("new_comment")?,
         state: r.get("state")?,
         finished_at: finished.map(from_unix),
     }))
@@ -565,6 +577,13 @@ pub fn scrub_detail(text: &str, secrets: &[&str]) -> String {
         out.push_str("...");
     }
     out
+}
+
+/// Pass 1 of [`scrub_detail`] alone: cuts every known secret out of
+/// `text` (exact, re-spaced, or a long piece), keeps the rest as it is,
+/// with no length cap. For logs that must stay readable.
+pub fn cut_known_secrets(text: &str, secrets: &[&str]) -> String {
+    cut_secrets(text, secrets)
 }
 
 /// Input past this many chars is dropped before scrubbing.
@@ -746,6 +765,8 @@ mod tests {
             new_key_path: "/h/.ssh/id_ed25519-20261112".into(),
             new_key_type: "ed25519".into(),
             update_config: true,
+            no_passphrase: false,
+            new_key_comment: Some("me@laptop".into()),
             state: "planned".into(),
             locations,
         }
@@ -769,7 +790,10 @@ mod tests {
         conn.pragma_update(None, "user_version", 1).unwrap();
         drop(conn);
         let mut store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 2);
+        assert_eq!(
+            store.schema_version().unwrap(),
+            crate::store::MIGRATIONS.len() as u32
+        );
 
         let id = store.add(&new_location("build", ED_FPR)).unwrap().id();
         let mut tables: Vec<String> = store
@@ -839,6 +863,9 @@ mod tests {
         let rot = store
             .start_rotation(&new_rotation(vec![ssh, forge]))
             .unwrap();
+        let row = store.rotation(rot).unwrap().unwrap();
+        assert!(!row.no_passphrase);
+        assert_eq!(row.new_key_comment.as_deref(), Some("me@laptop"));
 
         store
             .journal(rot, None, Step::Generate, Event::Start, None)

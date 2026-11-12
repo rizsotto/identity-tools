@@ -1851,6 +1851,7 @@ dependencies = [
  "clap",
  "identity-core",
  "inventory",
+ "libc",
  "providers",
  "rotation",
  "serde_json",

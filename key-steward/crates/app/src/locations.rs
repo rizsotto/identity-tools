@@ -24,6 +24,7 @@ pub async fn run(paths: &Paths, cmd: LocationsCmd) -> Result<u8, Fail> {
             key,
             purpose,
         } => add_forge(paths, kind, base_url, account, &key, purpose),
+        LocationsCmd::Remove { id, yes } => remove(paths, id, yes),
         LocationsCmd::Check { key } => check(paths, &key).await,
     }
 }
@@ -125,6 +126,47 @@ fn add_forge(
         inventory::Added::New(id) => println!("added location {id}"),
         inventory::Added::Existing(id) => println!("already stored as location {id}"),
     }
+    Ok(0)
+}
+
+fn remove(paths: &Paths, id: i64, yes: bool) -> Result<u8, Fail> {
+    let mut store = paths.existing_store()?;
+    let loc = store
+        .get(id)
+        .map_err(Fail::error)?
+        .ok_or_else(|| Fail::Refused(format!("no location {id}")))?;
+    if let Some(open) = store.open_rotation().map_err(Fail::error)? {
+        let in_it = store
+            .rotation_locations(open.id)
+            .map_err(Fail::error)?
+            .iter()
+            .any(|l| l.location_id == id);
+        if in_it {
+            return Err(Fail::Refused(format!(
+                "location {id} is part of open rotation {}; skip or finish it there first",
+                open.id
+            )));
+        }
+    }
+    let what = format!(
+        "[{id}] {} {} ({}) {}",
+        loc.kind.as_str(),
+        loc.target.label(),
+        loc.purpose.as_str(),
+        loc.key
+    );
+    let ok = yes
+        || setup::ask(
+            &format!("Forget location {what}? Nothing changes on the server. [y/N]"),
+            false,
+        );
+    if !ok {
+        return Err(Fail::Refused(
+            "not confirmed; pass --yes, or answer in a terminal".into(),
+        ));
+    }
+    store.remove(id).map_err(Fail::error)?;
+    println!("removed location {what}");
     Ok(0)
 }
 

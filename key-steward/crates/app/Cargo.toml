@@ -9,6 +9,7 @@ publish.workspace = true
 clap = { version = "4", features = ["derive"] }
 identity-core = { path = "../../../crates/identity-core" }
 inventory = { path = "../inventory" }
+libc = "0.2"
 providers = { path = "../providers" }
 rotation = { path = "../rotation" }
 serde_json = "1"

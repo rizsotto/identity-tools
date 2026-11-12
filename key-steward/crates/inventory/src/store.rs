@@ -104,6 +104,12 @@ CREATE TABLE rotation_steps (
 );
 CREATE INDEX rotation_steps_rotation ON rotation_steps (rotation_id, id);
 "#,
+    // The new key's settings, so a resume makes the key the user asked
+    // for. Never a passphrase: only whether there is one.
+    r#"
+ALTER TABLE rotations ADD COLUMN no_passphrase INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE rotations ADD COLUMN new_comment TEXT;
+"#,
 ];
 
 /// Result of [`Store::add`].

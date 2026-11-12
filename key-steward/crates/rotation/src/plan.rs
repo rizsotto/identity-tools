@@ -181,6 +181,9 @@ pub struct Plan {
     pub new_path: PathBuf,
     pub key_type: KeyType,
     pub update_config: bool,
+    /// The new key gets no passphrase.
+    pub no_passphrase: bool,
+    pub comment: Option<String>,
     /// The `ssh-keygen` run, as text.
     pub keygen: String,
     pub locations: Vec<PlanLocation>,
@@ -215,6 +218,8 @@ impl Plan {
             new_key_path: self.new_path.clone(),
             new_key_type: self.key_type.as_str().into(),
             update_config: self.update_config,
+            no_passphrase: self.no_passphrase,
+            new_key_comment: self.comment.clone(),
             state: String::new(),
             locations: self.rotated(),
         }
@@ -768,6 +773,13 @@ pub async fn plan(
              locations add-forge)"
         )));
     }
+    for id in &req.skip {
+        if !stored.iter().any(|l| l.id == *id) {
+            return Err(PlanError::Refused(format!(
+                "--skip {id}: no location {id} holds the old key"
+            )));
+        }
+    }
     let old = KeyRef {
         fingerprint: old_fpr.clone(),
         purpose: Purpose::SshAuth,
@@ -797,13 +809,6 @@ pub async fn plan(
             outcome,
             notes,
         });
-    }
-    for id in &req.skip {
-        if !stored.iter().any(|l| l.id == *id) {
-            return Err(PlanError::Refused(format!(
-                "--skip {id}: no location {id} holds the old key"
-            )));
-        }
     }
 
     let mut warnings = Vec::new();
@@ -897,6 +902,8 @@ pub async fn plan(
         new_path,
         key_type: req.key_type,
         update_config: req.update_config,
+        no_passphrase: env.passphrase == Passphrase::Empty,
+        comment: env.comment.clone(),
         locations,
         config,
         config_at_retire,

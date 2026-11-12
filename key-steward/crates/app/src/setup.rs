@@ -1,13 +1,16 @@
 //! Paths, providers, tokens and the questions a run asks.
 
-use std::fs::OpenOptions;
+use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, IsTerminal, Write};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
+use std::time::UNIX_EPOCH;
 
-use inventory::{LocationKind, Store, Target, scan_config};
+use identity_core::{PublicKey, parse_public_keys, read_key_file};
+
+use inventory::{LocationKind, Rotation, Store, Target, cut_known_secrets, scan_config};
 use providers::{
     Forgejo, GitHub, GitLab, InMemoryTokenSource, NetLog, OpenPgpReader, SecretServiceTokens,
     SshServer, TokenKey, TokenSource,
@@ -110,9 +113,17 @@ impl Paths {
         Ok(env)
     }
 
-    /// The network log file of rotation `id`, next to the database.
-    pub fn netlog_path(&self, id: i64) -> PathBuf {
-        self.db.with_file_name(format!("rotation-{id}.netlog"))
+    /// The network log file of a rotation, next to the database. The
+    /// creation time is in the name, so a file left from another database
+    /// with the same rotation id is never appended to.
+    pub fn netlog_path(&self, rot: &Rotation) -> PathBuf {
+        let created = rot
+            .created_at
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        self.db
+            .with_file_name(format!("rotation-{}-{created}.netlog", rot.id))
     }
 }
 
@@ -206,15 +217,43 @@ pub struct RunHooks {
     pub netlog: NetLog,
     file: Mutex<Option<PathBuf>>,
     written: Mutex<usize>,
+    /// Tokens of this run; cut out of the log file.
+    secrets: Vec<String>,
+    /// Private key paths whose `.pub` blobs are cut out of the log file.
+    keys: Vec<PathBuf>,
     pub offer_ssh_add: Option<PathBuf>,
 }
 
+/// The base64 blob of the key in `<private>.pub`, if it can be read.
+fn key_blob(private: &Path) -> Option<String> {
+    let mut p = private.as_os_str().to_owned();
+    p.push(".pub");
+    let bytes = read_key_file(Path::new(&p)).ok()?;
+    match parse_public_keys(&bytes)
+        .ok()?
+        .into_iter()
+        .next()?
+        .key
+        .ok()?
+    {
+        PublicKey::Ssh(k) => k.encoded.split_whitespace().nth(1).map(str::to_string),
+        _ => None,
+    }
+}
+
 impl RunHooks {
-    pub fn new(netlog: &NetLog, offer_ssh_add: Option<PathBuf>) -> Self {
+    pub fn new(
+        netlog: &NetLog,
+        secrets: Vec<String>,
+        keys: Vec<PathBuf>,
+        offer_ssh_add: Option<PathBuf>,
+    ) -> Self {
         RunHooks {
             netlog: netlog.clone(),
             file: Mutex::new(None),
             written: Mutex::new(0),
+            secrets,
+            keys,
             offer_ssh_add,
         }
     }
@@ -224,8 +263,10 @@ impl RunHooks {
         self.flush();
     }
 
-    /// Appends the entries not yet written (file 0600). No key material
-    /// or token is in them (providers scrub them).
+    /// Appends the entries not yet written. Known secrets (tokens, both
+    /// key blobs) are cut out first, on top of the providers' own
+    /// scrubbing (S-4, S-8). The file is opened without following a
+    /// symlink and set to 0600.
     pub fn flush(&self) {
         let Some(path) = self.file.lock().unwrap_or_else(|e| e.into_inner()).clone() else {
             return;
@@ -235,26 +276,40 @@ impl RunHooks {
         if entries.len() <= *written {
             return;
         }
+        let blobs: Vec<String> = self.keys.iter().filter_map(|k| key_blob(k)).collect();
+        let secrets: Vec<&str> = self
+            .secrets
+            .iter()
+            .chain(blobs.iter())
+            .map(String::as_str)
+            .collect();
         let text: String = entries[*written..]
             .iter()
             .map(|e| {
                 let t = e
                     .time
-                    .duration_since(std::time::UNIX_EPOCH)
+                    .duration_since(UNIX_EPOCH)
                     .map(|d| d.as_secs())
                     .unwrap_or(0);
-                format!(
-                    "{t} {} {}: {} -> {}\n",
-                    e.kind, e.target, e.action, e.outcome
-                )
+                let line = format!("{} {}: {} -> {}", e.kind, e.target, e.action, e.outcome);
+                let line: String = cut_known_secrets(&line, &secrets)
+                    .chars()
+                    .map(|c| if c.is_control() { ' ' } else { c })
+                    .collect();
+                format!("{t} {line}\n")
             })
             .collect();
         let f = OpenOptions::new()
             .create(true)
             .append(true)
             .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
             .open(&path);
-        match f.and_then(|mut f| f.write_all(text.as_bytes())) {
+        let r = f.and_then(|mut f| {
+            f.set_permissions(fs::Permissions::from_mode(0o600))?;
+            f.write_all(text.as_bytes())
+        });
+        match r {
             Ok(()) => *written = entries.len(),
             Err(e) => eprintln!(
                 "key-steward: cannot write the network log {}: {e}",
@@ -289,4 +344,49 @@ impl Hooks for RunHooks {
 /// Reads the network log file of a rotation, if any.
 pub fn read_netlog(path: &Path) -> Option<String> {
     std::fs::read_to_string(path).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use inventory::SshHost;
+
+    #[test]
+    fn netlog_file_has_no_token_or_key_blob_and_is_private() {
+        let home = test_support::TempHome::new(std::env::temp_dir());
+        let dir = home.path().to_path_buf();
+        let key = dir.join("id_new");
+        let blob = "AAAAC3NzaC1lZDI1NTE5AAAAIAMl5AYo+0XU3NureorqVJl9BQCzJ/7O6oQuY+n0zaV+";
+        fs::write(
+            dir.join("id_new.pub"),
+            format!("ssh-ed25519 {blob} new@test\n"),
+        )
+        .unwrap();
+        let token = "glpat-FAKE-token-0123456789abcdef";
+        let log = NetLog::new();
+        log.record(
+            LocationKind::SshServer,
+            &Target::Ssh(SshHost::new("srv")),
+            format!("ssh srv echo {blob} {token}"),
+            "exit 0",
+        );
+        let path = dir.join("rotation-1-5.netlog");
+        // A stale file with loose mode: its mode is fixed.
+        fs::write(&path, "").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        let hooks = RunHooks::new(&log, vec![token.into()], vec![key], None);
+        hooks.set_file(path.clone());
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("ssh srv echo"), "{text}");
+        assert!(!text.contains(blob) && !text.contains(token), "{text}");
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+
+        // A symlink in its place is not followed.
+        let link = dir.join("rotation-2-5.netlog");
+        std::os::unix::fs::symlink(dir.join("elsewhere"), &link).unwrap();
+        let hooks = RunHooks::new(&log, Vec::new(), Vec::new(), None);
+        hooks.set_file(link);
+        assert!(!dir.join("elsewhere").exists());
+    }
 }

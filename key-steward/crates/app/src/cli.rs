@@ -74,6 +74,15 @@ pub enum LocationsCmd {
         #[arg(long, value_enum)]
         purpose: KeyPurpose,
     },
+    /// Forget a location, for example a server that is gone for good. It
+    /// changes nothing on the server. A location of the old key blocks
+    /// retire until it is rotated or removed.
+    Remove {
+        id: i64,
+        /// Do not ask.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Check every location of a key and store the result.
     Check {
         #[arg(long)]
