@@ -274,6 +274,10 @@ dependencies = [
 name = "crypto"
 version = "0.1.0"
 dependencies = [
+ "gpgme",
+ "gpgme-sys",
+ "identity-core",
+ "tempfile",
  "thiserror",
 ]
 
@@ -914,7 +918,6 @@ dependencies = [
  "base64ct",
  "bech32",
  "gpgme",
- "gpgme-sys",
  "ssh-key",
  "tempfile",
  "thiserror",

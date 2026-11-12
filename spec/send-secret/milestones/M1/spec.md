@@ -50,10 +50,9 @@ interoperates with `gpg` and Go `age`. No network, no UI, no TOFU store yet.
   `encrypt-to`), and an age message has no stanza for the sender.
   Refs: [S-8](../../SPEC.md#10-security-rules-must), decision 0002
   (encrypt-to-self sub-decision)
-- [ ] Armored OpenPGP output has no `Comment:` or `Version:` armor header,
-  also when gpg.conf sets `comment` or `emit-version`. Refs: S-8,
-  decision [0003](../../decisions/0003-openpgp-armor-headers.md) (research,
-  blocks armored OpenPGP output)
+- [ ] Armored OpenPGP output is gpg's own standard armor, unchanged, and
+  plain `gpg --decrypt` opens it. Refs: S-8,
+  decision [0003](../../decisions/0003-openpgp-armor-headers.md)
 - [ ] Self copy: a separate message encrypted only to the sender, on by
   default, `--no-self-copy` skips it. OpenPGP uses the user's default
   secret key. age uses the user's own native X25519 identity (created on
