@@ -26,6 +26,11 @@ pub enum ProviderError {
     /// No token is stored for this forge account.
     #[error("no token is stored for {0}")]
     NoToken(String),
+    /// The token belongs to another account than the target. The forge
+    /// lists the token owner's keys, so no answer about the target is
+    /// possible.
+    #[error("the token is for the account {owner}, not {account}")]
+    TokenOwner { account: String, owner: String },
     /// The forge answered with JSON we do not understand.
     #[error("unexpected answer from {forge}: {what}")]
     BadResponse { forge: LocationKind, what: String },

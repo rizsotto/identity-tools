@@ -7,7 +7,9 @@ use async_trait::async_trait;
 use identity_core::{Fingerprint, PublicKey};
 use inventory::{LocationKind, Purpose, Target};
 
-use super::{ForgeCore, Listing, OpenPgpReader, base_url, check_objects, text_bytes, title};
+use super::{
+    ForgeCore, Listing, OpenPgpReader, base_url, check_objects, check_owner, text_bytes, title,
+};
 use crate::error::ProviderError;
 use crate::http::AuthStyle;
 use crate::netlog::NetLog;
@@ -19,8 +21,8 @@ const API_VERSION: &str = "2026-03-10";
 const KIND: LocationKind = LocationKind::GitHub;
 
 /// GitHub provider. The target is `https://github.com` plus the account
-/// name. The token must belong to that account: the API lists the keys of
-/// the token's owner.
+/// name. The API lists the keys of the token's owner, so every listing
+/// first checks with `GET /user` that the owner is the target account.
 #[derive(Clone)]
 pub struct GitHub {
     core: ForgeCore,
@@ -66,6 +68,7 @@ impl GitHub {
                 ],
             )
             .await?;
+        check_owner(KIND, &client, target, "login").await?;
         let mut out = Listing::default();
         for (path, purpose) in [
             ("/user/keys?per_page=100", Purpose::SshAuth),

@@ -25,6 +25,10 @@ async fn mock_gitlab() -> MockServer {
             .and(path(format!("/gitlab/api/v4{p}")))
             .and(header("private-token", TOKEN))
     };
+    get("/user")
+        .respond_with(json(fixture("gitlab/user.json")))
+        .mount(&server)
+        .await;
     get("/user/keys")
         .and(query_param("page", "2"))
         .respond_with(json(fixture("gitlab/user_keys_page2.json")).insert_header("x-next-page", ""))
@@ -85,9 +89,10 @@ async fn gitlab_list_against_mock() {
     assert_eq!(keys[0].remote_id.as_deref(), Some("1"));
 
     let entries = log.entries();
-    assert_eq!(entries.len(), 3, "{}", log.render());
+    assert_eq!(entries.len(), 4, "{}", log.render());
+    assert!(entries[0].action.ends_with("/gitlab/api/v4/user"));
     assert!(
-        entries[1]
+        entries[2]
             .action
             .contains("/gitlab/api/v4/user/keys?per_page=100&page=2")
     );
@@ -149,4 +154,14 @@ async fn gitlab_refuses_plain_http_and_ssh_targets() {
     let ssh = Target::Ssh(providers::SshHost::new("build"));
     let err = p.list(&ssh).await.unwrap_err();
     assert!(matches!(err, ProviderError::WrongTarget { .. }), "{err:?}");
+}
+
+#[tokio::test]
+async fn gitlab_token_owner_must_be_target_account() {
+    let gnupg = TempGnupgHome::new();
+    let other = owner_only("/gitlab/api/v4", "username", "someoneelse").await;
+    let log = NetLog::new();
+    let (p, target) = gitlab(&other, &gnupg, &log);
+    let k = key(openpgp_fpr("gitlab/user_gpg_keys.json"), Purpose::OpenPgp);
+    assert_owner_mismatch(&p, &target, &log, &k).await;
 }

@@ -112,6 +112,39 @@ impl ForgeCore {
     }
 }
 
+/// Checks that the token belongs to the target account: the key lists
+/// are those of the token's owner (`GET /user`). `field` is the user name
+/// field (`login` or `username`). Compared without case, as the forges do.
+async fn check_owner(
+    kind: LocationKind,
+    client: &HttpClient,
+    target: &Target,
+    field: &str,
+) -> Result<(), ProviderError> {
+    let Target::Account { account, .. } = target else {
+        return Err(ProviderError::WrongTarget { kind });
+    };
+    let user = client.get_json("/user").await?;
+    let owner = user[field]
+        .as_str()
+        .ok_or_else(|| ProviderError::BadResponse {
+            forge: kind,
+            what: format!("/user has no {field}"),
+        })?;
+    if owner.eq_ignore_ascii_case(account) {
+        Ok(())
+    } else {
+        Err(ProviderError::TokenOwner {
+            account: account.clone(),
+            owner: owner
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(100)
+                .collect(),
+        })
+    }
+}
+
 /// The base URL of an account target, without a trailing `/`.
 fn base_url(kind: LocationKind, target: &Target) -> Result<&str, ProviderError> {
     match target {

@@ -63,6 +63,13 @@ async fn check_all_updates_status() {
         .respond_with(ResponseTemplate::new(200).set_body_json(body))
         .mount(&github)
         .await;
+    Mock::given(method("GET"))
+        .and(path("/user"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"login": "testuser"})),
+        )
+        .mount(&github)
+        .await;
     for p in ["/user/ssh_signing_keys", "/user/gpg_keys"] {
         Mock::given(method("GET"))
             .and(path(p))

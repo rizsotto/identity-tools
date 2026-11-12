@@ -11,7 +11,9 @@ use async_trait::async_trait;
 use identity_core::{Fingerprint, PublicKey};
 use inventory::{LocationKind, Purpose, Target};
 
-use super::{ForgeCore, Listing, OpenPgpReader, base_url, base64_bytes, check_objects, title};
+use super::{
+    ForgeCore, Listing, OpenPgpReader, base_url, base64_bytes, check_objects, check_owner, title,
+};
 use crate::error::ProviderError;
 use crate::http::AuthStyle;
 use crate::netlog::NetLog;
@@ -24,8 +26,8 @@ const PAGE: &str = "limit=50";
 
 /// Forgejo provider, also for Gitea and Codeberg. The target's base URL
 /// is the instance (`https://codeberg.org`); the API is under
-/// `<base>/api/v1`. The token must belong to the target account: the API
-/// lists the keys of the token's owner.
+/// `<base>/api/v1`. The API lists the keys of the token's owner, so every listing
+/// first checks with `GET /user` that the owner is the target account.
 #[derive(Clone)]
 pub struct Forgejo {
     core: ForgeCore,
@@ -44,6 +46,7 @@ impl Forgejo {
             .core
             .client(KIND, target, &api, AuthStyle::TokenPrefix, &[])
             .await?;
+        check_owner(KIND, &client, target, "login").await?;
         let mut out = Listing::default();
         let items = client.get_all_pages(&format!("/user/keys?{PAGE}")).await?;
         check_objects(KIND, &items)?;

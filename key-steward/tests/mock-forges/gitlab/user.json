@@ -1,0 +1,7 @@
+{
+  "id": 1,
+  "username": "testuser",
+  "name": "Test User",
+  "state": "active",
+  "web_url": "https://gitlab.example.invalid/testuser"
+}

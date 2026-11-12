@@ -7,7 +7,9 @@ use async_trait::async_trait;
 use identity_core::{Fingerprint, PublicKey};
 use inventory::{LocationKind, Purpose, Target};
 
-use super::{ForgeCore, Listing, OpenPgpReader, base_url, check_objects, text_bytes, title};
+use super::{
+    ForgeCore, Listing, OpenPgpReader, base_url, check_objects, check_owner, text_bytes, title,
+};
 use crate::error::ProviderError;
 use crate::http::AuthStyle;
 use crate::netlog::NetLog;
@@ -18,8 +20,8 @@ const KIND: LocationKind = LocationKind::GitLab;
 
 /// GitLab provider. The target's base URL is the instance
 /// (`https://gitlab.com` or a self-hosted one); the API is under
-/// `<base>/api/v4`. The token must belong to the target account: the API
-/// lists the keys of the token's owner.
+/// `<base>/api/v4`. The API lists the keys of the token's owner, so every listing
+/// first checks with `GET /user` that the owner is the target account.
 #[derive(Clone)]
 pub struct GitLab {
     core: ForgeCore,
@@ -38,6 +40,7 @@ impl GitLab {
             .core
             .client(KIND, target, &api, AuthStyle::PrivateToken, &[])
             .await?;
+        check_owner(KIND, &client, target, "username").await?;
         let mut out = Listing::default();
         let items = client.get_all_pages("/user/keys?per_page=100").await?;
         check_objects(KIND, &items)?;

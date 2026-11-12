@@ -29,6 +29,10 @@ async fn mock_github(gpg_body: Option<String>) -> MockServer {
             .and(header("x-github-api-version", "2026-03-10"))
             .and(header("accept", "application/vnd.github+json"))
     };
+    get("/user")
+        .respond_with(json(fixture("github/user.json")))
+        .mount(&server)
+        .await;
     get("/user/keys")
         .and(query_param("page", "2"))
         .respond_with(json(fixture("github/user_keys_page2.json")))
@@ -105,7 +109,8 @@ async fn github_list_against_mock() {
 
     // NFR-2: one entry per request, no token (S-4).
     let entries = log.entries();
-    assert_eq!(entries.len(), 4, "{}", log.render());
+    assert_eq!(entries.len(), 5, "{}", log.render());
+    assert!(entries[0].action.ends_with("/user"), "{}", log.render());
     assert!(entries.iter().all(|e| e.kind == LocationKind::GitHub));
     assert_no_token(&log, &[]);
 }
@@ -233,4 +238,26 @@ async fn github_local_gpg_failure_is_not_blamed_on_forge() {
     };
     assert!(text.contains("GnuPG failed"), "{text}");
     assert!(!text.contains("did not send"), "{text}");
+}
+
+/// The forge lists the token owner's keys, so the owner must be the
+/// target account (case does not matter).
+#[tokio::test]
+async fn github_token_owner_must_be_target_account() {
+    let gnupg = TempGnupgHome::new();
+    let server = mock_github(None).await;
+    let target = account_named("https://github.com", "TestUser");
+    let p = GitHub::new(
+        tokens(LocationKind::GitHub, &target),
+        OpenPgpReader::with_home(gnupg.path()),
+        NetLog::new(),
+    )
+    .with_api_url(server.uri());
+    assert!(!p.list(&target).await.unwrap().is_empty());
+
+    let other = owner_only("", "login", "someoneelse").await;
+    let log = NetLog::new();
+    let (p, target) = github(&other, &gnupg, &log);
+    let k = key(openpgp_fpr("github/user_gpg_keys.json"), Purpose::OpenPgp);
+    assert_owner_mismatch(&p, &target, &log, &k).await;
 }

@@ -25,6 +25,10 @@ async fn mock_forgejo(page2: Option<String>) -> MockServer {
             .and(path(format!("/api/v1{p}")))
             .and(header("authorization", auth.as_str()))
     };
+    get("/user")
+        .respond_with(json(fixture("forgejo/user.json")))
+        .mount(&server)
+        .await;
     get("/user/keys")
         .and(query_param("page", "2"))
         .respond_with(json(
@@ -91,7 +95,7 @@ async fn forgejo_list_against_mock() {
     assert_eq!(keys[0].title.as_deref(), Some("laptop"));
     assert_eq!(keys[0].remote_id.as_deref(), Some("11"));
 
-    assert_eq!(log.entries().len(), 3, "{}", log.render());
+    assert_eq!(log.entries().len(), 4, "{}", log.render());
     assert_no_token(&log, &[]);
 }
 
@@ -148,4 +152,14 @@ async fn forgejo_ignores_server_fingerprint_field() {
         keys.iter()
             .any(|k| k.fingerprint == ssh_fprs("forgejo/user_keys_page2.json")[0])
     );
+}
+
+#[tokio::test]
+async fn forgejo_token_owner_must_be_target_account() {
+    let gnupg = TempGnupgHome::new();
+    let other = owner_only("/api/v1", "login", "someoneelse").await;
+    let log = NetLog::new();
+    let (p, target) = forgejo(&other, &gnupg, &log);
+    let k = key(openpgp_fpr("forgejo/user_gpg_keys.json"), Purpose::OpenPgp);
+    assert_owner_mismatch(&p, &target, &log, &k).await;
 }
