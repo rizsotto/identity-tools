@@ -349,3 +349,170 @@ async fn plain_http_url_refused() {
     assert!(matches!(err, NetError::NotHttps(_)), "{err:?}");
     assert!(server.received_requests().await.unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn mock_map_answers_dns_check() {
+    let server = serve(200, b"").await;
+    let net = net(&[("https://openpgpkey.example.org", *server.address())]);
+    assert!(
+        net.host_has_address("openpgpkey.example.org", soon())
+            .await
+            .unwrap()
+    );
+    assert!(
+        net.host_has_address("OpenPGPKey.Example.org", soon())
+            .await
+            .unwrap()
+    );
+    assert!(
+        !net.host_has_address("openpgpkey.example.net", soon())
+            .await
+            .unwrap()
+    );
+    let log: Vec<_> = net
+        .log()
+        .entries()
+        .into_iter()
+        .map(|e| format!("{} -> {}", e.action, e.outcome))
+        .collect();
+    assert_eq!(
+        log,
+        [
+            "DNS openpgpkey.example.org -> has an address",
+            "DNS openpgpkey.example.org -> has an address",
+            "DNS openpgpkey.example.net -> no address",
+        ]
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn rate_limit_429_with_retry_after() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "120"))
+        .mount(&server)
+        .await;
+    let net = net(&[("https://keys.openpgp.org", *server.address())]);
+    let err = net
+        .get(&url("https://keys.openpgp.org/vks/v1/by-email/a"), soon())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        NetError::RateLimited {
+            retry_after: Some(Duration::from_secs(120))
+        }
+    );
+    assert!(err.to_string().contains("try again in 120 s"), "{err}");
+}
+
+#[tokio::test]
+async fn rate_limit_429_without_retry_after() {
+    let server = serve(429, b"slow down").await;
+    let net = net(&[("https://keys.openpgp.org", *server.address())]);
+    let err = net
+        .get(&url("https://keys.openpgp.org/vks/v1/by-email/a"), soon())
+        .await
+        .unwrap_err();
+    assert_eq!(err, NetError::RateLimited { retry_after: None });
+}
+
+#[tokio::test]
+async fn cooldown_skips_host_and_says_so() {
+    let limited = serve(429, b"").await;
+    let other = serve(200, b"KEY").await;
+    let net = net(&[
+        ("https://keys.openpgp.org", *limited.address()),
+        ("https://github.com", *other.address()),
+    ]);
+    let u = url("https://keys.openpgp.org/vks/v1/by-email/a");
+    assert!(matches!(
+        net.get(&u, soon()).await,
+        Err(NetError::RateLimited { .. })
+    ));
+    let err = net
+        .get(&url("https://keys.openpgp.org/other"), soon())
+        .await
+        .unwrap_err();
+    match &err {
+        NetError::CoolingDown { host, wait } => {
+            assert_eq!(host, "keys.openpgp.org");
+            assert!(*wait > Duration::from_secs(50), "{wait:?}");
+        }
+        e => panic!("not a cooldown: {e:?}"),
+    }
+    assert_eq!(limited.received_requests().await.unwrap().len(), 1);
+    let log = net.log().entries();
+    assert_eq!(log.len(), 2);
+    assert!(
+        log[1]
+            .outcome
+            .starts_with("skipped: keys.openpgp.org rate limited us"),
+        "{}",
+        log[1].outcome
+    );
+    // Other hosts are not affected.
+    assert!(
+        net.get(&url("https://github.com/alice.keys"), soon())
+            .await
+            .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn cooldown_ends_after_retry_after() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "0"))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("KEY"))
+        .mount(&server)
+        .await;
+    let net = net(&[("https://example.org", *server.address())]);
+    let u = url("https://example.org/k");
+    assert!(net.get(&u, soon()).await.is_err());
+    assert_eq!(net.get(&u, soon()).await.unwrap().body, b"KEY");
+}
+
+#[tokio::test]
+async fn github_403_with_ratelimit_remaining_0() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(
+            ResponseTemplate::new(403)
+                .insert_header("x-ratelimit-remaining", "0")
+                .insert_header("retry-after", "30"),
+        )
+        .mount(&server)
+        .await;
+    let net = net(&[("https://github.com", *server.address())]);
+    let err = net
+        .get(&url("https://github.com/alice.keys"), soon())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        NetError::RateLimited {
+            retry_after: Some(Duration::from_secs(30))
+        }
+    );
+}
+
+#[tokio::test]
+async fn plain_403_is_http_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(403).insert_header("x-ratelimit-remaining", "12"))
+        .mount(&server)
+        .await;
+    let net = net(&[("https://github.com", *server.address())]);
+    let err = net
+        .get(&url("https://github.com/alice.keys"), soon())
+        .await
+        .unwrap_err();
+    assert_eq!(err, NetError::Http(403));
+}

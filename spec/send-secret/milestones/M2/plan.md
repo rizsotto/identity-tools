@@ -84,12 +84,13 @@ forge code itself does not carry over. What is shared:
   `openpgpkey.<domain>` has an address. The check calls `getaddrinfo` on a
   blocking thread and tells "no such name / no address" (`EAI_NONAME`,
   `EAI_NODATA`) apart from "try again" (`EAI_AGAIN`, other errors). Only the
-  first falls back to direct. Preferred crate: `dns-lookup` (its error kind
-  exposes the EAI code; check the API in task T05 before relying on it), else
-  a small `libc::getaddrinfo` wrapper with a `SAFETY` comment. The addresses
-  found are handed to reqwest with `ClientBuilder::resolve_to_addrs`, so the
-  request uses the same answer (no second lookup). The DNS check is logged
-  (NFR-2: it is network traffic too).
+  first falls back to direct. Crate: `dns-lookup` 4.0 (checked in T06:
+  `LookupError::kind()` gives `NoName`, `NoData`, `Again`, ...). The client
+  is built once, so instead of `ClientBuilder::resolve_to_addrs` the real
+  client has a small `reqwest::dns::Resolve` that answers from the
+  addresses the check found (no second lookup) and else calls
+  `getaddrinfo` on a blocking thread. The mock client's resolver always
+  fails. The DNS check is logged (NFR-2: it is network traffic too).
 
 ### Mock endpoints (no real network in tests, ever)
 

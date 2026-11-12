@@ -8,15 +8,21 @@
 //! - Tests map https origins to loopback mock servers with
 //!   [`Net::with_mock_origins`]. A host outside the map gets an error, never
 //!   a connection. The shipped binary has no way to turn this on.
+//! - Rate limits: a 429, or a 403 with `x-ratelimit-remaining: 0`, puts the
+//!   host on a cooldown for the life of this `Net`. Never an automatic retry.
+//! - The WKD DNS check ([`Net::host_has_address`]) keeps its answer, and
+//!   the request to that host uses it (no second lookup).
 
 use std::collections::HashMap;
 use std::fmt;
-use std::net::SocketAddr;
-use std::sync::Arc;
-use std::time::Duration;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use dns_lookup::LookupErrorKind;
 
 use identity_core::MAX_KEY_INPUT;
-use reqwest::header::LOCATION;
+use reqwest::header::{HeaderMap, LOCATION, RETRY_AFTER};
 use reqwest::{Client, StatusCode, redirect};
 use tokio::time::{Instant, timeout_at};
 use url::{Position, Url};
@@ -26,6 +32,10 @@ use crate::netlog::NetLog;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const USER_AGENT: &str = concat!("send-secret/", env!("CARGO_PKG_VERSION"));
+/// Cooldown after a rate limit answer without a usable `Retry-After`.
+const DEFAULT_COOLDOWN: Duration = Duration::from_secs(60);
+/// Longest cooldown a server can ask for.
+const MAX_COOLDOWN: Duration = Duration::from_secs(3600);
 
 /// A network error. The text never holds response bytes.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -40,6 +50,12 @@ pub enum NetError {
     Http(u16),
     #[error("HTTP 401: the server asked for a login, which is never answered")]
     LoginRequired,
+    #[error("rate limited by the server{}", wait_text(*.retry_after))]
+    RateLimited { retry_after: Option<Duration> },
+    #[error("skipped: {host} rate limited us{}", wait_text(Some(*.wait)))]
+    CoolingDown { host: String, wait: Duration },
+    #[error("DNS lookup failed: {0}")]
+    Dns(String),
     #[error("refused: {0} is not an https URL")]
     NotHttps(String),
     #[error("more than {0} redirects; stopped")]
@@ -116,12 +132,17 @@ enum Mode {
     Mock(OriginMap),
 }
 
+/// Addresses found by the DNS check, by lower case host name.
+type DnsCache = Arc<Mutex<HashMap<String, Vec<IpAddr>>>>;
+
 #[derive(Debug)]
 struct Inner {
     client: Client,
     mode: Mode,
     log: NetLog,
     max_redirects: u8,
+    dns: DnsCache,
+    cooldowns: Mutex<HashMap<String, Instant>>,
 }
 
 /// The HTTP layer. Cheap to clone; clones share the client and the log.
@@ -139,11 +160,13 @@ impl Net {
     /// The real client: https only, system DNS, system CA store, proxies
     /// from the environment.
     pub fn new(cfg: &ResolverConfig) -> Result<Net, NetError> {
+        let dns = DnsCache::default();
         let client = base_builder()
             .https_only(true)
+            .dns_resolver(CachedDns(dns.clone()))
             .build()
             .map_err(|e| NetError::Setup(error_chain(&e)))?;
-        Ok(Net::from_parts(client, Mode::Real, cfg))
+        Ok(Net::from_parts(client, Mode::Real, cfg, dns))
     }
 
     /// Tests only, by API (no env var, no config file, no CLI flag): every
@@ -161,18 +184,59 @@ impl Net {
             .dns_resolver(NoDns)
             .build()
             .map_err(|e| NetError::Setup(error_chain(&e)))?;
-        Ok(Net::from_parts(client, Mode::Mock(map), cfg))
+        Ok(Net::from_parts(
+            client,
+            Mode::Mock(map),
+            cfg,
+            DnsCache::default(),
+        ))
     }
 
-    fn from_parts(client: Client, mode: Mode, cfg: &ResolverConfig) -> Net {
+    fn from_parts(client: Client, mode: Mode, cfg: &ResolverConfig, dns: DnsCache) -> Net {
         Net {
             inner: Arc::new(Inner {
                 client,
                 mode,
                 log: NetLog::new(),
                 max_redirects: cfg.max_redirects,
+                dns,
+                cooldowns: Mutex::new(HashMap::new()),
             }),
         }
+    }
+
+    /// The WKD DNS check: does `host` have an address? `Ok(false)` only for
+    /// "no such name" or "no address" (`EAI_NONAME`, `EAI_NODATA`); "try
+    /// again" and other failures are errors. Logged (NFR-2). In test mode,
+    /// a host has an address when it is in the origin map.
+    pub async fn host_has_address(&self, host: &str, deadline: Instant) -> Result<bool, NetError> {
+        let host = host.to_ascii_lowercase();
+        let result = match &self.inner.mode {
+            Mode::Mock(map) => Ok(map.map.keys().any(|(h, _)| *h == host)),
+            Mode::Real => {
+                let name = host.clone();
+                let lookup = tokio::task::spawn_blocking(move || system_lookup(&name));
+                match timeout_at(deadline, lookup).await {
+                    Err(_) => Err(NetError::Timeout),
+                    Ok(Err(e)) => Err(NetError::Dns(e.to_string())),
+                    Ok(Ok(Err(e))) => Err(e),
+                    Ok(Ok(Ok(addrs))) => {
+                        let found = !addrs.is_empty();
+                        if found {
+                            lock(&self.inner.dns).insert(host.clone(), addrs);
+                        }
+                        Ok(found)
+                    }
+                }
+            }
+        };
+        let outcome = match &result {
+            Ok(true) => "has an address".to_string(),
+            Ok(false) => "no address".to_string(),
+            Err(e) => e.to_string(),
+        };
+        self.inner.log.record(format!("DNS {host}"), outcome);
+        result
     }
 
     pub fn log(&self) -> &NetLog {
@@ -207,10 +271,21 @@ impl Net {
     /// One request, logged.
     async fn hop(&self, url: &Url, deadline: Instant) -> Result<Hop, NetError> {
         let action = format!("GET {url}");
-        let result = match timeout_at(deadline, self.send(url)).await {
-            Ok(r) => r,
-            Err(_) => Err(NetError::Timeout),
+        let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+        let result = match self.cooling_down(&host) {
+            Some(wait) => Err(NetError::CoolingDown {
+                host: host.clone(),
+                wait,
+            }),
+            None => match timeout_at(deadline, self.send(url)).await {
+                Ok(r) => r,
+                Err(_) => Err(NetError::Timeout),
+            },
         };
+        if let Err(NetError::RateLimited { retry_after }) = &result {
+            let wait = retry_after.unwrap_or(DEFAULT_COOLDOWN);
+            lock(&self.inner.cooldowns).insert(host, Instant::now() + wait);
+        }
         let outcome = match &result {
             Ok((_, Hop::Done(body))) => format!("HTTP 200, {} bytes", body.len()),
             Ok((status, Hop::Redirect(next))) => format!("HTTP {status}, redirect to {next}"),
@@ -249,6 +324,18 @@ impl Net {
             StatusCode::OK => {}
             StatusCode::NOT_FOUND => return Err(NetError::NotFound),
             StatusCode::UNAUTHORIZED => return Err(NetError::LoginRequired),
+            StatusCode::TOO_MANY_REQUESTS => {
+                return Err(NetError::RateLimited {
+                    retry_after: retry_after(resp.headers()),
+                });
+            }
+            StatusCode::FORBIDDEN
+                if header_str(resp.headers(), "x-ratelimit-remaining") == Some("0") =>
+            {
+                return Err(NetError::RateLimited {
+                    retry_after: retry_after(resp.headers()),
+                });
+            }
             other => return Err(NetError::Http(other.as_u16())),
         }
         if resp
@@ -286,6 +373,66 @@ impl Net {
     }
 }
 
+impl Net {
+    /// Time left on `host`'s cooldown, if any.
+    fn cooling_down(&self, host: &str) -> Option<Duration> {
+        let mut cooldowns = lock(&self.inner.cooldowns);
+        let until = *cooldowns.get(host)?;
+        let now = Instant::now();
+        if until > now {
+            Some(until - now)
+        } else {
+            cooldowns.remove(host);
+            None
+        }
+    }
+}
+
+fn wait_text(wait: Option<Duration>) -> String {
+    match wait {
+        Some(d) => format!("; try again in {} s", d.as_secs().max(1)),
+        None => String::new(),
+    }
+}
+
+fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers.get(name)?.to_str().ok().map(str::trim)
+}
+
+/// `Retry-After` in seconds, else GitHub's `x-ratelimit-reset` (Unix
+/// time). HTTP dates are not read. Capped at [`MAX_COOLDOWN`].
+fn retry_after(headers: &HeaderMap) -> Option<Duration> {
+    let wait = if let Some(v) = header_str(headers, RETRY_AFTER.as_str()) {
+        Duration::from_secs(v.parse().ok()?)
+    } else {
+        let reset: u64 = header_str(headers, "x-ratelimit-reset")?.parse().ok()?;
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+        Duration::from_secs(reset.saturating_sub(now))
+    };
+    Some(wait.min(MAX_COOLDOWN))
+}
+
+/// `getaddrinfo` for `host`. Empty when the name does not exist or has no
+/// address; an error when the answer may change on a retry.
+fn system_lookup(host: &str) -> Result<Vec<IpAddr>, NetError> {
+    match dns_lookup::lookup_host(host) {
+        Ok(addrs) => Ok(addrs.collect()),
+        Err(e) if is_no_address(e.kind()) => Ok(Vec::new()),
+        Err(e) => Err(NetError::Dns(format!(
+            "{} (try again later)",
+            std::io::Error::from(e)
+        ))),
+    }
+}
+
+fn is_no_address(kind: LookupErrorKind) -> bool {
+    matches!(kind, LookupErrorKind::NoName | LookupErrorKind::NoData)
+}
+
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn base_builder() -> reqwest::ClientBuilder {
     Client::builder()
         .redirect(redirect::Policy::none())
@@ -300,6 +447,29 @@ struct NoDns;
 impl reqwest::dns::Resolve for NoDns {
     fn resolve(&self, _name: reqwest::dns::Name) -> reqwest::dns::Resolving {
         Box::pin(async { Err("DNS is off in mock mode".into()) })
+    }
+}
+
+/// Real mode resolver: the address the DNS check found, else `getaddrinfo`
+/// on a blocking thread.
+struct CachedDns(DnsCache);
+
+impl reqwest::dns::Resolve for CachedDns {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_ascii_lowercase();
+        let cached = lock(&self.0).get(&host).cloned();
+        Box::pin(async move {
+            let addrs = match cached {
+                Some(a) => a,
+                None => tokio::task::spawn_blocking(move || system_lookup(&host)).await??,
+            };
+            if addrs.is_empty() {
+                return Err("no address for this host".into());
+            }
+            let addrs: reqwest::dns::Addrs =
+                Box::new(addrs.into_iter().map(|ip| SocketAddr::new(ip, 0)));
+            Ok(addrs)
+        })
     }
 }
 
@@ -348,6 +518,85 @@ mod tests {
             .target(&Url::parse("https://example.org/a/b%2Bc?l=J%C3%BC#frag").unwrap())
             .unwrap();
         assert_eq!(t.as_str(), "http://127.0.0.1:4000/a/b%2Bc?l=J%C3%BC");
+    }
+
+    #[tokio::test]
+    async fn localhost_has_address() {
+        // Real getaddrinfo, answered from /etc/hosts: no DNS query.
+        let net = Net::new(&ResolverConfig::default()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        assert!(net.host_has_address("localhost", deadline).await.unwrap());
+        let cached = lock(&net.inner.dns).get("localhost").cloned().unwrap();
+        assert!(cached.iter().all(|ip| ip.is_loopback()), "{cached:?}");
+        assert_eq!(net.log().entries()[0].action, "DNS localhost");
+        assert_eq!(net.log().entries()[0].outcome, "has an address");
+    }
+
+    #[tokio::test]
+    async fn cached_dns_answers_from_the_check() {
+        use reqwest::dns::Resolve;
+        let cache = DnsCache::default();
+        let ip: IpAddr = "192.0.2.7".parse().unwrap();
+        lock(&cache).insert("openpgpkey.example.org".into(), vec![ip]);
+        let addrs: Vec<SocketAddr> = CachedDns(cache.clone())
+            .resolve("OpenPGPKey.example.org".parse().unwrap())
+            .await
+            .unwrap()
+            .collect();
+        assert_eq!(addrs, [SocketAddr::new(ip, 0)]);
+        lock(&cache).insert("empty.example.org".into(), Vec::new());
+        let empty = CachedDns(cache)
+            .resolve("empty.example.org".parse().unwrap())
+            .await;
+        assert!(empty.is_err());
+    }
+
+    #[test]
+    fn only_noname_and_nodata_mean_no_address() {
+        assert!(is_no_address(LookupErrorKind::NoName));
+        assert!(is_no_address(LookupErrorKind::NoData));
+        for k in [
+            LookupErrorKind::Again,
+            LookupErrorKind::Fail,
+            LookupErrorKind::System,
+            LookupErrorKind::Memory,
+            LookupErrorKind::IO,
+        ] {
+            assert!(!is_no_address(k), "{k:?}");
+        }
+    }
+
+    #[test]
+    fn retry_after_parsing() {
+        let h = |pairs: &[(&'static str, String)]| {
+            let mut m = HeaderMap::new();
+            for (k, v) in pairs {
+                m.insert(*k, v.parse().unwrap());
+            }
+            m
+        };
+        assert_eq!(
+            retry_after(&h(&[("retry-after", "120".into())])),
+            Some(Duration::from_secs(120))
+        );
+        assert_eq!(
+            retry_after(&h(&[("retry-after", "999999".into())])),
+            Some(MAX_COOLDOWN)
+        );
+        assert_eq!(
+            retry_after(&h(&[(
+                "retry-after",
+                "Wed, 21 Oct 2026 07:28:00 GMT".into()
+            )])),
+            None
+        );
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let reset = retry_after(&h(&[("x-ratelimit-reset", (now + 30).to_string())])).unwrap();
+        assert!((29..=30).contains(&reset.as_secs()), "{reset:?}");
+        assert_eq!(retry_after(&HeaderMap::new()), None);
     }
 
     #[test]
