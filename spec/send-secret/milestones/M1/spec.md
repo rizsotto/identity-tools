@@ -181,7 +181,7 @@ interoperates with `gpg` and Go `age`. No network, no UI, no TOFU store yet.
   Evidence (2026-11-12, devcontainer, CI sequence): selftest ok, `cargo fmt --check` ok,
   `cargo clippy --locked --workspace --all-targets -D warnings` ok, `cargo test --locked
   --workspace`: 307 passed, 0 failed, 0 ignored in 42 binaries; `check-tests-ran.sh`:
-  interop.rs 12, security.rs 8 (rerun after T15).
+  interop.rs 12, security.rs 8 (rerun after T15). GitHub CI run 43202056674 (main 15cf676) passed.
 
 ## Acceptance
 
@@ -189,6 +189,9 @@ M1 is accepted only if all 22 boxes above are ticked, each with evidence
 (a test name or command output). T15 (2026-11-12) applied decision 0004
 and ticked the S-4/S-5 box after the human accepted the zeroing gap.
 No box needs a real desktop session.
+
+**Accepted 2026-11-12.** All 22 boxes ticked. GitHub CI run 43202056674 on
+main 15cf676 passed.
 
 ## Out of scope for M1
 
