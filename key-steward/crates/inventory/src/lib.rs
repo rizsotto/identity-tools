@@ -1,13 +1,17 @@
 //! Key inventory: local keys and where each one is installed.
+//!
+//! Only locations and their check results are stored. Keys are scanned each
+//! time. Nothing here holds a token (S-4).
 
-pub fn version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
-}
+mod location;
+mod ssh_config;
+mod store;
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn version_is_set() {
-        assert!(!super::version().is_empty());
-    }
-}
+pub use location::{
+    Location, LocationId, LocationKind, NewLocation, Purpose, SshHost, Status, Target,
+};
+pub use ssh_config::{
+    ConfigScan, ImportError, ImportOptions, ImportReport, KnownKey, Resolved, host_aliases,
+    import_ssh_config, resolve, scan_config,
+};
+pub use store::{Added, Store, StoreError};

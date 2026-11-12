@@ -59,8 +59,8 @@ Tick each box with evidence: a test name or command output.
       ([FR-3](../../SPEC.md#functional))
 - [ ] A key that is not installed gives `missing` even when the ssh config
       holds another key that logs in. Exit 0 alone is not enough. (Decision
-      [0002](../../decisions/0002-ssh-test-servers.md), side finding; fix is
-      open, see `plan.md`.) ([S-3](../../SPEC.md#10-security-rules-must))
+      [0002](../../decisions/0002-ssh-test-servers.md), side finding; fix
+      chosen in T12: the `ssh -v` fingerprint check, see `plan.md`.) ([S-3](../../SPEC.md#10-security-rules-must))
 - [ ] An unknown host key gives `error` with a clear reason. It is never
       accepted. ([S-5](../../SPEC.md#10-security-rules-must))
 - [ ] GitHub provider `list` returns SSH auth keys, SSH signing keys and GPG
