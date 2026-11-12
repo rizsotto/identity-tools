@@ -46,6 +46,11 @@ setup. Accepted in decision 0002, now in SPEC 11.
   `Other(String)`.
 - `PublicKey { kind: Ssh | OpenPgp, algo, fingerprint, comment, created:
   Option<Timestamp>, expiry: Option<Timestamp>, subkeys: Vec<SubKey>, source }`.
+- Built in the core lane (T02): `PublicKey` has `kind`, `algo`,
+  `fingerprint`, `comment`, `created`, `expiry` and `encoded` (the key text
+  without comment). `subkeys` and `source` are not there yet; T05 adds
+  subkeys, the caller keeps the source. `KeyAlgo` also has `SkEd25519`,
+  `SkEcdsa(curve)` and `X25519` (age).
 - SSH keys have no creation time. Use the file mtime and label it as the file
   date. This is a gap in FR-1; add a note to SPEC when T04 lands.
 - SSH scan takes the SSH dir as a parameter. It never calls `dirs::home_dir()`

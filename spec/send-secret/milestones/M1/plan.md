@@ -15,6 +15,12 @@ No GTK in any of these. No network.
 
 ## identity-core
 
+Built in the core lane (T05): the shared API is a `PublicKey` struct with
+`kind` (`Ssh`, `OpenPgp`, `Age`), `algo`, `fingerprint`, `comment` and
+`encoded`, from `parse_public_keys`. Unsupported SSH kinds are not an enum
+variant; `PublicKey::is_age_recipient()` is false for them. The sketch below
+is the first draft.
+
 ```rust
 pub enum PublicKey {
     OpenPgp { fingerprint: String, armored: Vec<u8> },

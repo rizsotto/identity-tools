@@ -7,10 +7,10 @@ needs can run in parallel.
 | ID | Task | Needs | Test |
 |---|---|---|---|
 | T01 | Spike: verify F1 (`age` crate SSH, armor, multi-recipient, key types). Tick SPEC 15 item 1 with a link. Fix plan.md if wrong. | none | Spike notes in the PR. Tiny throwaway test, not merged. |
-| T02 | Spike: verify F2 (gpgme crate vs gpgme 2.0) and F3 (encrypt to key file without import). Add both to SPEC 15 and tick them. | none | Spike notes in the PR. Open a decision record if either fails. |
+| T02 | Spike: verify F2 (gpgme crate vs gpgme 2.0) and F3 (encrypt to key file without import). Add both to SPEC 15 and tick them. **Done in core lane, commit 5bcadcd (F3 needs one `unsafe` call into `gpgme-sys`, see SPEC 15).** | none | Spike notes in the PR. Open a decision record if either fails. |
 | T03 | Fixture script `tests/fixtures/gen.sh` and the generated keys. | none | `tests/fixtures/check.sh` (or a cargo test) asserts every expected file exists and has the right type and mode. |
 | T04 | `TestEnv` harness in `crates/cli/tests/common/`: temp `HOME`, `GNUPGHOME`, XDG dirs, run helpers for our binary, `gpg`, `age`. | T03 | `harness_isolates_home`: runs `gpg --list-keys` in the env and checks it sees only fixture keys. |
-| T05 | `identity-core`: parse age and SSH public keys, SSH fingerprints, 1 MB limit, unsupported kinds marked. | T01, T03 | Unit tests: each fixture parses; ECDSA and `sk-` marked unsupported; 1 MB + 1 byte rejected; garbage rejected. |
+| T05 | `identity-core`: parse age and SSH public keys, SSH fingerprints, 1 MB limit, unsupported kinds marked. **Done in core lane, commit fcc4d96 (`identity_core::parse_public_keys`, `PublicKey::is_age_recipient`).** | T01, T03 | Unit tests: each fixture parses; ECDSA and `sk-` marked unsupported; 1 MB + 1 byte rejected; garbage rejected. |
 | T06 | `identity-core`: gpgme context wrapper with explicit home, OpenPGP key parse and fingerprint. | T02, T03 | `gpg_wrapper_uses_given_home`, `openpgp_fingerprint_matches_gpg` (compare with `gpg --with-colons`). |
 | T07 | `crypto`: `detect_format` and error types. | none | Unit tests on the first bytes of each fixture ciphertext and on junk. |
 | T08a | `crypto`: age backend, encrypt and decrypt, x25519 and SSH Ed25519/RSA, armor, several keys in one message (one person's devices, FR-4), streaming. | T05, T07 | Round trip per key type; two keys in one message each decrypt alone; armored and binary. |
