@@ -10,6 +10,8 @@ async-trait = "0.1"
 identity-core = { path = "../../../crates/identity-core" }
 inventory = { path = "../inventory" }
 thiserror = "2"
+tokio = { version = "1", features = ["process", "time"] }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt"] }
+test-support = { path = "../test-support" }
+tokio = { version = "1", features = ["macros", "process", "rt", "time"] }

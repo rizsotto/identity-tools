@@ -154,7 +154,8 @@ pub trait Provider: Send + Sync {
 - OpenSSH finds `~` from the passwd entry, not from `$HOME`. So a temp `HOME`
   does not isolate it. The command builder must accept an optional `-F
   <config>` and `-o UserKnownHostsFile=<file>`. Tests always set both.
-- Map results: exit 0 alone is not `Verified` (see the open item below).
+- Map results: exit 0 alone is not `Verified` (see the open item below,
+  now decided).
   "Permission denied (publickey)" is `Missing`. "Host key verification failed" is `Error(UnknownHostKey)` with
   advice to connect once in a terminal. Anything else is `Error`. Match on
   stderr text is fragile; keep the patterns in one place with tests.
@@ -183,6 +184,40 @@ server, and `verify` must return `Missing`. Then pick a fix. Options:
 
 Record the choice and why in the T12 PR. If it changes SPEC 9 or FR-3, change
 SPEC in the same PR.
+
+**Chosen in T12: the `ssh -v` fingerprint check, with the user's config
+kept.** `Verified` needs both: an `Authenticated to ...` line, and the
+*last* `debug1: Server accepts key: <path> <type> SHA256:<fp> ...` line
+names the key under test. The exit code is not used for this (it is the
+remote command's). Results:
+
+- Old key from the config logs in: `Missing`
+  (`verify_missing_key_with_second_valid_key_in_config`; the test first
+  checks that plain ssh with that config really exits 0).
+- The new key is installed but needs a passphrase and no agent holds it:
+  the server accepts it, ssh cannot sign, and goes on to the old key. Only
+  "last accepted" catches this, so it gives `Error(KeyNotUsable)`, never
+  `Verified` (`verify_encrypted_key_without_agent_is_not_verified`).
+- The check pins `-o FingerprintHash=sha256` and `-v` beats a `LogLevel
+  QUIET` in the config (`verify_ignores_config_log_level_and_fingerprint_hash`).
+
+Why not the clean temp config: rebuilding a config from `ssh -G` output
+risks losing or changing `ProxyJump`, `ProxyCommand`, `Match` and token
+expansion, and `-G` runs `Match exec` anyway. The check would then test a
+different connection than the one the user (and M2's `sh -s` edits) uses.
+The `-v` text was checked against OpenSSH 10.5p1 (SPEC 15) and is covered
+by unit tests with captured output, so a format change fails loudly (the
+result is then `Missing` or `Error`, never a false `Verified`).
+
+Other options the check pins, since command line options win over the
+config: `UpdateHostKeys=no` (read-only, do not touch `known_hosts`),
+`ControlMaster=no` and `ControlPath=none` (a reused mux connection skips
+authentication), `ClearAllForwardings=yes`, `PermitLocalCommand=no`,
+`RemoteCommand=none`, `ServerAliveInterval=5`, `ServerAliveCountMax=3`, and
+a 60 s limit on the whole run. The alias goes after `--`. A server `Banner`
+is printed to stderr before authentication and could hold fake lines; it
+comes before the real ones, so "last accepted" still holds, and a server
+that wants to lie can simply accept any key anyway.
 
 ### Forge providers (FR-4)
 
@@ -238,7 +273,7 @@ New facts to add to SPEC 15 (proposed, not added yet):
 - `ssh -G` output fields and how `Include` and `Match` behave with `-F`. (T09)
   Verified and added to SPEC 15.
 - The exact stderr text from OpenSSH 10.x for denied auth and unknown host
-  keys. (T12)
+  keys. (T12) Verified and added to SPEC 15.
 
 ## Open points
 
