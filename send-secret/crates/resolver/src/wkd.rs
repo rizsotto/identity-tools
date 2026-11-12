@@ -75,6 +75,7 @@ impl KeySource for WkdSource {
                         source,
                         reason: RejectReason::TooManyKeys,
                     }],
+                    ..Found::default()
                 });
             }
         };

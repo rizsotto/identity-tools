@@ -17,6 +17,7 @@
 pub mod authorized_keys;
 mod classify;
 mod config;
+mod edit;
 pub mod remote;
 
 use std::collections::{HashSet, VecDeque};
@@ -29,10 +30,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use identity_core::{Fingerprint, PublicKey};
-use inventory::{LocationKind, Target};
+use inventory::{LocationKind, Purpose, Target};
 use tokio::process::Command;
 
 pub use classify::classify;
+pub use edit::{AuthorizedKeysError, OldKeyCheck, SshRemoved};
 
 use crate::error::ProviderError;
 use crate::netlog::NetLog;
@@ -152,6 +154,12 @@ impl SshServer {
     /// The arguments for the check (after `ssh`): `config` is the temp
     /// config, `log` the private file for `-E`.
     pub fn verify_args(&self, alias: &str, config: &Path, log: &Path) -> Vec<OsString> {
+        self.ssh_args(alias, config, log, "true")
+    }
+
+    /// Like [`verify_args`](Self::verify_args), with `remote` as the remote
+    /// command. It must hold no user data (S-6).
+    fn ssh_args(&self, alias: &str, config: &Path, log: &Path, remote: &str) -> Vec<OsString> {
         let mut args: Vec<OsString> = vec!["-F".into(), config.into()];
         if let Some(kh) = &self.known_hosts {
             let mut opt = OsString::from("UserKnownHostsFile=\"");
@@ -173,7 +181,7 @@ impl SshServer {
         }
         args.push("--".into());
         args.push(alias.into());
-        args.push("true".into());
+        args.push(remote.into());
         args
     }
 
@@ -288,8 +296,10 @@ impl SshServer {
         Ok(text)
     }
 
-    async fn run(&self, target: &Target, alias: &str, key: &KeyRef) -> VerifyStatus {
-        let fail = |why: String| VerifyStatus::Error(VerifyError::Other(why));
+    /// The check, and whether the log proves the server refused the key
+    /// ([`classify::refused`]).
+    async fn run(&self, target: &Target, alias: &str, key: &KeyRef) -> (VerifyStatus, bool) {
+        let fail = |why: String| (VerifyStatus::Error(VerifyError::Other(why)), false);
         let Some(identity) = &key.identity_file else {
             return fail("No private key file is known for this key.".into());
         };
@@ -325,7 +335,7 @@ impl SshServer {
                     "no answer within {} seconds",
                     RUN_TIMEOUT.as_secs()
                 )));
-                (s, "timed out".to_string())
+                ((s, false), "timed out".to_string())
             }
             Ok(Err(e)) => (
                 fail(format!("Cannot run {}: {e}", self.program.display())),
@@ -341,11 +351,14 @@ impl SshServer {
                     &work.identity,
                     &key.fingerprint,
                 );
+                let refused =
+                    classify::refused(out.status.code(), &log, &work.identity, &key.fingerprint);
                 let code = match out.status.code() {
                     Some(c) => format!("exit {c}"),
                     None => "killed".to_string(),
                 };
-                (s.clone(), format!("{code}, {}", describe(&s)))
+                let outcome = format!("{code}, {}", describe(&s));
+                ((s, refused), outcome)
             }
         };
         self.netlog
@@ -436,28 +449,43 @@ impl Provider for SshServer {
         LocationKind::SshServer
     }
 
+    /// Fails with [`AuthorizedKeysError::NoLoginKey`]: listing needs a
+    /// login key, see [`SshServer::list_as`].
     async fn list(&self, _target: &Target) -> Result<Vec<PublicKeyRef>, ProviderError> {
-        Err(ProviderError::NotYet("listing keys on an SSH server (M2)"))
+        Err(AuthorizedKeysError::NoLoginKey.into())
     }
 
+    /// See [`SshServer::add_key`]. Needs `opts.like` (the login key).
     async fn add(
         &self,
-        _target: &Target,
-        _key: &PublicKey,
-        _opts: &AddOpts,
+        target: &Target,
+        key: &PublicKey,
+        opts: &AddOpts,
     ) -> Result<(), ProviderError> {
-        Err(ProviderError::NotYet("adding a key to an SSH server (M2)"))
+        if opts.purpose != Purpose::SshAuth {
+            return Err(ProviderError::Unsupported(
+                "an SSH server holds only login keys".into(),
+            ));
+        }
+        let PublicKey::Ssh(key) = key else {
+            return Err(ProviderError::Unsupported(
+                "only SSH keys go into authorized_keys".into(),
+            ));
+        };
+        let like = opts.like.as_ref().ok_or(AuthorizedKeysError::NoLoginKey)?;
+        self.add_key(target, key, like).await.map(|_| ())
     }
 
+    /// See [`SshServer::remove_key`], which also returns the
+    /// `cert-authority` lines that still hold the old key. Needs
+    /// `opts.keep` (the login key, which stays).
     async fn remove(
         &self,
-        _target: &Target,
-        _key: &Fingerprint,
-        _opts: &RemoveOpts,
+        target: &Target,
+        key: &Fingerprint,
+        opts: &RemoveOpts,
     ) -> Result<(), ProviderError> {
-        Err(ProviderError::NotYet(
-            "removing a key from an SSH server (M2)",
-        ))
+        self.remove_key(target, key, opts).await.map(|_| ())
     }
 
     /// Errors with [`ProviderError::CommandsNeedConsent`] if the config can
@@ -469,7 +497,7 @@ impl Provider for SshServer {
             });
         };
         self.check_commands()?;
-        Ok(self.run(target, &host.alias, key).await)
+        Ok(self.run(target, &host.alias, key).await.0)
     }
 }
 

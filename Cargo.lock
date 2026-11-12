@@ -2708,6 +2708,7 @@ dependencies = [
  "dns-lookup",
  "futures-util",
  "identity-core",
+ "percent-encoding",
  "reqwest",
  "tempfile",
  "thiserror 2.0.21",

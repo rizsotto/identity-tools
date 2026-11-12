@@ -83,6 +83,7 @@ async fn openpgp(bytes: Vec<u8>, deadline: Instant) -> Result<Found, SourceError
                     source: source(),
                     reason: RejectReason::TooManyKeys,
                 }],
+                ..Found::default()
             });
         }
     };
@@ -101,7 +102,7 @@ async fn openpgp(bytes: Vec<u8>, deadline: Instant) -> Result<Found, SourceError
         .collect();
     Ok(Found {
         keys,
-        rejected: Vec::new(),
+        ..Found::default()
     })
 }
 

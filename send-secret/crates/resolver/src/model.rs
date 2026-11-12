@@ -4,7 +4,7 @@ use std::fmt;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use identity_core::{Fingerprint, PublicKey, UserId};
+use identity_core::{Fingerprint, LineError, PublicKey, UserId};
 use tokio::time::Instant;
 
 use crate::net::{Net, NetError};
@@ -93,12 +93,16 @@ pub enum Unusable {
     SkKey,
     #[error("RSA {0} bits: age takes RSA keys from 2048 to 4096 bits")]
     RsaSize(u32),
+    #[error("this SSH key type is not an age recipient")]
+    SshType,
     #[error("the key has no usable encryption subkey")]
     NoEncryptionSubkey,
     #[error("the key is revoked")]
     Revoked,
     #[error("the key has expired")]
     Expired,
+    #[error("the key is disabled or invalid")]
+    Disabled,
 }
 
 /// One key a source found.
@@ -110,8 +114,9 @@ pub struct FoundKey {
     pub bytes: KeyBytes,
     pub source: Source,
     pub usable: Result<(), Unusable>,
-    /// The user IDs to show. WKD and keys.openpgp.org: only those matching
-    /// the queried email (S-6).
+    /// The user IDs to show: valid ones only. User IDs are checked against
+    /// the queried email only for WKD and keys.openpgp.org (S-6); there
+    /// only matching ones are shown, and `key.user_ids` holds only those.
     pub shown_user_ids: Vec<UserId>,
 }
 
@@ -143,6 +148,9 @@ pub enum RejectReason {
     EmailMismatch,
     #[error("the answer holds too many keys")]
     TooManyKeys,
+    /// A line of a `.keys` list that holds no usable key.
+    #[error("line {line}: {error}")]
+    BadLine { line: usize, error: LineError },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -157,6 +165,10 @@ pub struct Rejected {
 pub struct Found {
     pub keys: Vec<FoundKey>,
     pub rejected: Vec<Rejected>,
+    /// Parts of the lookup that failed while others worked (GitHub `.keys`
+    /// or `.gpg`). When not empty, keys may be missing: never read a
+    /// missing key as removed, never narrow a pin from this result.
+    pub incomplete: Vec<SourceError>,
 }
 
 /// Why one source gave no result. Shown per source; never fatal alone.

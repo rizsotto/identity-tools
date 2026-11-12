@@ -10,6 +10,7 @@ async-trait = "0.1"
 dns-lookup = "4.0.2"
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 identity-core = { path = "../../../crates/identity-core" }
+percent-encoding = "2.3.2"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls"] }
 thiserror = "2"
 tokio = { version = "1", features = ["rt", "time"] }

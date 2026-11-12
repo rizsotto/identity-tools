@@ -83,7 +83,7 @@ impl Fake {
             kind,
             result: Ok(Found {
                 keys,
-                rejected: Vec::new(),
+                ..Found::default()
             }),
             delay: None,
             calls: Arc::default(),
@@ -366,6 +366,7 @@ async fn rejected_and_errors_in_rank_order() {
             source: source(Vks),
             reason: RejectReason::EmailMismatch,
         }],
+        ..Found::default()
     });
     let mut wkd = Fake::new(Wkd, Vec::new());
     wkd.result = Ok(Found {
@@ -375,6 +376,7 @@ async fn rejected_and_errors_in_rank_order() {
             source: source(Wkd),
             reason: RejectReason::TooManyKeys,
         }],
+        ..Found::default()
     });
     let mut gl = Fake::new(GitLab, Vec::new());
     gl.result = Err(SourceError::NotFound);
@@ -394,6 +396,27 @@ async fn rejected_and_errors_in_rank_order() {
     let errs: Vec<_> = r.errors.iter().map(|(k, _)| *k).collect();
     assert_eq!(errs, [GitHub, GitLab]);
     assert_eq!(r.errors[0].1.to_string(), "rate limited; try again in 60 s");
+}
+
+#[tokio::test]
+async fn partial_results_are_listed_apart_from_errors() {
+    let limited = SourceError::RateLimited {
+        retry_after: Some(Duration::from_secs(30)),
+    };
+    let mut gh = Fake::new(
+        SourceKind::GitHub,
+        vec![ssh("erin", KeyAlgo::Ed25519, SourceKind::GitHub)],
+    );
+    gh.result = Ok(Found {
+        keys: vec![ssh("erin", KeyAlgo::Ed25519, SourceKind::GitHub)],
+        incomplete: vec![limited.clone()],
+        ..Found::default()
+    });
+    let resolver = Resolver::new(cfg(), Some(mock_net()), vec![gh.boxed()]);
+    let r = resolver.resolve(&q(), Mode::Full).await;
+    assert_eq!(r.candidates.len(), 1);
+    assert!(r.errors.is_empty());
+    assert_eq!(r.partial, vec![(SourceKind::GitHub, limited)]);
 }
 
 #[tokio::test]
