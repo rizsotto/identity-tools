@@ -101,9 +101,9 @@ fn config_update_keeps_other_bytes() {
 
 #[test]
 fn config_update_lists_unknown_tokens() {
-    let text = "Host a\n  IdentityFile ~/.ssh/id_%h\n  IdentityFile %d/.ssh/%r_key\n  IdentityFile ~/.ssh/id_work\n  IdentityFile ~/.ssh/100%%\n";
+    let text = "Host a\n  IdentityFile ~/.ssh/id_%h\n  IdentityFile %d/.ssh/%r_key\n  IdentityFile ~/.ssh/id_work\n  IdentityFile ~/.ssh/100%%\n  IdentityFile ${HOME}/.ssh/id_work\n";
     let u = update_text(text, &old(), &new(), Path::new(HOME));
-    assert_eq!(u.listed, vec![2, 3]);
+    assert_eq!(u.listed, vec![2, 3, 6]);
     assert_eq!(u.changes.len(), 1);
     assert_eq!(u.changes[0].line, 4);
 
@@ -119,7 +119,7 @@ fn config_update_lists_unknown_tokens() {
     )
     .unwrap();
     let real = fs::canonicalize(&cfg).unwrap();
-    assert_eq!(plan.listed.len(), 2);
+    assert_eq!(plan.listed.len(), 3);
     assert_eq!(plan.listed[0].path, real);
     assert_eq!(plan.listed[0].line, 2);
     assert_eq!(plan.listed[0].text, "  IdentityFile ~/.ssh/id_%h");
@@ -240,11 +240,49 @@ fn config_apply_refuses_changed_file_and_follows_symlink() {
     // Restore refuses a file edited after the update.
     fs::write(&real, "edited\n").unwrap();
     let err = restore_config(std::slice::from_ref(&cfg), &old, &new, home.path(), "s").unwrap_err();
-    assert!(matches!(err, ConfigError::Changed(_)), "{err}");
+    assert!(
+        matches!(&err, ConfigError::RestoreIncomplete { restored, failed }
+            if restored.is_empty() && failed.len() == 1),
+        "{err}"
+    );
     assert_eq!(fs::read_to_string(&real).unwrap(), "edited\n");
 
     assert!(matches!(
         plan_config_update(&[cfg], &old, &new, home.path(), "../x"),
         Err(ConfigError::BadStamp(_))
     ));
+}
+
+#[test]
+fn restore_goes_on_after_a_changed_file() {
+    let home = TempHome::new(BASE);
+    let ssh = home.ssh_dir();
+    let old = ssh.join("id_work");
+    let new = ssh.join("id_work-2");
+    let a = ssh.join("a.conf");
+    let b = ssh.join("b.conf");
+    let c = ssh.join("c.conf");
+    let text = "IdentityFile ~/.ssh/id_work\n";
+    for f in [&a, &b, &c] {
+        fs::write(f, text).unwrap();
+    }
+    let files = vec![a.clone(), b.clone(), c.clone()];
+    let plan = plan_config_update(&files, &old, &new, home.path(), "r").unwrap();
+    assert_eq!(apply_config_update(&plan, "r").unwrap().len(), 3);
+
+    // The user edits the first file after the update.
+    fs::write(&a, "mine\n").unwrap();
+    let err = restore_config(&files, &old, &new, home.path(), "r").unwrap_err();
+    let ConfigError::RestoreIncomplete { restored, failed } = &err else {
+        panic!("{err}");
+    };
+    let real = |p: &Path| fs::canonicalize(p).unwrap();
+    assert_eq!(restored, &vec![real(&b), real(&c)]);
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed[0].0, real(&a));
+    let msg = err.to_string();
+    assert!(msg.contains("b.conf") && msg.contains("a.conf"), "{msg}");
+    assert_eq!(fs::read_to_string(&a).unwrap(), "mine\n");
+    assert_eq!(fs::read_to_string(&b).unwrap(), text);
+    assert_eq!(fs::read_to_string(&c).unwrap(), text);
 }

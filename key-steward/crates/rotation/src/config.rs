@@ -13,7 +13,7 @@
 
 use std::fs;
 use std::io::{self, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use inventory::{Resolved, expand_identity};
@@ -26,6 +26,43 @@ pub enum ConfigError {
     Changed(PathBuf),
     #[error("bad backup stamp {0:?}: use letters, digits, '-' and '_' only")]
     BadStamp(String),
+    /// Replacing a file of another user would give it our owner and drop
+    /// its ACLs and xattrs, and the backup would land in their dir.
+    #[error("{path} belongs to uid {uid}, not to this user; change it by hand")]
+    NotOwner { path: PathBuf, uid: u32 },
+    #[error("restored: {}; not restored: {}", list(.restored), .failed.iter().map(|(p, e)| format!("{} ({e})", p.display())).collect::<Vec<_>>().join(", "))]
+    RestoreIncomplete {
+        restored: Vec<PathBuf>,
+        failed: Vec<(PathBuf, String)>,
+    },
+}
+
+fn list(paths: &[PathBuf]) -> String {
+    if paths.is_empty() {
+        return "none".into();
+    }
+    paths
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn euid() -> u32 {
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    unsafe { libc::geteuid() }
+}
+
+fn check_owner(path: &Path, euid: u32) -> Result<(), ConfigError> {
+    let uid = fs::metadata(path).map_err(io_err(path))?.uid();
+    if uid == euid {
+        Ok(())
+    } else {
+        Err(ConfigError::NotOwner {
+            path: path.to_path_buf(),
+            uid,
+        })
+    }
 }
 
 fn io_err(path: &Path) -> impl FnOnce(io::Error) -> ConfigError + '_ {
@@ -75,6 +112,11 @@ pub fn update_text(text: &str, old_path: &Path, new_path: &Path, home: &Path) ->
             continue;
         };
         let value = &line[start..end];
+        if value.contains("${") {
+            out.listed.push(i + 1);
+            out.updated.push_str(line);
+            continue;
+        }
         match expand_identity(value, home, &Resolved::default()) {
             Some(p) if p == old_path => {
                 let new_value = render_path(new_path, home, value.starts_with("~/"), quoted);
@@ -202,13 +244,26 @@ pub fn backup_path(file: &Path, stamp: &str) -> PathBuf {
 }
 
 /// Builds the plan for `files` (the user's config and its includes, from
-/// `inventory::scan_config`). Reads only. Missing files are skipped.
+/// `inventory::scan_config`). Reads only. Missing files are skipped. A
+/// file that needs a change must belong to this user
+/// ([`ConfigError::NotOwner`]).
 pub fn plan_config_update(
     files: &[PathBuf],
     old_path: &Path,
     new_path: &Path,
     home: &Path,
     stamp: &str,
+) -> Result<ConfigPlan, ConfigError> {
+    plan_as(files, old_path, new_path, home, stamp, euid())
+}
+
+fn plan_as(
+    files: &[PathBuf],
+    old_path: &Path,
+    new_path: &Path,
+    home: &Path,
+    stamp: &str,
+    euid: u32,
 ) -> Result<ConfigPlan, ConfigError> {
     check_stamp(stamp)?;
     let mut plan = ConfigPlan::default();
@@ -243,6 +298,7 @@ pub fn plan_config_update(
         if u.changes.is_empty() {
             continue;
         }
+        check_owner(&real, euid)?;
         let mode = fs::metadata(&real)
             .map_err(io_err(&real))?
             .permissions()
@@ -275,6 +331,7 @@ pub fn apply_config_update(plan: &ConfigPlan, stamp: &str) -> Result<Vec<PathBuf
         if now != f.original {
             return Err(ConfigError::Changed(f.path.clone()));
         }
+        check_owner(&f.path, euid())?;
         let backup = backup_path(&f.path, stamp);
         match fs::read_to_string(&backup) {
             Ok(b) if b == f.original => {}
@@ -293,8 +350,10 @@ pub fn apply_config_update(plan: &ConfigPlan, stamp: &str) -> Result<Vec<PathBuf
 /// Puts the backups of `stamp` back, for each of `files` that has one.
 /// A file that holds the updated text gets the backup text again; a file
 /// that already holds the backup text is left alone; a file that holds
-/// anything else is not touched ([`ConfigError::Changed`]). Backups are
-/// kept. Returns the files restored.
+/// anything else is not touched. One file that cannot be restored does not
+/// stop the others: then [`ConfigError::RestoreIncomplete`] lists which
+/// files were restored and which were not. Backups are kept. Returns the
+/// files restored.
 pub fn restore_config(
     files: &[PathBuf],
     old_path: &Path,
@@ -304,21 +363,34 @@ pub fn restore_config(
 ) -> Result<Vec<PathBuf>, ConfigError> {
     let plan = plan_config_update(files, old_path, new_path, home, stamp)?;
     let mut restored = Vec::new();
+    let mut failed = Vec::new();
     for f in &plan.files {
         if fs::symlink_metadata(backup_path(&f.path, stamp)).is_err() {
             continue;
         }
-        let now = fs::read_to_string(&f.path).map_err(io_err(&f.path))?;
-        if now == f.original {
-            continue;
+        let one = || -> Result<bool, ConfigError> {
+            let now = fs::read_to_string(&f.path).map_err(io_err(&f.path))?;
+            if now == f.original {
+                return Ok(false);
+            }
+            if now != f.updated {
+                return Err(ConfigError::Changed(f.path.clone()));
+            }
+            check_owner(&f.path, euid())?;
+            replace(&f.path, &f.original, f.mode)?;
+            Ok(true)
+        };
+        match one() {
+            Ok(true) => restored.push(f.path.clone()),
+            Ok(false) => {}
+            Err(e) => failed.push((f.path.clone(), e.to_string())),
         }
-        if now != f.updated {
-            return Err(ConfigError::Changed(f.path.clone()));
-        }
-        replace(&f.path, &f.original, f.mode)?;
-        restored.push(f.path.clone());
     }
-    Ok(restored)
+    if failed.is_empty() {
+        Ok(restored)
+    } else {
+        Err(ConfigError::RestoreIncomplete { restored, failed })
+    }
 }
 
 fn check_stamp(stamp: &str) -> Result<(), ConfigError> {
@@ -357,5 +429,53 @@ fn replace(path: &Path, text: &str, mode: u32) -> Result<(), ConfigError> {
         fs::remove_file(&tmp).map_err(io_err(&tmp))?;
     }
     write_new(&tmp, text, mode)?;
-    fs::rename(&tmp, path).map_err(io_err(path))
+    fs::rename(&tmp, path).map_err(io_err(path))?;
+    // Make the rename itself durable.
+    let dir = match path.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d,
+        _ => Path::new("."),
+    };
+    fs::File::open(dir)
+        .and_then(|d| d.sync_all())
+        .map_err(io_err(dir))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plan_refuses_file_of_another_user() {
+        let home = test_support::TempHome::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../target/tmp"
+        ));
+        let cfg = home.path().join("config");
+        fs::write(&cfg, "IdentityFile /k/old\nUser x\n").unwrap();
+        let other = euid() + 1;
+        let err = plan_as(
+            std::slice::from_ref(&cfg),
+            Path::new("/k/old"),
+            Path::new("/k/new"),
+            Path::new("/h"),
+            "s",
+            other,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::NotOwner { uid, .. } if *uid == euid()),
+            "{err}"
+        );
+        // A file with nothing to change is not checked.
+        let plan = plan_as(
+            std::slice::from_ref(&cfg),
+            Path::new("/k/none"),
+            Path::new("/k/new"),
+            Path::new("/h"),
+            "s",
+            other,
+        )
+        .unwrap();
+        assert!(plan.is_empty());
+    }
 }

@@ -120,7 +120,7 @@ pub(crate) fn move_group(
             let to = target(tail);
             match fs::symlink_metadata(&to) {
                 Ok(t) if same_file(meta, &t) => {}
-                _ => fs::hard_link(src, &to)?,
+                _ => fs::hard_link(src, &to).map_err(|e| link_error(e, src, dir))?,
             }
             fs::remove_file(src)?;
             moved.push(Moved {
@@ -136,6 +136,46 @@ pub(crate) fn move_group(
     ))
 }
 
+/// A clear message for a link across filesystems (EXDEV).
+fn link_error(e: io::Error, src: &Path, dir: &Path) -> io::Error {
+    if e.raw_os_error() == Some(libc::EXDEV) {
+        io::Error::new(
+            e.kind(),
+            format!(
+                "{} and {} are on different filesystems, so it cannot be moved \
+                 without a copy; move it by hand",
+                src.display(),
+                dir.display()
+            ),
+        )
+    } else {
+        e
+    }
+}
+
 pub(crate) fn same_file(a: &fs::Metadata, b: &fs::Metadata) -> bool {
     a.dev() == b.dev() && a.ino() == b.ino()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cross_filesystem_link_has_clear_message() {
+        let e = link_error(
+            io::Error::from_raw_os_error(libc::EXDEV),
+            Path::new("/a/id"),
+            Path::new("/b/retired"),
+        );
+        let msg = e.to_string();
+        assert!(msg.contains("different filesystems"), "{msg}");
+        assert!(msg.contains("/a/id") && msg.contains("/b/retired"), "{msg}");
+        let other = link_error(
+            io::Error::from_raw_os_error(libc::EACCES),
+            Path::new("/a"),
+            Path::new("/b"),
+        );
+        assert_eq!(other.raw_os_error(), Some(libc::EACCES));
+    }
 }

@@ -288,3 +288,27 @@ fn retire_moves_without_overwrite() {
     assert!(retire(&ssh2, &ssh2.join("id_x")).is_err());
     assert!(ssh2.join("id_x").exists());
 }
+
+#[test]
+fn recover_refuses_public_key_from_outside() {
+    let home = TempHome::new(BASE);
+    let ssh = home.ssh_dir();
+    let req = request(&home, "id_new");
+    // Crash after the private link; then another .pub shows up.
+    let tmp = ssh.join(format!("{GEN_DIR_PREFIX}9-9-0"));
+    fs::create_dir(&tmp).unwrap();
+    keygen(&tmp.join("id"));
+    fs::hard_link(tmp.join("id"), &req.new_path).unwrap();
+    keygen(&ssh.join("other"));
+    fs::copy(ssh.join("other.pub"), pub_of(&req.new_path)).unwrap();
+
+    let err = recover(&req).unwrap_err();
+    assert!(
+        matches!(&err, KeygenError::PublicKeyMismatch(p) if *p == pub_of(&req.new_path)),
+        "{err}"
+    );
+    // Nothing moved or removed.
+    assert!(req.new_path.exists() && pub_of(&req.new_path).exists());
+    assert_eq!(names(&tmp), ["id", "id.pub"]);
+    assert!(!ssh.join("retired").exists());
+}

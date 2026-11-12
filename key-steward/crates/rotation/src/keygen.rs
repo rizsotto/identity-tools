@@ -99,6 +99,13 @@ impl KeygenRequest {
 pub enum KeygenError {
     #[error("{0} already exists; it is never overwritten")]
     Exists(PathBuf),
+    /// After a crash, `<new_path>.pub` is not the file `ssh-keygen` made
+    /// with the private key: it came from somewhere else.
+    #[error(
+        "{0} is not the public key made with the new private key; it was put there from \
+         outside. Check both files by hand"
+    )]
+    PublicKeyMismatch(PathBuf),
     #[error("ssh-keygen failed ({status}): {stderr}")]
     Keygen { status: String, stderr: String },
     #[error("{path}: {reason}")]
@@ -195,6 +202,7 @@ pub fn recover(req: &KeygenRequest) -> Result<Recovered, KeygenError> {
         .filter_map(|p| fs::symlink_metadata(p).ok())
         .collect();
     if finals.len() == 2 {
+        check_pair(req, &finals[0], &finals[1])?;
         clean_leftovers(req, &finals)?;
         return read_public(&req.new_path, &pub_path).map(|g| Recovered::Done(Box::new(g)));
     }
@@ -207,6 +215,36 @@ pub fn recover(req: &KeygenRequest) -> Result<Recovered, KeygenError> {
     }
     moved.extend(clean_leftovers(req, &finals)?);
     Ok(Recovered::RunAgain { moved })
+}
+
+/// A temp dir whose `id` is our new private key must hold the matching
+/// `id.pub`, and that must be the same file as `<new_path>.pub`.
+fn check_pair(
+    req: &KeygenRequest,
+    private: &fs::Metadata,
+    public: &fs::Metadata,
+) -> Result<(), KeygenError> {
+    let dir = req.dir();
+    for entry in fs::read_dir(dir).map_err(io_err(dir))? {
+        let gen_dir = entry.map_err(io_err(dir))?.path();
+        let is_gen = gen_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with(GEN_DIR_PREFIX));
+        if !is_gen {
+            continue;
+        }
+        let ours = fs::symlink_metadata(gen_dir.join("id")).is_ok_and(|m| same_file(&m, private));
+        if !ours {
+            continue;
+        }
+        let pub_ok =
+            fs::symlink_metadata(gen_dir.join("id.pub")).is_ok_and(|m| same_file(&m, public));
+        if !pub_ok {
+            return Err(KeygenError::PublicKeyMismatch(req.pub_path()));
+        }
+    }
+    Ok(())
 }
 
 fn make_gen_dir(dir: &Path) -> Result<PathBuf, KeygenError> {

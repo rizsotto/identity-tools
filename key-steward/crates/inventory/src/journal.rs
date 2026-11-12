@@ -21,6 +21,9 @@ pub type RotationId = i64;
 /// Longest `detail` or `reason` text kept, in chars.
 pub const MAX_DETAIL: usize = 300;
 
+/// Key types a rotation can make (`ssh-keygen -t`).
+pub const NEW_KEY_TYPES: &[&str] = &["ed25519", "ecdsa", "rsa"];
+
 /// A rotation step (plan.md, "Steps and their journal entries").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Step {
@@ -180,6 +183,13 @@ impl Store {
     /// Creates a rotation and its locations in one transaction. Refused
     /// with [`StoreError::RotationOpen`] while another rotation is open.
     pub fn start_rotation(&mut self, new: &NewRotation) -> Result<RotationId> {
+        if !NEW_KEY_TYPES.contains(&new.new_key_type.as_str()) {
+            return Err(StoreError::Invalid(format!(
+                "new key type {:?}; known: {}",
+                new.new_key_type,
+                NEW_KEY_TYPES.join(", ")
+            )));
+        }
         let tx = self.conn.transaction()?;
         if let Some(open) = open_rotation_id(&tx)? {
             return Err(StoreError::RotationOpen(open));
@@ -277,13 +287,24 @@ impl Store {
     pub fn journal_tx(&mut self) -> Result<JournalTx<'_>> {
         Ok(JournalTx {
             tx: self.conn.transaction()?,
+            secrets: &self.secrets,
         })
+    }
+
+    /// Registers a secret that journal text must never hold: a token, or a
+    /// public key blob (base64). [`scrub_detail`] removes it exactly, also
+    /// split by whitespace or in pieces. Kept in memory only.
+    pub fn add_secret(&mut self, secret: &str) {
+        if !secret.is_empty() && !self.secrets.iter().any(|s| s == secret) {
+            self.secrets.push(secret.to_string());
+        }
     }
 }
 
 /// A journal transaction. Dropped without commit, it writes nothing.
 pub struct JournalTx<'a> {
     tx: Transaction<'a>,
+    secrets: &'a [String],
 }
 
 impl JournalTx<'_> {
@@ -303,7 +324,7 @@ impl JournalTx<'_> {
                 location,
                 step.as_str(),
                 event.as_str(),
-                detail.map(scrub_detail),
+                detail.map(|d| self.scrub(d)),
                 to_unix(SystemTime::now())
             ],
         )?;
@@ -320,7 +341,12 @@ impl JournalTx<'_> {
         let n = self.tx.execute(
             "UPDATE rotation_locations SET phase = ?1, reason = ?2 \
              WHERE rotation_id = ?3 AND location_id = ?4",
-            params![phase.as_str(), reason.map(scrub_detail), rotation, location],
+            params![
+                phase.as_str(),
+                reason.map(|r| self.scrub(r)),
+                rotation,
+                location
+            ],
         )?;
         if n != 1 {
             return Err(StoreError::NotFound {
@@ -353,13 +379,22 @@ impl JournalTx<'_> {
         checked: SystemTime,
     ) -> Result<LocationId> {
         let id = add_location(&self.tx, loc)?.id();
-        set_status_in(&self.tx, id, status, checked)?;
+        let status = match status {
+            Status::Error(r) => Status::Error(self.scrub(r)),
+            s => s.clone(),
+        };
+        set_status_in(&self.tx, id, &status, checked)?;
         Ok(id)
     }
 
     /// Deletes a location row. Returns false if it was already gone.
     pub fn remove_location(&mut self, id: LocationId) -> Result<bool> {
         remove_location(&self.tx, id)
+    }
+
+    fn scrub(&self, text: &str) -> String {
+        let secrets: Vec<&str> = self.secrets.iter().map(String::as_str).collect();
+        scrub_detail(text, &secrets)
     }
 
     pub fn commit(self) -> Result<()> {
@@ -477,24 +512,35 @@ fn read_step(r: &Row<'_>) -> rusqlite::Result<Result<StepEntry>> {
     Ok(build())
 }
 
-/// Makes free text safe to store (S-8, S-4): drops key blobs, PEM or
-/// armored blocks, tokens and other long opaque strings, removes control
-/// chars, and caps the length at [`MAX_DETAIL`] chars.
+/// Makes free text safe to store (S-8, S-4), in two passes:
 ///
-/// It errs on the side of dropping too much. SSH fingerprints
-/// (`SHA256:<43 chars>`) are kept; the fingerprint columns hold the real
-/// references.
-pub fn scrub_detail(text: &str) -> String {
+/// 1. Every known secret in `secrets` (tokens, public key blobs) is cut
+///    out: the exact text, the text with its whitespace changed (split
+///    into groups or lines), and any piece of it of [`MIN_SECRET_PIECE`]
+///    chars or more.
+/// 2. A heuristic net for what the caller did not know: PEM or armored
+///    blocks and their bare body lines, key blobs (`AAAA...`), tokens by
+///    prefix or after `token=`, `Bearer` and similar, and other long
+///    opaque strings.
+///
+/// Then control chars become spaces and the length is capped at
+/// [`MAX_DETAIL`] chars. It errs on the side of dropping too much. SSH
+/// fingerprints (`SHA256:<43 chars>`) are kept.
+pub fn scrub_detail(text: &str, secrets: &[&str]) -> String {
+    let text: String = text.chars().take(MAX_SCRUB_INPUT).collect();
+    let text = cut_secrets(&text, secrets);
     let text = match text.find("-----BEGIN") {
         Some(i) => format!("{}[key removed]", &text[..i]),
-        None => text.to_string(),
+        None => text,
     };
     let mut out = String::with_capacity(text.len());
     let mut run = String::new();
-    let flush = |run: &mut String, out: &mut String| {
+    let mut prev = String::new();
+    let flush = |run: &mut String, out: &mut String, prev: &mut String| {
         if !run.is_empty() {
-            let kept = scrub_run(run, out);
+            let kept = scrub_run(run, out, prev);
             out.push_str(kept);
+            *prev = run.to_ascii_lowercase();
             run.clear();
         }
     };
@@ -503,13 +549,77 @@ pub fn scrub_detail(text: &str) -> String {
             run.push(c);
             continue;
         }
-        flush(&mut run, &mut out);
+        flush(&mut run, &mut out, &mut prev);
+        if c == ':' {
+            prev.push(':');
+        }
         out.push(if c.is_control() { ' ' } else { c });
     }
-    flush(&mut run, &mut out);
+    flush(&mut run, &mut out, &mut prev);
     if out.chars().count() > MAX_DETAIL {
         out = out.chars().take(MAX_DETAIL - 3).collect();
         out.push_str("...");
+    }
+    out
+}
+
+/// Input past this many chars is dropped before scrubbing.
+const MAX_SCRUB_INPUT: usize = 4096;
+
+/// Shortest piece of a known secret that is cut out on its own.
+pub const MIN_SECRET_PIECE: usize = 12;
+
+/// Pass 1 of [`scrub_detail`]. Whitespace in the text is ignored while
+/// matching, so a secret split into groups or lines is still found.
+fn cut_secrets(text: &str, secrets: &[&str]) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let idx: Vec<usize> = (0..chars.len())
+        .filter(|&i| !chars[i].is_whitespace())
+        .collect();
+    let norm: Vec<char> = idx.iter().map(|&i| chars[i]).collect();
+    let mut hit = vec![false; norm.len()];
+    for secret in secrets {
+        let s: Vec<char> = secret.chars().filter(|c| !c.is_whitespace()).collect();
+        if s.is_empty() {
+            continue;
+        }
+        let min = MIN_SECRET_PIECE.min(s.len());
+        for i in 0..norm.len() {
+            let longest = (0..s.len())
+                .map(|j| {
+                    norm[i..]
+                        .iter()
+                        .zip(&s[j..])
+                        .take_while(|(a, b)| a == b)
+                        .count()
+                })
+                .max()
+                .unwrap_or(0);
+            if longest >= min {
+                hit[i..i + longest].iter_mut().for_each(|h| *h = true);
+            }
+        }
+    }
+    if !hit.contains(&true) {
+        return text.to_string();
+    }
+    let mut cut = vec![false; chars.len()];
+    for (k, &i) in idx.iter().enumerate() {
+        if hit[k] {
+            cut[i] = true;
+            // Whitespace between two cut chars goes too.
+            if k + 1 < idx.len() && hit[k + 1] {
+                cut[i..idx[k + 1]].iter_mut().for_each(|c| *c = true);
+            }
+        }
+    }
+    let mut out = String::with_capacity(text.len());
+    for (i, &c) in chars.iter().enumerate() {
+        if !cut[i] {
+            out.push(c);
+        } else if i == 0 || !cut[i - 1] {
+            out.push_str("[secret removed]");
+        }
     }
     out
 }
@@ -531,14 +641,33 @@ const TOKEN_PREFIXES: &[&str] = &[
     "glft-",
 ];
 
+/// Names after which a value is a credential: `token=x`, `Bearer x`,
+/// `PRIVATE-TOKEN: x`.
+const SECRET_NAMES: &[&str] = &[
+    "token",
+    "private_token",
+    "private-token",
+    "access_token",
+    "secret",
+    "password",
+    "passwd",
+    "bearer",
+    "basic",
+    "authorization",
+];
+
 /// Longest piece of a run, between `/`, `.` and `=`, that is kept.
 const MAX_OPAQUE: usize = 31;
+
+/// A run of base64 chars this long, with upper, lower and digits, looks
+/// like a key or PEM body line.
+const MAX_BASE64_RUN: usize = 23;
 
 fn is_run_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || "+/=_-.".contains(c)
 }
 
-fn scrub_run<'a>(run: &'a str, before: &str) -> &'a str {
+fn scrub_run<'a>(run: &'a str, before: &str, prev: &str) -> &'a str {
     let is_b64 = |s: &str| {
         s.chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/')
@@ -549,11 +678,27 @@ fn scrub_run<'a>(run: &'a str, before: &str) -> &'a str {
     if run.contains("AAAA") && run.len() >= 20 {
         return "[key removed]";
     }
+    let lower = run.to_ascii_lowercase();
     let jwt = run.starts_with("eyJ") && run.contains('.');
-    if jwt || TOKEN_PREFIXES.iter().any(|p| run.contains(p)) {
+    let named = SECRET_NAMES.iter().any(|n| {
+        lower.contains(&format!("{n}="))
+            || prev.trim_end_matches(':').ends_with(n) && run.len() >= 8
+    });
+    if jwt || named || TOKEN_PREFIXES.iter().any(|p| run.contains(p)) {
         return "[token removed]";
     }
     if run.split(['/', '.', '=']).any(|s| s.len() > MAX_OPAQUE) {
+        return "[removed]";
+    }
+    let base64_like = run
+        .split(|c: char| !(c.is_ascii_alphanumeric() || "+/=".contains(c)))
+        .any(|s| {
+            s.len() > MAX_BASE64_RUN
+                && s.contains(|c: char| c.is_ascii_uppercase())
+                && s.contains(|c: char| c.is_ascii_lowercase())
+                && s.contains(|c: char| c.is_ascii_digit())
+        });
+    if base64_like {
         return "[removed]";
     }
     run
@@ -823,7 +968,7 @@ mod tests {
             "eyJhbGciOiJIUzI1NiJ9",
         ];
         for case in &cases {
-            let s = scrub_detail(case);
+            let s = scrub_detail(case, &[]);
             for bad in secrets {
                 assert!(!s.contains(bad), "{case:?} -> {s:?} still has {bad:?}");
             }
@@ -831,17 +976,17 @@ mod tests {
 
         // Useful text stays.
         let keep = format!("verified {ED_FPR} at build, moved /h/.ssh/id_ed25519 to retired/");
-        assert_eq!(scrub_detail(&keep), keep);
+        assert_eq!(scrub_detail(&keep, &[]), keep);
         assert_eq!(
-            scrub_detail("HTTP 403: line1\nline2"),
+            scrub_detail("HTTP 403: line1\nline2", &[]),
             "HTTP 403: line1 line2"
         );
         let long = "word ".repeat(200);
-        let capped = scrub_detail(&long);
+        let capped = scrub_detail(&long, &[]);
         assert_eq!(capped.chars().count(), MAX_DETAIL);
         assert!(capped.ends_with("..."));
         let wide = "é".repeat(MAX_DETAIL + 5);
-        assert_eq!(scrub_detail(&wide).chars().count(), MAX_DETAIL);
+        assert_eq!(scrub_detail(&wide, &[]).chars().count(), MAX_DETAIL);
 
         // The journal applies it to details and reasons, and the database
         // file never holds the key or the token.
@@ -867,5 +1012,151 @@ mod tests {
         let hay = String::from_utf8_lossy(&bytes);
         assert!(!hay.contains("AAAAC3NzaC1lZDI1NTE5"));
         assert!(!hay.contains("ghp_"));
+    }
+
+    fn keygen(dir: &Path, name: &str, args: &[&str]) -> (String, String) {
+        let path = dir.join(name);
+        let out = std::process::Command::new("ssh-keygen")
+            .args(["-q", "-N", "", "-C", "", "-f"])
+            .arg(&path)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let private = fs::read_to_string(&path).unwrap();
+        let public = fs::read_to_string(dir.join(format!("{name}.pub"))).unwrap();
+        (private, public)
+    }
+
+    #[test]
+    fn detail_drops_known_secrets_in_split_forms() {
+        let dir = private_dir();
+        let (_, public) = keygen(dir.path(), "k", &["-t", "ed25519"]);
+        let blob = public.split_whitespace().nth(1).unwrap().to_string();
+        let token = "Xq7rT2mK9pLw4ZsN8vBc";
+        let secrets = [blob.as_str(), token];
+
+        let groups: Vec<String> = blob
+            .as_bytes()
+            .chunks(16)
+            .map(|c| String::from_utf8_lossy(c).into_owned())
+            .collect();
+        let cases = [
+            groups.join(" "),
+            groups.join("\n"),
+            format!("piece {} only", &blob[30..50]),
+            format!("x{token}y"),
+            format!("t = {} {}", &token[..10], &token[10..]),
+        ];
+        for case in &cases {
+            let s = scrub_detail(case, &secrets);
+            for g in &groups[1..] {
+                assert!(!s.contains(g.as_str()), "{case:?} -> {s:?}");
+            }
+            assert!(!s.contains(&blob[30..50]), "{case:?} -> {s:?}");
+            assert!(!s.contains(&token[..10]), "{case:?} -> {s:?}");
+            assert!(!s.contains(&token[10..]), "{case:?} -> {s:?}");
+        }
+        assert_eq!(
+            scrub_detail(&format!("a {token} b"), &secrets),
+            "a [secret removed] b"
+        );
+        // Other text is kept.
+        let keep = format!("verified {ED_FPR} at build");
+        assert_eq!(scrub_detail(&keep, &secrets), keep);
+
+        // The store applies registered secrets to journal text.
+        let mut store = Store::open_in_memory().unwrap();
+        store.add_secret(token);
+        store.add_secret(&blob);
+        let id = store.add(&new_location("build", ED_FPR)).unwrap().id();
+        let rot = store.start_rotation(&new_rotation(vec![id])).unwrap();
+        store
+            .journal(rot, Some(id), Step::Install, Event::Failed, Some(&cases[0]))
+            .unwrap();
+        let mut tx = store.journal_tx().unwrap();
+        tx.set_phase(rot, id, Phase::Installed, Some(&cases[4]))
+            .unwrap();
+        tx.commit().unwrap();
+        let d = store.steps(rot).unwrap()[0].detail.clone().unwrap();
+        assert!(!d.contains(&groups[2]), "{d}");
+        let r = store.rotation_locations(rot).unwrap()[0]
+            .reason
+            .clone()
+            .unwrap();
+        assert!(!r.contains(&token[10..]), "{r}");
+    }
+
+    #[test]
+    fn detail_drops_headerless_pem_body() {
+        let dir = private_dir();
+        let mut keys = Vec::new();
+        for i in 0..3 {
+            keys.push(keygen(dir.path(), &format!("rsa{i}"), &["-t", "rsa", "-b", "3072"]).0);
+            keys.push(keygen(dir.path(), &format!("ed{i}"), &["-t", "ed25519"]).0);
+        }
+        let mut checked = 0;
+        for private in &keys {
+            let body: Vec<&str> = private
+                .lines()
+                .filter(|l| !l.starts_with("-----"))
+                .collect();
+            let joined = body.join("\n");
+            let whole = scrub_detail(&joined, &[]);
+            for line in body.iter().filter(|l| l.len() > MAX_BASE64_RUN) {
+                let s = scrub_detail(line, &[]);
+                assert!(!s.contains(line), "body line kept: {line:?} -> {s:?}");
+                assert!(!whole.contains(line), "body line kept in block: {line:?}");
+                checked += 1;
+            }
+        }
+        assert!(checked > 50, "{checked}");
+    }
+
+    #[test]
+    fn detail_drops_short_token_values() {
+        let cases = [
+            "GET /api/v4/user?private_token=AbCdEfGhIj0123456789 failed",
+            "PRIVATE-TOKEN: AbCdEfGhIj0123456789",
+            "Authorization: token abcdefghij0123456789",
+            "Authorization: Bearer abcdefghij0123456789",
+            "access_token=abcdefghij0123456789&x=1",
+        ];
+        for case in cases {
+            let s = scrub_detail(case, &[]);
+            assert!(
+                !s.to_lowercase().contains("abcdefghij"),
+                "{case:?} -> {s:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn add_location_scrubs_error_reason_and_key_type_is_checked() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.add_secret("Xq7rT2mK9pLw4ZsN8vBc");
+        let mut tx = store.journal_tx().unwrap();
+        let id = tx
+            .add_location(
+                &new_location("b", ED_FPR),
+                &Status::Error(format!("bad: {ED_PUB} Xq7rT2mK9pLw4ZsN8vBc")),
+                SystemTime::now(),
+            )
+            .unwrap();
+        tx.commit().unwrap();
+        let Status::Error(r) = store.get(id).unwrap().unwrap().status else {
+            panic!("expected an error status");
+        };
+        assert!(!r.contains("AAAA") && !r.contains("Xq7rT2mK9pLw"), "{r}");
+
+        let mut bad = new_rotation(vec![id]);
+        bad.new_key_type = "dsa".into();
+        let err = store.start_rotation(&bad).unwrap_err();
+        assert!(matches!(err, StoreError::Invalid(_)), "{err}");
+        assert!(store.open_rotation().unwrap().is_none());
     }
 }

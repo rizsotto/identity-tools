@@ -31,6 +31,8 @@ pub enum StoreError {
     RotationOpen(i64),
     #[error("no such {what}: {id}")]
     NotFound { what: &'static str, id: i64 },
+    #[error("invalid value: {0}")]
+    Invalid(String),
 }
 
 pub type Result<T> = std::result::Result<T, StoreError>;
@@ -123,6 +125,9 @@ impl Added {
 /// SQLite store for locations and their check results.
 pub struct Store {
     pub(crate) conn: Connection,
+    /// Known secrets (tokens, key blobs) to cut out of journal text. Held
+    /// in memory only, never written.
+    pub(crate) secrets: Vec<String>,
 }
 
 const COLUMNS: &str = "id, kind, ssh_alias, ssh_hostname, ssh_user, ssh_port, base_url, \
@@ -145,7 +150,10 @@ impl Store {
 
     fn init(conn: Connection) -> Result<Store> {
         conn.pragma_update(None, "foreign_keys", true)?;
-        let mut store = Store { conn };
+        let mut store = Store {
+            conn,
+            secrets: Vec::new(),
+        };
         store.migrate()?;
         Ok(store)
     }
