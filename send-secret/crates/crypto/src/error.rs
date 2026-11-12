@@ -50,8 +50,10 @@ pub enum PlanError {
         label: String,
         format: Option<Format>,
     },
-    /// The self copy (FR-12) needs a key the sender does not have.
-    #[error("no {format} key of your own for the self copy; use --no-self-copy to skip it")]
+    /// The self copy (FR-12) was forced to a format the sender has no
+    /// usable key for. Raised before any output is written. The CLI adds
+    /// the hint to skip the self copy.
+    #[error("no {format} key of your own that can encrypt the self copy")]
     NoSelfKey { format: Format },
 }
 
@@ -90,12 +92,14 @@ mod tests {
     }
 
     #[test]
-    fn no_self_key_points_at_the_flag() {
+    fn no_self_key_names_the_format() {
         let err = PlanError::NoSelfKey {
             format: Format::OpenPgp,
         };
-        assert!(err.to_string().contains("--no-self-copy"));
-        assert!(err.to_string().contains("OpenPGP"));
+        assert_eq!(
+            err.to_string(),
+            "no OpenPGP key of your own that can encrypt the self copy"
+        );
     }
 
     #[test]
