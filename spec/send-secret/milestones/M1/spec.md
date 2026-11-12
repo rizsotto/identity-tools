@@ -18,8 +18,9 @@ interoperates with `gpg` and Go `age`. No network, no UI, no TOFU store yet.
   Refs: FR-3, FR-4, FR-7
 - [ ] The same works for age with SSH RSA recipients.
   Refs: FR-3, FR-4, FR-7
-- [ ] Unsupported SSH key types (ECDSA, `sk-` keys) are skipped with a note.
-  Refs: FR-4
+- [ ] Unsupported SSH key types (ECDSA, `sk-` keys) and SSH RSA keys
+  outside 2048 to 4096 bits (the `age` crate limit) are skipped with a
+  note. Refs: FR-4
 - [ ] Interop: files from our CLI decrypt with `gpg`, and `gpg` output
   decrypts with our CLI.
 - [ ] Interop: files from our CLI decrypt with Go `age`, and Go `age` output

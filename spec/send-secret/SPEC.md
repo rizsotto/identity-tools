@@ -305,7 +305,16 @@ send-secret/
 
 ## 15. Facts to verify before relying on them
 
-- [ ] The `age` crate's current API for SSH recipients, armor and multiple recipients, and which SSH key types it accepts.
+- [x] The `age` crate's current API for SSH recipients, armor and multiple recipients, and which SSH key types it accepts. Checked 2026-11-12 (M1 T01) with `age` 0.12.1 (features `ssh`, `armor`) and Go `age` 1.3.1, by a spike against generated keys:
+  - SSH recipients: `age::ssh::Recipient::from_str` takes one `authorized_keys` line (a trailing comment is fine). It accepts `ssh-ed25519` and `ssh-rsa` with a 2048 to 4096 bit modulus. Other types give `ParseRecipientKeyError::Unsupported(key_type)` (seen for `ecdsa-sha2-nistp256` and `sk-ssh-ed25519@openssh.com`), RSA under 2048 bits gives `RsaModulusTooSmall`, RSA over 4096 bits gives `RsaModulusTooLarge` (Go `age` accepts an 8192 bit key, the crate does not), junk gives `Invalid`. So "supported" depends on the RSA size too, not only the key type (FR-4).
+  - SSH identities: `age::ssh::Identity::from_buffer(reader, filename)` gives `Unencrypted`, `Encrypted` (passphrase, needs `.with_callbacks(impl age::Callbacks)`) or `Unsupported(UnsupportedKey::{Type, Hardware, ...})`.
+  - x25519: `age::x25519::Identity::generate()`, `.to_public()`, `.to_string()` returns a `SecretString`. `age::IdentityFile::from_file` reads `age-keygen` files.
+  - Multiple recipients: `age::Encryptor::with_recipients(iter of &dyn age::Recipient)`. x25519, `ssh-ed25519` and `ssh-rsa` mix in one file (all give an empty label set). Every key decrypts alone. No recipients gives `EncryptError::MissingRecipients`.
+  - Armor: `age::armor::ArmoredWriter::wrap_output(w, Format::AsciiArmor | Format::Binary)`; call `finish()` on the stream writer, then on the armored writer. `age::armor::ArmoredReader::new(r)` reads armored and binary input alike, so `age::Decryptor::new(ArmoredReader::new(r))` covers both.
+  - Decrypt: `Decryptor::decrypt(iter of &dyn age::Identity)`. No matching key gives `DecryptError::NoMatchingKeys`.
+  - Interop: Go `age` 1.3.1 decrypts crate output for x25519, SSH Ed25519 and SSH RSA, armored and binary, and the crate decrypts Go `age` output for SSH Ed25519 (armored) and SSH RSA (binary). Full matrix is M1 T11.
+  - Metadata: an SSH stanza line is `-> ssh-ed25519 <tag> ...` with a 4 byte key tag, visible in the file. Confirms S-8 / FR-12.
+  - Sources: https://docs.rs/age/0.12.1/age/ , https://docs.rs/age/0.12.1/age/ssh/enum.ParseRecipientKeyError.html , crate source `src/ssh/recipient.rs`, `src/protocol.rs`, `src/primitives/armor.rs` (https://docs.rs/crate/age/0.12.1/source/), `rsa` crate `RsaPublicKey::MAX_SIZE = 4096`.
 - [ ] Whether `https://github.com/<user>.gpg` and `https://gitlab.com/<user>.keys` are still served and what their rate limits are.
 - [ ] The WKD spec details (current draft) and the keys.openpgp.org `by-email` endpoint.
 - [ ] How to ship the optional Nautilus "Encrypt for…" entry (Nautilus extensions can't live inside a Flatpak).

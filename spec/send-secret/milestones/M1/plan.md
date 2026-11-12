@@ -103,8 +103,15 @@ pub fn detect_format(head: &[u8]) -> Detected;  // OpenPgpArmor, AgeArmor, OpenP
 
 ### age backend
 
-- `age` crate with `ssh` and `armor` features. Encrypt to all recipients in
-  one call. Decrypt with x25519 identity files and SSH private keys.
+- `age` crate 0.12.1 with `ssh` and `armor` features. Encrypt to all
+  recipients in one call. Decrypt with x25519 identity files and SSH
+  private keys. API notes in SPEC 15 item 1.
+- The crate accepts `ssh-rsa` only with a 2048 to 4096 bit modulus.
+  Keys outside that range are skipped with a note, like ECDSA and `sk-`
+  keys (FR-4). So the age backend, not only the key type, decides if an
+  SSH key is usable: build the `age::ssh::Recipient` and turn
+  `Unsupported`, `RsaModulusTooSmall` and `RsaModulusTooLarge` into a
+  skip note.
 - SSH private keys with a passphrase: M1 CLI reads the passphrase from the
   terminal (`rpassword` or similar). The libadwaita dialog is M3.
 - Self identity: a native X25519 identity in
@@ -189,7 +196,8 @@ Lives in `crates/cli/tests/` (integration tests that run the built binary).
 
 `tests/fixtures/gen.sh` makes every key: OpenPGP (Ed25519/Cv25519 and RSA,
 no passphrase, one with passphrase for the agent path), age x25519, SSH
-Ed25519, SSH RSA, plus unsupported ECDSA and a fake `sk-` line. Output is
+Ed25519, SSH RSA, plus unsupported ECDSA, a fake `sk-` line and an SSH RSA
+key over 4096 bits (the `age` crate rejects it, see F1). Output is
 committed. Regenerate only with the script. Fake names and `example.org`
 emails only.
 
@@ -197,7 +205,7 @@ emails only.
 
 | ID | Fact | Status |
 |---|---|---|
-| F1 | SPEC 15 item 1: `age` crate API for SSH recipients, armor, multiple recipients, and which SSH key types it accepts | to verify (T01) |
+| F1 | SPEC 15 item 1: `age` crate API for SSH recipients, armor, multiple recipients, and which SSH key types it accepts | verified (T01), `age` 0.12.1. SSH RSA only 2048 to 4096 bits. See SPEC 15. |
 | F2 | New: the Rust `gpgme` crate builds against Fedora's gpgme 2.0.x (Fedora 45 ships 2.0.1). Add to SPEC 15 | to verify (T02) |
 | F3 | New: gpgme can encrypt to a key file without importing it into the user's keyring (gpg has `--recipient-file`). Add to SPEC 15 | to verify (T02) |
 | F4 | New: Go `age` (Fedora `age` 1.3.x) decrypts SSH RSA and Ed25519 recipients from the `age` crate, armored and binary | checked by T10 tests |
