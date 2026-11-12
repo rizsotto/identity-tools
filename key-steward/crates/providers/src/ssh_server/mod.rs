@@ -30,11 +30,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use identity_core::{Fingerprint, PublicKey};
-use inventory::{LocationKind, Target};
+use inventory::{LocationKind, Purpose, Target};
 use tokio::process::Command;
 
 pub use classify::classify;
-pub use edit::AuthorizedKeysError;
+pub use edit::{AuthorizedKeysError, OldKeyCheck, SshRemoved};
 
 use crate::error::ProviderError;
 use crate::netlog::NetLog;
@@ -459,24 +459,43 @@ impl Provider for SshServer {
         self.list_as(target, login).await
     }
 
+    /// See [`SshServer::add_key`]. Needs `opts.like` (the login key).
     async fn add(
         &self,
-        _target: &Target,
-        _key: &PublicKey,
-        _opts: &AddOpts,
+        target: &Target,
+        key: &PublicKey,
+        opts: &AddOpts,
     ) -> Result<(), ProviderError> {
-        Err(ProviderError::NotYet("adding a key to an SSH server (M2)"))
+        if opts.purpose != Purpose::SshAuth {
+            return Err(
+                AuthorizedKeysError::Unsupported("an SSH server holds only login keys").into(),
+            );
+        }
+        let PublicKey::Ssh(key) = key else {
+            return Err(
+                AuthorizedKeysError::Unsupported("only SSH keys go into authorized_keys").into(),
+            );
+        };
+        let like = opts.like.as_ref().ok_or(AuthorizedKeysError::NoLoginKey)?;
+        self.add_key(target, key, like).await.map(|_| ())
     }
 
+    /// See [`SshServer::remove_key`], which also returns the
+    /// `cert-authority` lines that still hold the old key. Needs
+    /// `opts.keep` (the login key, which stays).
     async fn remove(
         &self,
-        _target: &Target,
-        _key: &Fingerprint,
-        _opts: &RemoveOpts,
+        target: &Target,
+        key: &Fingerprint,
+        opts: &RemoveOpts,
     ) -> Result<(), ProviderError> {
-        Err(ProviderError::NotYet(
-            "removing a key from an SSH server (M2)",
-        ))
+        if opts.purpose != Purpose::SshAuth {
+            return Err(
+                AuthorizedKeysError::Unsupported("an SSH server holds only login keys").into(),
+            );
+        }
+        let keep = opts.keep.as_ref().ok_or(AuthorizedKeysError::NoLoginKey)?;
+        self.remove_key(target, key, keep).await.map(|_| ())
     }
 
     /// Errors with [`ProviderError::CommandsNeedConsent`] if the config can

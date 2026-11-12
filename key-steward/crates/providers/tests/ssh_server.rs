@@ -268,7 +268,7 @@ async fn stopped_server_is_unreachable() {
 }
 
 #[tokio::test]
-async fn add_list_remove_are_not_yet() {
+async fn edits_need_a_login_key() {
     let sshd = Sshd::start(BASE);
     let p = provider(&sshd, sshd.ssh_config(), &NetLog::new());
     let t = target(&sshd);
@@ -289,7 +289,9 @@ async fn add_list_remove_are_not_yet() {
             }
         )
         .await,
-        Err(ProviderError::NotYet(_))
+        Err(ProviderError::AuthorizedKeys(
+            AuthorizedKeysError::NoLoginKey
+        ))
     ));
     let account = Target::Account {
         base_url: "https://example.invalid".into(),

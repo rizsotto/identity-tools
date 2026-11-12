@@ -1,4 +1,5 @@
-//! Reading `~/.ssh/authorized_keys` over ssh (SPEC 9.1, S-3, S-5, S-6).
+//! Reading and editing `~/.ssh/authorized_keys` over ssh (SPEC 9.1, S-3,
+//! S-5, S-6).
 //!
 //! Every run logs in with one given key, pinned as the target's only
 //! identity in the generated config of the check (`build_config`), so it
@@ -8,18 +9,26 @@
 //! command (`command=` on the login key's line) or a shell that prints
 //! text fails the marker check, before any change.
 //!
+//! An edit reads the file, computes the new content in Rust
+//! (`authorized_keys.rs`), and sends it to the apply script with the
+//! checksum of the file as read. The script writes nothing if the file
+//! changed in between. Its answer must name the checksum of the content
+//! sent. Add logs in with the old key (`like`), remove with the new key
+//! (`keep`): if the new key cannot run the script, the old key stays.
+//!
 //! File contents and keys never go into the network log or error text.
 
 use std::process::Stdio;
 
+use identity_core::{Fingerprint, SshPublicKey};
 use inventory::{LocationKind, Purpose, Status, Target};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
 use super::authorized_keys::{AuthorizedKeys, EditError, MAX_FILE};
-use super::remote::{self, Cksum, ProtocolError, ReadReply, Script};
+use super::remote::{self, ApplyReply, Cksum, ProtocolError, ReadReply, Script};
 use super::{RUN_TIMEOUT, SshServer, Workdir, config, read_capped, render_command};
 use crate::error::ProviderError;
-use crate::provider::{KeyRef, PublicKeyRef, VerifyStatus};
+use crate::provider::{KeyRef, Provider, PublicKeyRef, VerifyError, VerifyStatus};
 
 /// Most bytes kept from the script's stdout. More than the read script
 /// may send, so a longer answer is refused as too large.
@@ -57,6 +66,39 @@ pub enum AuthorizedKeysError {
     Script(String),
     #[error(transparent)]
     Edit(#[from] EditError),
+    #[error("~/.ssh/authorized_keys changed on the server since it was read; nothing was written")]
+    Changed,
+    #[error("the new file did not arrive whole; nothing was written")]
+    Short,
+    /// The file was replaced, but the script reports another checksum
+    /// than the content sent. Check the file on the server.
+    #[error(
+        "the server reports a different file than the one sent; check ~/.ssh/authorized_keys there"
+    )]
+    NotConfirmed,
+}
+
+/// The result of [`SshServer::remove_key`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SshRemoved {
+    /// False if the old key was not in the file (nothing written).
+    pub changed: bool,
+    /// Line numbers (from 1) of `cert-authority` lines with the old key.
+    /// They stay: the old private key can still sign a certificate that
+    /// logs in. Tell the user, keep the location flagged.
+    pub ca_lines_with_old_key: Vec<usize>,
+}
+
+/// The result of [`SshServer::check_old_key`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OldKeyCheck {
+    /// The server refuses the old key.
+    Refused,
+    /// The server still accepts the old key (alone, or as one of several
+    /// keys). Do not retire it.
+    StillAccepted,
+    /// No answer (host unreachable, host key, ...).
+    Unknown(VerifyStatus),
 }
 
 impl From<ProtocolError> for ProviderError {
@@ -80,6 +122,90 @@ fn login_reason(s: &VerifyStatus) -> String {
 }
 
 impl SshServer {
+    /// Adds `key` after each line of `like` (same options), logging in
+    /// with `like`. Returns false if the file already had it (nothing
+    /// written).
+    pub async fn add_key(
+        &self,
+        target: &Target,
+        key: &SshPublicKey,
+        like: &KeyRef,
+    ) -> Result<bool, ProviderError> {
+        let (content, sum) = self.read_file(target, like).await?;
+        let new = AuthorizedKeys::parse(&content)?.add_like(&like.fingerprint, key)?;
+        if new == content {
+            return Ok(false);
+        }
+        self.apply(target, like, sum, &new).await?;
+        Ok(true)
+    }
+
+    /// Drops every login key line of `old`, logging in with `keep`, which
+    /// must stay in the file. The login fails (and nothing changes) if
+    /// `keep` cannot log in and run the script, for example because its
+    /// line has a forced command.
+    pub async fn remove_key(
+        &self,
+        target: &Target,
+        old: &Fingerprint,
+        keep: &KeyRef,
+    ) -> Result<SshRemoved, ProviderError> {
+        let (content, sum) = self.read_file(target, keep).await?;
+        let removed = AuthorizedKeys::parse(&content)?.remove(old, &keep.fingerprint)?;
+        let changed = removed.bytes != content;
+        if changed {
+            self.apply(target, keep, sum, &removed.bytes).await?;
+        }
+        Ok(SshRemoved {
+            changed,
+            ca_lines_with_old_key: removed.ca_lines_with_old_key,
+        })
+    }
+
+    /// After a removal: logs in with the old key through the same pinned
+    /// config and expects the server to refuse it. A key the server
+    /// accepts but ssh cannot use, or accepts as one of several, counts as
+    /// still accepted.
+    pub async fn check_old_key(
+        &self,
+        target: &Target,
+        old: &KeyRef,
+    ) -> Result<OldKeyCheck, ProviderError> {
+        Ok(match self.verify(target, old).await? {
+            VerifyStatus::Missing => OldKeyCheck::Refused,
+            VerifyStatus::Verified
+            | VerifyStatus::Error(VerifyError::KeyNotUsable | VerifyError::MoreThanOneKey) => {
+                OldKeyCheck::StillAccepted
+            }
+            other => OldKeyCheck::Unknown(other),
+        })
+    }
+
+    async fn apply(
+        &self,
+        target: &Target,
+        login: &KeyRef,
+        old: Cksum,
+        new: &[u8],
+    ) -> Result<(), ProviderError> {
+        let out = self
+            .run_script(target, login, remote::APPLY, remote::apply_stdin(old, new))
+            .await?;
+        let err = match remote::parse_apply(&out)? {
+            ApplyReply::Done(sum) if sum == remote::cksum(new) => return Ok(()),
+            ApplyReply::Done(_) => AuthorizedKeysError::NotConfirmed,
+            ApplyReply::Changed => AuthorizedKeysError::Changed,
+            ApplyReply::Short => AuthorizedKeysError::Short,
+            ApplyReply::Symlink => AuthorizedKeysError::Symlink,
+            ApplyReply::Absent => AuthorizedKeysError::Absent,
+            ApplyReply::NotFile => AuthorizedKeysError::NotFile,
+            ApplyReply::BadInput => AuthorizedKeysError::Script("badinput".into()),
+            ApplyReply::NoTemp => AuthorizedKeysError::Script("notmp".into()),
+            ApplyReply::Failed(what) => AuthorizedKeysError::Script(what),
+        };
+        Err(err.into())
+    }
+
     /// The keys in `~/.ssh/authorized_keys`, logging in with `login`: one
     /// entry per login key line (CA lines left out), purpose `SshAuth`,
     /// `remote_id` the line number, `title` the comment made safe to show.
@@ -206,7 +332,7 @@ impl SshServer {
             Err(_) => {
                 record("timed out".into());
                 return Err(AuthorizedKeysError::Login(VerifyStatus::Error(
-                    crate::provider::VerifyError::Unreachable(format!(
+                    VerifyError::Unreachable(format!(
                         "no answer within {} seconds",
                         RUN_TIMEOUT.as_secs()
                     )),

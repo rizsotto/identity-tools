@@ -23,6 +23,6 @@ pub use provider::{
     AddOpts, KeyRef, Provider, PublicKeyRef, RemoveOpts, VerifyError, VerifyStatus,
 };
 pub use secret_service::SecretServiceTokens;
-pub use ssh_server::{AuthorizedKeysError, SshServer};
+pub use ssh_server::{AuthorizedKeysError, OldKeyCheck, SshRemoved, SshServer};
 pub use ssh_server::{authorized_keys, remote};
 pub use token::{InMemoryTokenSource, Token, TokenError, TokenKey, TokenSource};
