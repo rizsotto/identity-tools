@@ -16,7 +16,7 @@ pub enum WeakReason {
     /// RSA shorter than [`MIN_RSA_BITS`].
     RsaTooShort(u32),
     Dsa,
-    /// ECDSA on a NIST curve; Ed25519 is preferred.
+    /// ECDSA on a NIST curve, also on a security key; Ed25519 is preferred.
     EcdsaNist,
     /// The SSH private key file has no passphrase.
     PrivateKeyUnencrypted,
@@ -46,7 +46,7 @@ pub fn weak_key_warnings(
             add(Severity::Warning, WeakReason::RsaTooShort(*bits))
         }
         KeyAlgo::Dsa(_) => add(Severity::Error, WeakReason::Dsa),
-        KeyAlgo::Ecdsa(curve) if curve.starts_with("nistp") => {
+        KeyAlgo::Ecdsa(curve) | KeyAlgo::SkEcdsa(curve) if curve.starts_with("nistp") => {
             add(Severity::Info, WeakReason::EcdsaNist)
         }
         _ => {}
@@ -133,6 +133,11 @@ mod tests {
                 vec![(I, EcdsaNist)],
             ),
             (key(Ssh, SkEd25519, None), None, vec![]),
+            (
+                key(Ssh, SkEcdsa("nistp256".into()), None),
+                None,
+                vec![(I, EcdsaNist)],
+            ),
             (key(Age, X25519, None), None, vec![]),
             (key(OpenPgp, Ed25519, later), None, vec![]),
             (key(OpenPgp, Ed25519, None), None, vec![(I, NoExpiry)]),

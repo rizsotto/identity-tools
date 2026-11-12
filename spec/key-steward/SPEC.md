@@ -244,7 +244,7 @@ Respect a non-default `AuthorizedKeysFile` only if the user configures it (v1: s
 - WKD export: produce `openpgpkey/<domain>/hu/<zbase32(sha1(localpart))>` and `policy` files (advanced method) plus the direct method layout. Show the upload instructions.
 
 ### 9.4 Weak key rules (v1)
-- RSA < 3072 bits: warning. DSA: error. ECDSA nistp*: info ("Ed25519 preferred").
+- RSA < 3072 bits: warning. DSA: error. ECDSA nistp*: info ("Ed25519 preferred"). This includes security keys (`sk-ecdsa-sha2-nistp256`): `sk-ssh-ed25519` is preferred there.
 - SSH key file not encrypted: warning (check the `bcrypt` KDF header in the OpenSSH private key format; do not try to decrypt).
 - OpenPGP key without an expiry: info.
 
