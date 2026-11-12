@@ -22,3 +22,5 @@ Make a record when work reaches the milestone it blocks.
 | 3 | Optional SSH signature in age mode in v1 | pending, blocks M3. Section 4 lists it as "Later", so M1 and M2 build no signing for age. |
 | 4 | Default clipboard clear time (proposed 60 s) | pending, blocks M3 |
 | 5 | Web decryptor early? | pending, blocks M4 (roadmap only, not in v1 scope) |
+| 8 | Add GitLab `/<user>.gpg` to the sources (section 4)? | pending, blocks nothing. M2 builds only the SPEC 4 sources. |
+| 9 | Refresh pinned contacts in the background? | pending, blocks M3 (app UX). M2 safe default: pinned contact uses its pins with no network; `lookup` and `encrypt --refresh` check again (M2 plan.md). |
