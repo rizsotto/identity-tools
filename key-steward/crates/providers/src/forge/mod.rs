@@ -6,6 +6,7 @@
 //! Endpoints, fields and pagination: SPEC 15, fact 1.
 
 mod github;
+mod gitlab;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -21,6 +22,7 @@ use crate::provider::{KeyRef, PublicKeyRef, VerifyError, VerifyStatus};
 use crate::token::{TokenKey, TokenSource};
 
 pub use github::GitHub;
+pub use gitlab::GitLab;
 
 /// Reads armored OpenPGP keys from forge answers with GnuPG, without
 /// importing them. A gpgme context is not `Send`, so each read makes its
