@@ -6,7 +6,9 @@ use std::fs;
 
 use common::{Fixture, Op, Recorder, assert_removals_after_fresh_verify};
 use inventory::{Event, LocationKind, Phase, Purpose, SshHost, Step, Target};
-use rotation::{CA_REASON, Ending, NoHooks, OldKeyCheck, Point, STILL_ACCEPTED, UNCHECKED};
+use rotation::{
+    CA_REASON, Ending, EngineError, NoHooks, OldKeyCheck, Point, STILL_ACCEPTED, UNCHECKED,
+};
 
 fn step_order(steps: &[inventory::StepEntry]) -> Vec<(Step, Event)> {
     steps.iter().map(|e| (e.step, e.event)).collect()
@@ -136,17 +138,29 @@ async fn remove_only_after_fresh_verify() {
                 }
             }
         }
-        let mut s = f.start(&NoHooks, true).await.unwrap();
+        // Each process may crash at a random journal point; the next one
+        // resumes, or retries the failed location.
+        let crash = |rng: &mut Rng| Recorder::crash_at((rng.next() % 100) as usize);
+        let mut r = f.start(&crash(&mut rng), true).await;
         let mut rounds = 0;
-        while s.ending == Ending::Stopped {
+        let s = loop {
             rounds += 1;
-            assert!(rounds < 20, "seed {seed}: no progress: {s:?}");
-            let failed = s.failures[0].location;
-            s = f
-                .with_engine(s.rotation, &NoHooks, true, async |e| e.retry(failed).await)
-                .await
-                .unwrap();
-        }
+            assert!(rounds < 60, "seed {seed}: no progress: {r:?}");
+            let hooks = crash(&mut rng);
+            r = match r {
+                Err(EngineError::Crashed) => {
+                    f.with_engine(1, &hooks, true, async |e| e.run().await)
+                        .await
+                }
+                Ok(s) if s.ending == Ending::Stopped => {
+                    let failed = s.failures[0].location;
+                    f.with_engine(1, &hooks, true, async |e| e.retry(failed).await)
+                        .await
+                }
+                Ok(s) => break s,
+                Err(e) => panic!("seed {seed}: {e}"),
+            };
+        };
         assert!(
             s.locations.iter().all(|l| l.phase == Phase::OldRemoved),
             "seed {seed}"
@@ -373,4 +387,22 @@ async fn ssh_g_offers_new_key_before_old() {
         .collect();
     let pos = |name: &str| ids.iter().position(|i| i.ends_with(name)).unwrap();
     assert!(pos("/id_new") < pos("/id_old"), "{ids:?}");
+}
+
+#[tokio::test]
+async fn config_off_warns_that_config_names_old_key() {
+    let mut f = Fixture::new();
+    f.update_config = false;
+    let s = f.start(&NoHooks, true).await.unwrap();
+    assert_eq!(s.ending, Ending::Done);
+    assert_eq!(
+        fs::read_to_string(f.home.ssh_dir().join("config")).unwrap(),
+        common::CONFIG
+    );
+    assert!(
+        s.notes
+            .iter()
+            .any(|n| n.contains("still names the old key")),
+        "{s:?}"
+    );
 }

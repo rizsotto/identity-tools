@@ -34,10 +34,12 @@ pub enum Step {
     Rollback,
     Config,
     Retire,
+    /// The user skipped a location (one `done` entry, no action).
+    Skip,
 }
 
 impl Step {
-    pub const ALL: [Step; 7] = [
+    pub const ALL: [Step; 8] = [
         Step::Generate,
         Step::Install,
         Step::Verify,
@@ -45,6 +47,7 @@ impl Step {
         Step::Rollback,
         Step::Config,
         Step::Retire,
+        Step::Skip,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -56,6 +59,7 @@ impl Step {
             Step::Rollback => "rollback",
             Step::Config => "config",
             Step::Retire => "retire",
+            Step::Skip => "skip",
         }
     }
 

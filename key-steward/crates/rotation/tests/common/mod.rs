@@ -59,6 +59,8 @@ pub struct Faults {
     pub verify_missing_next: HashMap<String, usize>,
     pub add_fails: HashSet<String>,
     pub remove_fails: HashSet<String>,
+    /// The removal is applied, but the answer is lost (an error).
+    pub remove_lost: HashSet<String>,
     pub list_fails: HashSet<String>,
     /// GitLab adds the new key for the one purpose asked, not like the
     /// old key's object.
@@ -288,6 +290,18 @@ impl Provider for MockProvider {
         }
         objs.retain(|o| !(&o.key == key && o.purposes.contains(&opts.purpose)));
         drop(s);
+        if self
+            .world
+            .faults
+            .lock()
+            .unwrap()
+            .remove_lost
+            .contains(&site)
+        {
+            self.world
+                .record(Op::Remove, &site, key, opts.purpose, false);
+            return Err(fail("answer lost"));
+        }
         self.world
             .record(Op::Remove, &site, key, opts.purpose, true);
         Ok(())
@@ -604,7 +618,7 @@ impl Fixture {
     }
 
     pub fn lock_path(&self) -> PathBuf {
-        self.db.with_file_name("rotation.lock")
+        rotation::lock_path(&self.db)
     }
 
     pub fn store(&self) -> Store {
@@ -621,7 +635,7 @@ impl Fixture {
         self.world.restart();
         let providers = MockProviders::new(&self.world);
         let mut store = self.store();
-        let lock = RotationLock::acquire(&self.lock_path()).unwrap();
+        let lock = RotationLock::for_database(&self.db).unwrap();
         let ctx = Ctx {
             providers: &providers,
             hooks,
@@ -644,7 +658,7 @@ impl Fixture {
         self.world.restart();
         let providers = MockProviders::new(&self.world);
         let mut store = self.store();
-        let lock = RotationLock::acquire(&self.lock_path()).unwrap();
+        let lock = RotationLock::for_database(&self.db).unwrap();
         let ctx = Ctx {
             providers: &providers,
             hooks,

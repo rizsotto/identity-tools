@@ -7,7 +7,7 @@ use std::process::Command;
 
 use common::{CONFIG, CONFIG_BOTH, Fixture, Op, Recorder};
 use inventory::{Event, Phase, Purpose, RotationId, Step, StoreError};
-use rotation::{Ending, EngineError, LockError, NoHooks, RotationLock};
+use rotation::{Ending, EngineError, LockError, NoHooks, RotationLock, check_invariants};
 
 const ID: RotationId = 1;
 
@@ -152,6 +152,12 @@ async fn skip_keeps_old_key_and_no_retire() {
     assert_eq!(s.ending, Ending::Done, "{s:?}");
     let loc = s.locations.iter().find(|l| l.location_id == b).unwrap();
     assert_eq!(loc.phase, Phase::Skipped);
+    let steps = f.store().steps(ID).unwrap();
+    assert!(
+        steps
+            .iter()
+            .any(|e| e.step == Step::Skip && e.location_id == Some(b) && e.event == Event::Done)
+    );
     assert!(f.world.has("srv-b", &f.old_fpr, Purpose::SshAuth));
     assert!(f.store().get(b).unwrap().is_some(), "old key keeps its row");
     assert!(f.old_path.exists());
@@ -167,9 +173,9 @@ async fn skip_keeps_old_key_and_no_retire() {
 #[tokio::test]
 async fn second_process_is_refused() {
     let f = Fixture::new();
-    let lock = RotationLock::acquire(&f.lock_path()).unwrap();
+    let lock = RotationLock::for_database(&f.db).unwrap();
     assert!(matches!(
-        RotationLock::acquire(&f.lock_path()),
+        RotationLock::for_database(&f.db),
         Err(LockError::Busy(_))
     ));
     let other = |path: &std::path::Path| {
@@ -321,4 +327,108 @@ async fn abort_before_any_removal_restores_config() {
             .iter()
             .all(|c| c.op != Op::Remove || c.key != old)
     );
+}
+
+fn assert_invariants(f: &Fixture) {
+    let bad = check_invariants(&f.store(), ID, &f.env, f.world.as_ref()).unwrap();
+    assert!(bad.is_empty(), "{bad:#?}");
+}
+
+#[tokio::test]
+async fn crash_after_ssh_removal_then_abort_keeps_both_config_lines() {
+    let f = Fixture::new();
+    // 56..60 is the first removal (srv-a); 58 its AfterAction: the old
+    // key is gone, no "done" entry.
+    let rec = Recorder::crash_at(58);
+    assert!(matches!(
+        f.start(&rec, true).await,
+        Err(EngineError::Crashed)
+    ));
+    assert_eq!(rec.points()[58].step, Step::RemoveOld);
+    assert!(!f.world.has("srv-a", &f.old_fpr, Purpose::SshAuth));
+
+    let s = f
+        .with_engine(ID, &NoHooks, true, async |e| e.abort(true).await)
+        .await
+        .unwrap();
+    assert_eq!(s.ending, Ending::Aborted, "{s:?}");
+    let a = s
+        .locations
+        .iter()
+        .find(|l| l.target.label() == "srv-a")
+        .unwrap();
+    assert_eq!(a.phase, Phase::OldRemoved);
+    assert_eq!(config(&f), CONFIG_BOTH, "srv-a needs the new line");
+    assert!(
+        s.locations
+            .iter()
+            .filter(|l| l.location_id != a.location_id)
+            .all(|l| l.phase == Phase::RolledBack)
+    );
+    assert_invariants(&f);
+}
+
+#[tokio::test]
+async fn lost_forge_removal_then_abort_keeps_both_config_lines() {
+    let f = Fixture::new();
+    {
+        let mut faults = f.world.faults.lock().unwrap();
+        for (target, ..) in common::sites() {
+            if target.label() != "alice at https://gitlab.test" {
+                faults.remove_fails.insert(target.label());
+            }
+        }
+        faults
+            .remove_lost
+            .insert("alice at https://gitlab.test".into());
+    }
+    let s = f.start(&NoHooks, true).await.unwrap();
+    assert_eq!(s.ending, Ending::Stopped);
+    assert!(
+        !f.world
+            .has("alice at https://gitlab.test", &f.old_fpr, Purpose::SshAuth)
+    );
+    {
+        let mut faults = f.world.faults.lock().unwrap();
+        faults.remove_fails.clear();
+        faults.remove_lost.clear();
+    }
+    let s = f
+        .with_engine(ID, &NoHooks, true, async |e| e.abort(true).await)
+        .await
+        .unwrap();
+    assert_eq!(s.ending, Ending::Aborted, "{s:?}");
+    let gl = s
+        .locations
+        .iter()
+        .find(|l| l.kind == inventory::LocationKind::GitLab)
+        .unwrap();
+    assert_eq!(gl.phase, Phase::OldRemoved);
+    assert_eq!(config(&f), CONFIG_BOTH);
+    assert_invariants(&f);
+}
+
+#[tokio::test]
+async fn skip_refused_while_a_step_is_unfinished() {
+    let f = Fixture::new();
+    // 6 is the AfterAction of the install at srv-a.
+    assert!(matches!(
+        f.start(&Recorder::crash_at(6), true).await,
+        Err(EngineError::Crashed)
+    ));
+    f.world
+        .faults
+        .lock()
+        .unwrap()
+        .list_fails
+        .insert("srv-a".into());
+    let r = f
+        .with_engine(ID, &NoHooks, true, async |e| e.skip(1).await)
+        .await;
+    assert!(
+        matches!(&r, Err(EngineError::Refused(m)) if m.contains("did not finish")),
+        "{r:?}"
+    );
+    let steps = f.store().steps(ID).unwrap();
+    assert!(!steps.iter().any(|e| e.step == Step::Skip));
 }

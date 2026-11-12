@@ -1,5 +1,5 @@
 //! One process drives rotations at a time (plan.md, "Locking"): an
-//! advisory `flock` on `<data dir>/rotation.lock`. The kernel drops the
+//! advisory `flock` on `rotation.lock` next to the database file. The kernel drops the
 //! lock when the process dies, so a crash never leaves a stale lock.
 
 use std::fs::{File, OpenOptions};
@@ -22,9 +22,19 @@ pub struct RotationLock {
     _file: File,
 }
 
+/// The lock file of the database at `db`: `rotation.lock` in its dir.
+pub fn lock_path(db: &Path) -> PathBuf {
+    db.with_file_name("rotation.lock")
+}
+
 impl RotationLock {
-    /// Takes the lock, or fails at once with [`LockError::Busy`].
-    pub fn acquire(path: &Path) -> Result<RotationLock, LockError> {
+    /// Takes the lock for the database at `db`, or fails at once with
+    /// [`LockError::Busy`].
+    pub fn for_database(db: &Path) -> Result<RotationLock, LockError> {
+        Self::acquire(&lock_path(db))
+    }
+
+    fn acquire(path: &Path) -> Result<RotationLock, LockError> {
         let io_err = |e: io::Error| LockError::Io {
             path: path.to_path_buf(),
             reason: e.to_string(),
@@ -47,5 +57,12 @@ impl RotationLock {
             });
         }
         Ok(RotationLock { _file: file })
+    }
+}
+
+impl Drop for RotationLock {
+    fn drop(&mut self) {
+        // SAFETY: the fd is still open; closing it would also release.
+        unsafe { libc::flock(self._file.as_raw_fd(), libc::LOCK_UN) };
     }
 }

@@ -27,7 +27,8 @@ use crate::files::{pub_path, retire};
 use crate::gate::{may_remove_old, new_ref, old_ref, remove_old, status_text};
 use crate::hooks::{Confirm, Crash, Hooks, JournalPoint, Point};
 use crate::keygen::{KeyType, KeygenRequest, Passphrase, generate, read_public};
-use crate::sites::{OldKeyCheck, Providers};
+use crate::sites::Providers;
+use providers::OldKeyCheck;
 
 /// Shown for a location whose `authorized_keys` still trusts the old key
 /// as a CA. It blocks retire.
@@ -967,6 +968,15 @@ impl<'a> Engine<'a> {
                 "no location {location} in this rotation"
             )));
         };
+        let j = self.journal()?;
+        let open = j
+            .last_at(Some(location))
+            .is_some_and(|e| e.event == Event::Start);
+        if open || self.unsettled.contains_key(&Some(location)) {
+            return Err(EngineError::Refused(format!(
+                "the last step at location {location} did not finish; resume first"
+            )));
+        }
         if !matches!(
             loc.phase,
             Phase::Pending | Phase::Installed | Phase::Verified
@@ -977,12 +987,15 @@ impl<'a> Engine<'a> {
             )));
         }
         let mut tx = self.store.journal_tx()?;
-        tx.set_phase(
+        let why = "skipped by the user";
+        tx.step(
             self.rot.id,
-            location,
-            Phase::Skipped,
-            Some("skipped by the user"),
+            Some(location),
+            Step::Skip,
+            Event::Done,
+            Some(why),
         )?;
+        tx.set_phase(self.rot.id, location, Phase::Skipped, Some(why))?;
         tx.commit()?;
         self.run().await
     }
@@ -995,15 +1008,50 @@ impl<'a> Engine<'a> {
     /// keep the new key.
     pub async fn abort(&mut self, rollback: bool) -> Result<Summary, EngineError> {
         self.refresh()?;
-        self.settle_all().await?;
         if rollback && self.journal()?.started_anywhere(Step::Install) {
             let mut tx = self.store.journal_tx()?;
             tx.set_state(self.rot.id, RotationState::Aborting.as_str())?;
             tx.commit()?;
             self.refresh()?;
+            // Settle in abort mode: an SSH removal that took effect is
+            // marked done instead of run again.
+            self.settle_all().await?;
             return self.continue_abort().await;
         }
+        self.settle_all().await?;
         self.finish_aborted()
+    }
+
+    /// Abort: looks again at every location where a removal of the old
+    /// key began and is not marked done (a crash, or a lost answer). If
+    /// the old key is gone there, the removal is marked done. Returns
+    /// whether some location could not be looked at.
+    async fn settle_removals(&mut self) -> Result<bool, EngineError> {
+        let mut unclear = false;
+        let j = self.journal()?;
+        for loc in self.locations()? {
+            let l = Some(loc.location_id);
+            if matches!(loc.phase, Phase::OldRemoved | Phase::RolledBack)
+                || !j.has(Step::RemoveOld, l, Event::Start)
+            {
+                continue;
+            }
+            match self.list(&loc, true).await {
+                Err(_) => unclear = true,
+                Ok(keys) if listed(&keys, &self.rot.old_fingerprint, loc.purpose) => {}
+                Ok(_) => {
+                    let end = End {
+                        detail: Some("settled during abort: the old key is gone".into()),
+                        reason: (loc.kind == LocationKind::SshServer)
+                            .then(|| "old key removed; cert-authority lines not checked".into()),
+                        remove_row: Some(loc.location_id),
+                        ..End::done().phase(Phase::OldRemoved)
+                    };
+                    self.write_end(Step::RemoveOld, l, end)?;
+                }
+            }
+        }
+        Ok(unclear)
     }
 
     /// Locations whose new key a rollback removes: an install began there
@@ -1022,16 +1070,18 @@ impl<'a> Engine<'a> {
     }
 
     async fn continue_abort(&mut self) -> Result<Summary, EngineError> {
+        let unclear = self.settle_removals().await?;
         let j = self.journal()?;
         // The config first, so it never names a key no location accepts.
-        // If the old key is gone somewhere, those hosts need the new line:
-        // both lines stay.
+        // If the old key is gone somewhere, or may be, those hosts need
+        // the new line: both lines stay.
         let old_removed = self
             .locations()?
             .iter()
             .any(|l| l.phase == Phase::OldRemoved);
         if j.has(Step::Config, None, Event::Start)
             && !old_removed
+            && !unclear
             && !j.has(Step::Rollback, None, Event::Done)
         {
             if !self.flagged_step(&j, Step::Rollback, None) {
@@ -1162,6 +1212,26 @@ impl<'a> Engine<'a> {
 
     fn notes(&self, j: &Journal) -> Result<Vec<String>, EngineError> {
         let mut notes = Vec::new();
+        if !self.rot.update_config {
+            let env = self.ctx.env;
+            let named = plan_config_change(
+                &env.config_files,
+                &self.rot.old_key_path,
+                &self.rot.new_key_path,
+                &env.home,
+                &self.stamp(),
+                ConfigMode::InsertAbove,
+            )
+            .is_ok_and(|p| !p.is_empty());
+            if named {
+                notes.push(format!(
+                    "ssh config not changed (not asked for): it still names the old key {}; \
+                     add the new key {} by hand",
+                    self.rot.old_key_path.display(),
+                    self.rot.new_key_path.display()
+                ));
+            }
+        }
         if self.rot.update_config
             && !j.has(Step::Config, None, Event::Done)
             && let Some(r) = self.config_skip_reason(j)?

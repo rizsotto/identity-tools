@@ -137,6 +137,10 @@ location in phase `OldRemoved`.
 - Abort with rollback sets the rotation state `aborting`. A resume then
   goes on with the abort, never forward. Abort without rollback ends an
   `aborting` rotation too (the new key stays where a rollback failed).
+- Skip writes a `skip` `done` entry with the phase change. It is refused
+  while the location's last step has a `start` and no end.
+- Without `--update-config`, the summary warns when the ssh config still
+  names the old key.
 - A failure is "the last journal entry of that location (or of the
   rotation itself) is `failed`". A settle that cannot list the location
   writes nothing and flags it for this run only.
@@ -205,7 +209,10 @@ Two phases, so the config works at every moment (orchestrator decision,
    `rotation-<id>-retire`), then move the key files. If retire is skipped,
    both lines stay and everything keeps working; the summary says why.
 
-Abort with rollback: if no location is `OldRemoved`, the config files go
+Abort with rollback: first every location where a removal began and is
+not marked done (crash, lost answer) is listed again; if the old key is
+gone there, the removal is marked done. If then no location is
+`OldRemoved` and every such location could be listed, the config files go
 back to their backups (`restore_config_change`, journaled as `rollback`
 with no location) before any `rollback(L)` removes the new key. If any
 location is `OldRemoved`, both lines stay: those hosts need the new key.
@@ -238,7 +245,7 @@ anything else flags the location and blocks retire.
 
 One open rotation per database (checked in the same transaction that
 creates the `rotations` row). Plus an advisory `flock` on
-`<data dir>/rotation.lock` for the whole run, so two processes cannot drive
+`rotation.lock` next to the database file (`RotationLock::for_database`) for the whole run, so two processes cannot drive
 the same rotation. The lock is released by the kernel when a process dies,
 so a crash never leaves a stale lock.
 
@@ -435,7 +442,7 @@ CREATE TABLE rotation_steps (
     id INTEGER PRIMARY KEY,
     rotation_id INTEGER NOT NULL REFERENCES rotations(id),
     location_id INTEGER,
-    step TEXT NOT NULL,              -- generate, install, verify, remove_old, rollback, config, retire
+    step TEXT NOT NULL,              -- generate, install, verify, remove_old, rollback, config, retire, skip
     event TEXT NOT NULL,             -- start, done, failed
     detail TEXT,                     -- short text, never key material or tokens
     at INTEGER NOT NULL

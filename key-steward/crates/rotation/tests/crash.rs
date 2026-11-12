@@ -8,6 +8,7 @@
 
 mod common;
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
@@ -64,7 +65,7 @@ fn want_ending(s: Scenario) -> Ending {
 
 fn check(f: &Fixture, at: &str) {
     let store = Store::open(&f.db).unwrap();
-    let bad = check_invariants(&store, ID, &f.home.ssh_dir(), f.world.as_ref()).unwrap();
+    let bad = check_invariants(&store, ID, &f.env, f.world.as_ref()).unwrap();
     assert!(bad.is_empty(), "{at}: {bad:#?}");
 }
 
@@ -132,6 +133,8 @@ fn end_state(f: &Fixture) -> EndState {
             .snapshot()
             .into_iter()
             .map(|(s, k, p)| (s, norm(&k), p))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
             .collect(),
         rows: store
             .list()
@@ -145,6 +148,8 @@ fn end_state(f: &Fixture) -> EndState {
                     norm(l.key.as_str()),
                 )
             })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
             .collect(),
         files: file_list,
         config: fs::read_to_string(f.home.ssh_dir().join("config")).unwrap(),
@@ -243,4 +248,111 @@ async fn invariants_hold_at_every_point_of_clean_runs() {
         assert_eq!(summary.ending, want_ending(s));
         check(&f, "end");
     }
+}
+
+/// What the user does after the restart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Then {
+    Abort,
+    /// `srv-b` never verifies the new key; the user skips it.
+    Skip,
+    /// `srv-b` fails its first verify; the user retries.
+    Retry,
+}
+
+fn mixed_fixture(then: Then) -> Fixture {
+    let f = Fixture::new();
+    let fails = match then {
+        Then::Abort => 0,
+        Then::Skip => 1000,
+        Then::Retry => 1,
+    };
+    if fails > 0 {
+        f.world
+            .faults
+            .lock()
+            .unwrap()
+            .verify_missing_next
+            .insert("srv-b".into(), fails);
+    }
+    f
+}
+
+/// Runs to the end with the user's answer, checking the invariants at
+/// every point.
+async fn drive(f: &Fixture, then: Then) -> Summary {
+    let checker = Checker(f);
+    if then == Then::Abort {
+        return f
+            .with_engine(ID, &checker, true, async |e| e.abort(true).await)
+            .await
+            .unwrap();
+    }
+    for _ in 0..10 {
+        let s = f
+            .with_engine(ID, &checker, true, async |e| e.run().await)
+            .await
+            .unwrap();
+        if s.ending != Ending::Stopped {
+            return s;
+        }
+        let loc = s.failures[0].location;
+        let s = f
+            .with_engine(ID, &checker, true, async |e| match then {
+                Then::Skip => e.skip(loc.unwrap()).await,
+                _ => e.retry(loc).await,
+            })
+            .await
+            .unwrap();
+        if s.ending != Ending::Stopped {
+            return s;
+        }
+    }
+    panic!("no end");
+}
+
+async fn crash_then(then: Then) {
+    let clean = mixed_fixture(then);
+    let rec = Recorder::default();
+    let _ = clean.start(&rec, true).await.unwrap();
+    let points = rec.points();
+    let want_ending = if then == Then::Abort {
+        // The clean run is already done; abort only after a crash.
+        Ending::Aborted
+    } else {
+        let s = drive(&clean, then).await;
+        assert_eq!(s.ending, Ending::Done, "{s:?}");
+        Ending::Done
+    };
+    let want = end_state(&clean);
+
+    for (i, p) in points.iter().enumerate() {
+        let at = format!("{then:?} after crash at {i} {p:?}");
+        let f = mixed_fixture(then);
+        let r = f.start(&Recorder::crash_at(i), true).await;
+        assert!(matches!(r, Err(EngineError::Crashed)), "{at}: {r:?}");
+        check(&f, &at);
+        let s = drive(&f, then).await;
+        assert_eq!(s.ending, want_ending, "{at}: {s:?}");
+        check(&f, &at);
+        if then != Then::Abort {
+            assert_eq!(end_state(&f), want, "{at}");
+        }
+        assert_removals_after_fresh_verify(&f.world.calls(), f.old_fpr.as_str());
+    }
+}
+
+#[tokio::test]
+async fn crash_then_abort_at_every_point() {
+    crash_then(Then::Abort).await;
+}
+
+#[tokio::test]
+async fn crash_then_skip_at_every_point() {
+    crash_then(Then::Skip).await;
+}
+
+#[tokio::test]
+async fn crash_then_retry_at_every_point() {
+    crash_then(Then::Retry).await;
 }

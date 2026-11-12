@@ -3,10 +3,15 @@
 //! through [`KeyPresence`], the real state of each location.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use identity_core::Fingerprint;
-use inventory::{Event, Phase, RotationId, RotationLocation, Step, StepEntry, Store, StoreError};
+use inventory::{
+    Event, LocationKind, Phase, Resolved, RotationId, RotationLocation, Step, StepEntry, Store,
+    StoreError, expand_identity,
+};
+
+use crate::engine::EngineEnv;
 
 /// Where the keys really are: server files, fake forge state, mocks.
 pub trait KeyPresence {
@@ -28,12 +33,15 @@ pub trait KeyPresence {
 /// - The new private key file exists once `generate` is done.
 /// - S-2: the old private key file exists, at its path or in
 ///   `<ssh_dir>/retired/`.
+/// - With the config update on: each SSH host whose `Host` block names
+///   the old or the new key names at least one that the host accepts.
 pub fn check_invariants(
     store: &Store,
     id: RotationId,
-    ssh_dir: &Path,
+    env: &EngineEnv,
     presence: &dyn KeyPresence,
 ) -> Result<Vec<String>, StoreError> {
+    let ssh_dir = env.ssh_dir.as_path();
     let mut bad = Vec::new();
     let Some(rot) = store.rotation(id)? else {
         return Ok(vec![format!("no rotation {id}")]);
@@ -84,6 +92,26 @@ pub fn check_invariants(
             bad.push(format!(
                 "{label}: rolled back after the old key was removed"
             ));
+        }
+        if rot.update_config
+            && loc.kind == LocationKind::SshServer
+            && let inventory::Target::Ssh(host) = &loc.target
+        {
+            let named: Vec<PathBuf> = env
+                .config_files
+                .iter()
+                .filter_map(|f| fs::read_to_string(f).ok())
+                .flat_map(|t| host_keys(&t, &host.alias, &env.home))
+                .filter(|p| p == &rot.old_key_path || p == &rot.new_key_path)
+                .collect();
+            let works = named
+                .iter()
+                .any(|p| if p == &rot.old_key_path { old } else { new });
+            if !named.is_empty() && !works {
+                bad.push(format!(
+                    "{label}: the ssh config names only keys the host does not accept"
+                ));
+            }
         }
         if loc.phase == Phase::OldRemoved && store.get(loc.location_id)?.is_some() {
             bad.push(format!(
@@ -145,4 +173,34 @@ fn in_retired(ssh_dir: &Path, old: &Path) -> bool {
                 .and_then(|rest| rest.strip_prefix('-'))
                 .is_some_and(|num| num.chars().all(|c| c.is_ascii_digit()) && !num.is_empty())
     })
+}
+
+/// `IdentityFile` paths that apply to `alias`: lines before any `Host`,
+/// and in `Host` blocks with `alias` or `*` among their patterns. `Match`
+/// blocks are not followed. Good enough for test configs.
+fn host_keys(text: &str, alias: &str, home: &Path) -> Vec<PathBuf> {
+    let sep = |c: char| c.is_whitespace() || c == '=';
+    let mut active = true;
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        let Some(i) = line.find(sep) else {
+            continue;
+        };
+        let (kw, rest) = (&line[..i], line[i..].trim_start_matches(sep));
+        if kw.eq_ignore_ascii_case("host") {
+            active = rest.split_whitespace().any(|p| p == alias || p == "*");
+        } else if kw.eq_ignore_ascii_case("match") {
+            active = false;
+        } else if active && kw.eq_ignore_ascii_case("identityfile") {
+            let value = match rest.strip_prefix('"') {
+                Some(r) => r.split('"').next().unwrap_or(""),
+                None => rest.split_whitespace().next().unwrap_or(""),
+            };
+            if let Some(p) = expand_identity(value, home, &Resolved::default()) {
+                out.push(p);
+            }
+        }
+    }
+    out
 }

@@ -6,7 +6,9 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use identity_core::Fingerprint;
 use inventory::{LocationKind, Target};
-use providers::{KeyRef, Provider, ProviderError, PublicKeyRef, RemoveOpts};
+use providers::{
+    KeyRef, OldKeyCheck, Provider, ProviderError, PublicKeyRef, RemoveOpts, SshServer,
+};
 
 /// What a removal reports beyond success.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -17,26 +19,18 @@ pub struct Removed {
     pub ca_lines_with_old_key: Vec<usize>,
 }
 
-/// What a check of the old key at a location found after its removal.
-/// Only `Refused` shows the old key no longer logs in there.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum OldKeyCheck {
-    Refused,
-    StillAccepted,
-    Unknown(String),
-}
-
 /// One provider per location kind. Methods beyond [`Provider`] are the
-/// seam for what some providers do more (the SSH provider logs in with a
-/// chosen key, and reports `cert-authority` lines); their defaults use
-/// the plain [`Provider`] calls.
+/// seam for what the SSH provider does more (it logs in with a chosen
+/// key, reports `cert-authority` lines, and checks that the old key is
+/// refused); their defaults use the plain [`Provider`] calls.
 #[async_trait]
 pub trait Providers: Send + Sync {
     fn provider(&self, kind: LocationKind) -> Option<&dyn Provider>;
 
     /// The keys at `target`. SSH logs in with `login`: the old key while
-    /// settling `install` and `rollback`, the new key while settling
-    /// `remove_old`. The default ignores `login`.
+    /// settling `install` and in the rollback gate, the new key while
+    /// settling `remove_old` and in the S-3 gate. The default ignores
+    /// `login`.
     async fn list_as(
         &self,
         kind: LocationKind,
@@ -50,8 +44,9 @@ pub trait Providers: Send + Sync {
         p.list(target).await
     }
 
-    /// Whether the old key still logs in at `target`, for a report after
-    /// the removal. The default does not know.
+    /// Whether the old key still logs in at `target`, after its removal.
+    /// Only [`OldKeyCheck::Refused`] counts as gone. The default does not
+    /// know.
     async fn check_old_key(
         &self,
         kind: LocationKind,
@@ -63,8 +58,7 @@ pub trait Providers: Send + Sync {
     }
 
     /// [`Provider::remove`] plus its report. The default reports nothing
-    /// more; the SSH provider fills in the `cert-authority` lines once
-    /// its `remove` returns them.
+    /// more.
     async fn remove_key(
         &self,
         kind: LocationKind,
@@ -80,9 +74,11 @@ pub trait Providers: Send + Sync {
     }
 }
 
-/// Providers by kind.
+/// Providers by kind, with the SSH provider kept as its own type so its
+/// extra methods are reached without a downcast.
 #[derive(Default)]
 pub struct ProviderMap {
+    ssh: Option<SshServer>,
     map: HashMap<LocationKind, Box<dyn Provider>>,
 }
 
@@ -91,15 +87,100 @@ impl ProviderMap {
         Self::default()
     }
 
-    /// Adds `p` for its kind, replacing any earlier one.
+    /// Adds `p` for its kind, replacing any earlier one. Use
+    /// [`ProviderMap::with_ssh`] for SSH servers.
     pub fn with(mut self, p: Box<dyn Provider>) -> Self {
+        if p.kind() == LocationKind::SshServer {
+            self.ssh = None;
+        }
         self.map.insert(p.kind(), p);
         self
     }
+
+    pub fn with_ssh(mut self, ssh: SshServer) -> Self {
+        self.map.remove(&LocationKind::SshServer);
+        self.ssh = Some(ssh);
+        self
+    }
+
+    fn ssh(&self, kind: LocationKind) -> Option<&SshServer> {
+        self.ssh
+            .as_ref()
+            .filter(|_| kind == LocationKind::SshServer)
+    }
 }
 
+#[async_trait]
 impl Providers for ProviderMap {
     fn provider(&self, kind: LocationKind) -> Option<&dyn Provider> {
-        self.map.get(&kind).map(|p| p.as_ref())
+        match self.ssh(kind) {
+            Some(s) => Some(s),
+            None => self.map.get(&kind).map(|p| p.as_ref()),
+        }
+    }
+
+    async fn list_as(
+        &self,
+        kind: LocationKind,
+        target: &Target,
+        login: &KeyRef,
+    ) -> Result<Vec<PublicKeyRef>, ProviderError> {
+        match self.ssh(kind) {
+            Some(s) => s.list_as(target, login).await,
+            None => {
+                let p = self
+                    .provider(kind)
+                    .ok_or(ProviderError::WrongTarget { kind })?;
+                p.list(target).await
+            }
+        }
+    }
+
+    async fn check_old_key(
+        &self,
+        kind: LocationKind,
+        target: &Target,
+        old: &KeyRef,
+    ) -> Result<OldKeyCheck, ProviderError> {
+        match self.ssh(kind) {
+            Some(s) => s.check_old_key(target, old).await,
+            None => Ok(OldKeyCheck::Unknown("this provider cannot check".into())),
+        }
+    }
+
+    async fn remove_key(
+        &self,
+        kind: LocationKind,
+        target: &Target,
+        key: &Fingerprint,
+        opts: &RemoveOpts,
+    ) -> Result<Removed, ProviderError> {
+        if let Some(s) = self.ssh(kind) {
+            let r = s.remove_key(target, key, opts).await?;
+            return Ok(Removed {
+                ca_lines_with_old_key: r.ca_lines_with_old_key,
+            });
+        }
+        let p = self
+            .provider(kind)
+            .ok_or(ProviderError::WrongTarget { kind })?;
+        p.remove(target, key, opts).await?;
+        Ok(Removed::default())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use providers::NetLog;
+
+    #[test]
+    fn ssh_provider_is_reached_by_kind() {
+        let map = ProviderMap::new().with_ssh(SshServer::new(NetLog::new()));
+        assert!(map.ssh(LocationKind::SshServer).is_some());
+        assert!(map.ssh(LocationKind::GitHub).is_none());
+        let p = map.provider(LocationKind::SshServer).unwrap();
+        assert_eq!(p.kind(), LocationKind::SshServer);
+        assert!(map.provider(LocationKind::GitLab).is_none());
     }
 }

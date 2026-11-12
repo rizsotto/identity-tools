@@ -26,5 +26,6 @@ pub use keygen::{
     GEN_DIR_PREFIX, Generated, KeyType, KeygenError, KeygenRequest, Passphrase, Recovered,
     generate, recover,
 };
-pub use lock::{LockError, RotationLock};
-pub use sites::{OldKeyCheck, ProviderMap, Providers, Removed};
+pub use lock::{LockError, RotationLock, lock_path};
+pub use providers::OldKeyCheck;
+pub use sites::{ProviderMap, Providers, Removed};
