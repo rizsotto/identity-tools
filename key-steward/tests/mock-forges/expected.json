@@ -1,0 +1,59 @@
+{
+  "github/user_keys.json": {
+    "ssh_sha256": [
+      "SHA256:8jkVapRFoqZLqfTLCin/2tNW9UgfJ0edyOy6N62Il1Q",
+      "SHA256:QskZ1EIpMAnw0ZJdcNdQr3QRswnIphiotXI5U7wl6cc"
+    ]
+  },
+  "github/user_keys_page2.json": {
+    "ssh_sha256": [
+      "SHA256:poyhsTyKSOyrTtZ+yVfzArVc0xBvoo/xM7GOxlIUxB0"
+    ]
+  },
+  "github/user_ssh_signing_keys.json": {
+    "ssh_sha256": [
+      "SHA256:FvPX20ytacNehI1GXEsGgDrtEV/dHbre9USsIbSOgO0"
+    ]
+  },
+  "gitlab/user_keys.json": {
+    "ssh_sha256": [
+      "SHA256:YdywhBdyWy8SWq0lEq+Vtpa16uvEVJt5GekhQab5Pyk",
+      "SHA256:JCYRoFoYSnPFwFLTkvXc5uKcYnsgq251IsjQYO3F8sQ"
+    ]
+  },
+  "gitlab/user_keys_page2.json": {
+    "ssh_sha256": [
+      "SHA256:1msSASxvVaL1Hj+5V6P4m2hEtJGN6sbu+YEKSVRRsTw",
+      "SHA256:tLCqJGCQsy8ufLdrcUhaz1ud/Vz9FZdutmOrg7TsO88"
+    ]
+  },
+  "forgejo/user_keys.json": {
+    "ssh_sha256": [
+      "SHA256:763JIcOpkKAvQ9s9+VAhRzITy+8pWxunATagLvmYUZw",
+      "SHA256:KgtBslWWXpr8DNkOS56gAPoPSBd34kQSoj4NF01Kkos"
+    ]
+  },
+  "forgejo/user_keys_page2.json": {
+    "ssh_sha256": [
+      "SHA256:Ij0AbsS1ZQG4S8+oKi2LJkEOzk8J35AhwmPeE5Y1tNI"
+    ]
+  },
+  "github/user_gpg_keys.json": {
+    "openpgp_primary": "1D13978E2745938FF18F6CE8B5F9441847F263E7",
+    "openpgp_subkeys": [
+      "694E9F3A2DD06653E88F7951F8E39F2E3888B67F"
+    ]
+  },
+  "gitlab/user_gpg_keys.json": {
+    "openpgp_primary": "1D13978E2745938FF18F6CE8B5F9441847F263E7",
+    "openpgp_subkeys": [
+      "694E9F3A2DD06653E88F7951F8E39F2E3888B67F"
+    ]
+  },
+  "forgejo/user_gpg_keys.json": {
+    "openpgp_primary": "1D13978E2745938FF18F6CE8B5F9441847F263E7",
+    "openpgp_subkeys": [
+      "694E9F3A2DD06653E88F7951F8E39F2E3888B67F"
+    ]
+  }
+}

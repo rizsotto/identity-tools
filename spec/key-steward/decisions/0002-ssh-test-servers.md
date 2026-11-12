@@ -196,7 +196,7 @@ devcontainer's sudo), as a new decision.
 ### Steps (T10)
 
 1. Create `key-steward/crates/test-support` with `publish = false`. Dependencies:
-   `tempfile`, and `libc` if step 6 uses `PR_SET_PDEATHSIG`. Other crates add
+   `tempfile`, and `libc` (for `geteuid` and `getpwuid_r`). Other crates add
    it under `[dev-dependencies]` only.
 2. `Sshd::start(base_dir)` makes a temp dir under `base_dir` (tests pass
    `env!("CARGO_TARGET_TMPDIR")`, which is `<workspace>/target/tmp`). Before
@@ -220,6 +220,7 @@ devcontainer's sudo), as a new decision.
    PasswordAuthentication no
    KbdInteractiveAuthentication no
    PerSourcePenalties no
+   PermitUserRC no
    LogLevel VERBOSE
    ```
 
@@ -228,6 +229,11 @@ devcontainer's sudo), as a new decision.
    `PerSourcePenalties no` (OpenSSH 9.8+) stops sshd from blocking
    `127.0.0.1` after the tests' deliberate failed logins (curl's test suite
    sets it too).
+   `PermitUserRC no` stops sshd from running `.ssh/rc` on each login. sshd
+   runs it relative to the session's start dir, which is the real passwd
+   home, so without this line every harness login ran the real `~/.ssh/rc`.
+   The session also starts in the real home (see "Experiment"). So remote
+   scripts must `cd "$HOME"` first and never use relative paths.
 4. Port: bind `127.0.0.1:0`, read the port, close, start sshd with it. Read
    stderr until `Server listening on 127.0.0.1 port N.` (timeout 5 s). If
    stderr says `Address already in use`, pick a new port and retry, up to 5
@@ -241,6 +247,7 @@ devcontainer's sudo), as a new decision.
      Port <port>
      User <current user>
      IdentitiesOnly yes
+     IdentityFile none
      IdentityAgent none
      UserKnownHostsFile <dir>/known_hosts
      GlobalKnownHostsFile /dev/null
@@ -249,15 +256,18 @@ devcontainer's sudo), as a new decision.
      ConnectTimeout 5
    ```
 
-   Do not put `IdentityFile` in the default config: tests pass the key they
-   mean (see the side finding). Every `ssh` the tests run (and the app under
+   `IdentityFile none` is the only `IdentityFile` in the config: without it,
+   an `ssh` run with no `-i` would offer the real `~/.ssh/id_*` (OpenSSH finds
+   `~` from passwd). Tests pass the key they mean with `-i` (see the side
+   finding); `-i` still works with `IdentityFile none` in the config. Every `ssh` the tests run (and the app under
    test) gets `-F <dir>/ssh_config`, which also skips `/etc/ssh/ssh_config`.
    Remove `SSH_AUTH_SOCK` and set `HOME` to a temp dir in the child's
    environment. `User` is the current user from `getpwuid(geteuid())`, never
    a fixed name or uid: in CI the uid differs (see "Running in CI").
-6. `Drop` kills sshd and waits. Also offer `stop()` and `restart()` on the
-   same port for M2. To avoid stray sshd after an abort, set
-   `PR_SET_PDEATHSIG` in `pre_exec` (Linux only; not tested yet).
+6. `Drop` kills sshd and waits, also when a test panics. Also offer `stop()`
+   and `restart()` on the same port for M2. `PR_SET_PDEATHSIG` is not used
+   (see "Not verified": it fires when the spawning thread ends, which would
+   kill sshd under tests that start it from a worker thread).
 7. Fail loudly if `/usr/sbin/sshd` or `ssh` is missing. Do not skip the
    test. No `#[ignore]`.
 8. Tests in the crate:
@@ -272,8 +282,14 @@ devcontainer's sudo), as a new decision.
      output has no path under the real home)
    - `harness_failed_logins_do_not_block` (about 10 logins with a wrong key,
      then a login with the right key works; checks `PerSourcePenalties no`)
-   - `harness_no_stray_sshd_after_parent_dies` (only if step 6 uses
-     `PR_SET_PDEATHSIG`; see "Not verified")
+   - `no_sshd_left_after_drop` (no process has the server's `sshd_config` on
+     its command line after `Drop`)
+   - `harness_user_rc_does_not_run` (`sshd -T` shows `PermitUserRC no`; a
+     planted `.ssh/rc` in the server home does not run. Tests cannot plant
+     one in the real home, so the `sshd -T` check is what covers that case)
+   - `harness_without_key_offers_none` (no `-i`: ssh offers no key and names
+     no `~/.ssh/id_*`)
+   - `harness_unknown_host_key_is_refused`, `dir_chain_check_names_the_bad_dir`
 9. Add a note for T12: a test where the config holds a second valid key, and
    `verify` of a missing key must still return `Missing`. The fix is open, see
    M1 `plan.md`, "ssh_server verify".
@@ -371,34 +387,69 @@ Every sshd test runs in CI in the same devcontainer image. No `#[ignore]`, no
 
 Each item becomes a check in the T10 PR. Record the result here or in the PR.
 
+Local results are from the T10 branch, run in the devcontainer with rootless
+podman and `--userns=keep-id` (uid 1000, `dev`), on 2026-11-12. CI items stay
+open until the T10 PR's GitHub CI run is checked. `ci.yml` now prints `id`,
+`getent passwd`, and `stat` of the workspace, its parent, `/`, `target` and
+`target/tmp`, so the CI log answers the first three items.
+
 - [ ] Tests run as `dev`, not root, in CI. Check: the harness refuses root
-      (step 2). Print `id` once in the T10 CI run.
+      (step 2, `refuse_root`; unit test `current_user_is_not_root`). Print `id`
+      once in the T10 CI run (done in `ci.yml`). Locally: passes as uid 1000.
 - [ ] The uid update in CI happens and `dev` owns the checkout. Check: in the
       T10 CI run print `id -u`, `getent passwd dev` and
-      `stat -c '%u %g %a %n'` of the workspace and `target/tmp`.
+      `stat -c '%u %g %a %n'` of the workspace and `target/tmp` (done in
+      `ci.yml`).
 - [ ] Every parent dir of `<workspace>/target/tmp` in CI is owned by root or
-      `dev` and is not group or world writable. Check: step 2's check, which
-      names the bad dir. If it fails, options (pick in the T10 PR, not now):
-      `chmod go-w` on the bad dir in `runCmd` before `cargo test`; or a base
-      dir made in the Containerfile and chowned to `dev` in
+      `dev` and is not group or world writable. Check: step 2's check
+      (`check_dir_chain`, test `dir_chain_check_names_the_bad_dir`), which
+      names the bad dir, its owner and mode. Locally: passes (`/w` is owned by
+      `dev`, mode 755). If it fails in CI, options (pick in the T10 PR, not
+      now): `chmod go-w` on the bad dir in `runCmd` before `cargo test`; or a
+      base dir made in the Containerfile and chowned to `dev` in
       `postCreateCommand`. Do not use the real home.
 - [ ] sshd binds `127.0.0.1` inside the Docker container in CI. Check:
-      `harness_sshd_accepts_test_key` passes in CI.
+      `harness_sshd_accepts_test_key` passes in CI. Locally: passes.
 - [ ] The passwd home of `dev` exists in CI (the sshd session starts there).
       Check: `harness_server_home_is_temp` passes in CI and its stderr has no
-      "Could not chdir to home directory".
-- [ ] `PerSourcePenalties no` is needed and works. It was not seen to trigger
-      in the experiment. Check: `harness_failed_logins_do_not_block`.
-- [ ] `PR_SET_PDEATHSIG` cleanup. Not tried. Note: it fires when the parent
-      thread ends, not the process, and cargo runs tests on threads. Check:
-      `harness_no_stray_sshd_after_parent_dies`, or drop the idea and rely on
-      `Drop`.
+      "Could not chdir to home directory". Locally: passes.
+- [x] `PerSourcePenalties no` is needed and works. Verified locally: with the
+      default (penalties on), 30 failed logins from `127.0.0.1` made sshd log
+      "activating ipv4 penalty of 19.656 seconds for penalty: failed
+      authentication", and the next login with the right key got "Connection
+      reset". With `PerSourcePenalties no`,
+      `harness_failed_logins_do_not_block` (20 failed logins, then the right
+      key) passes and the log has no "penalty".
+- [x] `PR_SET_PDEATHSIG` cleanup. Dropped, not used. It fires when the thread
+      that spawned sshd ends, not the process. Cargo runs each test on its own
+      thread, and tokio's blocking pool ends idle threads after 10 s, so an
+      sshd started from such a thread (likely in M2 async tests) would die
+      under the test. The harness relies on `Drop` (kill and wait), which also
+      runs on a test panic. Test `no_sshd_left_after_drop` checks that no
+      process still has the server's `sshd_config` on its command line. A
+      killed test process can leave sshd behind; the container exit ends it.
+      `libc` is still used, for `geteuid` and `getpwuid_r`.
 - [ ] Load: tried 3 servers at once and 20 sequential connections, not dozens
       of tests in parallel. Check: the full suite in CI with default test
-      threads. Note the time in the PR.
+      threads. Note the time in the PR. Locally: the 12 harness tests (13
+      sshd processes, about 75 logins) run in parallel in 2.4 s.
 - [ ] Parsing `Server accepts key` from `ssh -v` as the T12 fix is only a
       suggestion. T12 confirms the exact text, or picks another option (see
-      M1 `plan.md`).
+      M1 `plan.md`). Not part of T10.
+
+Also found in T10:
+
+- `tempfile` 3.27 makes temp dirs with the umask (0755), not 0700. The harness
+  sets 0700 explicitly.
+- `ssh -G` with no `IdentityFile` and no `-i` lists the default
+  `~/.ssh/id_*` files, which point at the real passwd home. With `-i <key>`
+  they are gone. So tests (and the app) must always pass the key.
+- Extra harness test `harness_unknown_host_key_is_refused`: an empty
+  `known_hosts` gives "Host key verification failed.", exit 255, and the file
+  stays empty.
+- On failure the harness prints user, uid, gid, passwd home, `ssh -V`, port,
+  temp dir and the full sshd log (`sshd -E <dir>/sshd.log`). `Drop` prints the
+  same when a test panics.
 
 No longer relevant, because option A was chosen: nested podman with
 `--userns=keep-id` (B1) and `testcontainers-rs` against podman (B2). The old

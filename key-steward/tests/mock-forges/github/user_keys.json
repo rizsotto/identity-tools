@@ -1,0 +1,20 @@
+[
+  {
+    "key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIC2YGJhoJglhlbVV8vQJibIavOOLek6VYQCHhTlBe1VQ",
+    "id": 101,
+    "url": "https://api.github.com/user/keys/101",
+    "title": "laptop",
+    "created_at": "2020-06-11T21:31:57Z",
+    "verified": false,
+    "read_only": false
+  },
+  {
+    "key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDjpn78qrt5p6/L5Y2o9skZeOP2hDuLewAbFt7bFAqHm",
+    "id": 102,
+    "url": "https://api.github.com/user/keys/102",
+    "title": "desktop",
+    "created_at": "2021-07-11T21:31:57Z",
+    "verified": false,
+    "read_only": false
+  }
+]

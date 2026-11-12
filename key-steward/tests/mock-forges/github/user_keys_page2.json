@@ -1,0 +1,12 @@
+[
+  {
+    "key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIF3wpKfZt3g2j3pkvdxiLRHLcn+ffJZBEjRmukxxmnK0",
+    "id": 103,
+    "url": "https://api.github.com/user/keys/103",
+    "title": "build box",
+    "created_at": "2022-01-02T03:04:05Z",
+    "verified": false,
+    "read_only": false,
+    "last_used": "2026-10-01T12:00:00Z"
+  }
+]

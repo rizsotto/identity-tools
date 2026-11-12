@@ -1,0 +1,20 @@
+[
+  {
+    "id": 13,
+    "key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAWEjKFrhAVZMbMuNRmqMZvaqOE3CWchrUjB/hixtdV3",
+    "url": "https://forgejo.example.invalid/api/v1/user/keys/13",
+    "title": "build box",
+    "fingerprint": "SHA256:Ij0AbsS1ZQG4S8+oKi2LJkEOzk8J35AhwmPeE5Y1tNI",
+    "created_at": "2025-05-06T07:08:09Z",
+    "updated_at": "2026-10-01T12:00:00Z",
+    "read_only": false,
+    "key_type": "user",
+    "verified": false,
+    "user": {
+      "id": 7,
+      "login": "testuser",
+      "full_name": "Test User",
+      "email": "test@example.invalid"
+    }
+  }
+]
