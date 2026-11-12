@@ -108,6 +108,10 @@ fn unknown_format_is_not_unencrypted() {
             format!("{openssh_head}\n{}\n", "A".repeat(100)).into_bytes(),
         ),
         (
+            "many newlines",
+            format!("{openssh_head}\n{}", "\n".repeat(5_000_000)).into_bytes(),
+        ),
+        (
             "pem without body",
             b"-----BEGIN RSA PRIVATE KEY-----\n".to_vec(),
         ),

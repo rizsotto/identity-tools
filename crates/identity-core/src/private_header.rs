@@ -24,6 +24,9 @@ const OPENSSH_MAGIC: &[u8] = b"openssh-key-v1\0";
 /// the magic, the cipher name (up to 29 bytes, `chacha20-poly1305@openssh.com`)
 /// and the KDF name, and stays inside the public part of the file.
 const OPENSSH_HEADER_B64: usize = 80;
+/// Most bytes to read after the BEGIN line while collecting those base64
+/// characters. Leaves room for a few line breaks (also CRLF).
+const OPENSSH_HEADER_MAX_READ: usize = OPENSSH_HEADER_B64 + 16;
 const PEM_BEGIN: &[&str] = &[
     "-----BEGIN RSA PRIVATE KEY-----",
     "-----BEGIN EC PRIVATE KEY-----",
@@ -94,10 +97,15 @@ fn pem(r: &mut impl Read) -> Result<PrivateKeyProtection, KeyError> {
 fn openssh(r: &mut impl Read) -> Result<PrivateKeyProtection, KeyError> {
     let mut b64 = Vec::with_capacity(OPENSSH_HEADER_B64);
     let mut byte = [0u8];
+    let mut taken = 0;
     while b64.len() < OPENSSH_HEADER_B64 {
+        if taken == OPENSSH_HEADER_MAX_READ {
+            return Ok(PrivateKeyProtection::Unknown);
+        }
         if r.read(&mut byte)? == 0 {
             break;
         }
+        taken += 1;
         match byte[0] {
             b'\n' | b'\r' => {}
             b'-' => break,
@@ -168,7 +176,7 @@ mod tests {
         let cases = [
             (
                 keygen(dir.path(), "openssh", &["-t", "ed25519", "-N", ""]),
-                OPENSSH_BEGIN.len() + 1 + OPENSSH_HEADER_B64 + 2,
+                OPENSSH_BEGIN.len() + 1 + OPENSSH_HEADER_MAX_READ,
             ),
             (
                 keygen(dir.path(), "pem", &["-t", "ecdsa", "-m", "PEM", "-N", ""]),

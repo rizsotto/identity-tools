@@ -11,11 +11,11 @@ every SSH task waits for its harness to pass in GitHub CI.
 |---|---|---|---|---|
 | T01a | Spike: `gpgme` crate against Fedora 45 gpgme 2.0.x. List keys in a temp `GNUPGHOME`. Record result in SPEC 15. **Done in core lane, commit 5bcadcd.** | identity-core | none | `gpgme_lists_key_in_temp_home` |
 | T01b | Verify forge read endpoints, pagination and fields (SPEC 15 fact 1, read part). Tick in SPEC with links. Add JSON fixtures with fake values. | spec, tests/mock-forges | none | none (spec and fixtures) |
-| T02 | Core types: `Fingerprint`, `KeyAlgo`, `PublicKey`, errors. Parse SSH `.pub` with `ssh-key`, SHA256 fingerprint. **Done in core lane, commit fcc4d96.** | identity-core | none | `ssh_fingerprint_matches_ssh_keygen` |
-| T03 | Private key header check (S-1): OpenSSH v1, PEM, PKCS#8, unknown. **Done in core lane, commit 0e72904.** | identity-core | T02 | `detects_encrypted_and_plain_keys`, `unknown_format_is_not_unencrypted` |
+| T02 | Core types: `Fingerprint`, `KeyAlgo`, `PublicKey`, errors. Parse SSH `.pub` with `ssh-key`, SHA256 fingerprint. **Done in core lane, commit fcc4d96; review fixes cd93b65.** | identity-core | none | `ssh_fingerprint_matches_ssh_keygen` |
+| T03 | Private key header check (S-1): OpenSSH v1, PEM, PKCS#8, unknown. **Done in core lane, commit 0e72904; review fixes in commit "M1 T03 review: cap bytes read".** | identity-core | T02 | `detects_encrypted_and_plain_keys`, `unknown_format_is_not_unencrypted` |
 | T04 | SSH dir scan: pair `.pub` with private file, file date, header check. Dir is a parameter. | identity-core | T02, T03 | `scan_temp_ssh_dir` |
 | T05 | `OpenPgpBackend` trait and gpgme impl: keys, subkeys, algo, created, expiry. | identity-core | T01a, T02 | `lists_keys_and_subkeys_in_temp_gnupghome` |
-| T06 | Weak key rules (SPEC 9.4) as a pure function over `PublicKey` plus header result. **Done in core lane, commit "M1 T06: weak key rules".** | identity-core | T02 | `weak_key_rules_table` |
+| T06 | Weak key rules (SPEC 9.4) as a pure function over `PublicKey` plus header result. **Done in core lane, commit e068440; review fixes 26b5c60.** | identity-core | T02 | `weak_key_rules_table` |
 | T07 | Location model and SQLite store with migrations. No token fields. | inventory | T02 | `migrations_apply_on_empty_db`, `location_roundtrip`, `schema_has_no_token_column` |
 | T08 | `KeyList`: join scanned SSH and OpenPGP keys with location counts and warnings (FR-1 rows). | inventory | T04, T05, T06, T07 | `key_list_has_all_fr1_fields` |
 | T09 | SSH config import: aliases from `Host` (with `Include`, skip wildcards), resolve with `ssh -G -F`. Store as `unverified`. | inventory | T07 | `imports_hosts_from_config_fixture` |
