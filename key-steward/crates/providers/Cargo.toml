@@ -6,3 +6,10 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+async-trait = "0.1"
+identity-core = { path = "../../../crates/identity-core" }
+inventory = { path = "../inventory" }
+thiserror = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
