@@ -26,7 +26,7 @@ every SSH task waits for its harness to pass in GitHub CI.
 | T14 | GitHub `list` and `verify` (auth, signing, GPG keys). | providers | T01b, T13 | `github_list_against_mock`, `github_verify_by_fingerprint` |
 | T15 | GitLab `list` and `verify`, self-hosted base URL. | providers | T01b, T13 | `gitlab_list_against_mock`, `gitlab_verify_by_fingerprint` |
 | T16 | Forgejo `list` and `verify` (Gitea, Codeberg). | providers | T01b, T13 | `forgejo_list_against_mock`, `forgejo_verify_by_fingerprint` |
-| T17 | Check runner: verify all locations of a key, write status and `last_checked` to the store. | inventory, providers | T08, T12, T14 | `check_all_updates_status` |
+| T17 | Check runner: verify all locations of a key, write status and `last_checked` to the store. Lives in `providers` (or `rotation`): `providers` depends on `inventory`, so it cannot go in `inventory`. | providers | T08, T12, T14 | `check_all_updates_status` |
 | T18 | `oo7` `TokenSource` impl. Verify SPEC 15 fact 6 first. Refuse cleanly when no Secret Service. | providers | T11 | `no_secret_service_gives_clear_error` (unit), manual check on GNOME |
 | T19 | M1 acceptance: end-to-end test, tick every box in `spec.md` with evidence, update SPEC.md. | all | T01a to T18 | `m1_acceptance` |
 

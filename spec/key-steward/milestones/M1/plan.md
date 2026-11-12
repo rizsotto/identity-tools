@@ -120,9 +120,15 @@ Use the `ssh-key` crate for public keys (`.pub` files) and fingerprints only.
   `identityfile` paths are matched by path. `~`, `%d`, `%h`, `%r` and `%%`
   are expanded with the home dir the caller passes; a path with another
   token matches no key. Hosts with no matching key and aliases `ssh -G`
-  rejects are listed in the import report, not stored. Gap: `Include`
-  globs support `*` and `?` in the last path component only (no `[...]`,
-  no globs in directory names). Facts: SPEC 15, `ssh -G` item.
+  rejects are listed in the import report, not stored. `Include` globs
+  support `*`, `?` and `[...]` in the last path component. Facts: SPEC 15,
+  `ssh -G` item.
+- `ssh -G` runs `Match exec` commands. The importer scans all files first
+  and refuses (`ImportError::CommandsNeedConsent`) if any has `Match exec`
+  or `Match !exec`, or an `Include` it cannot list (glob in a directory
+  name, `~user`), unless `ImportOptions::allow_commands` is set. M1 has no
+  UI, so it is an opt-in parameter, off by default; the UI must ask the
+  user first (S-7). Each `ssh -G` run has a time limit (default 10 s).
 
 ## Provider trait (providers)
 
@@ -190,39 +196,72 @@ server, and `verify` must return `Missing`. Then pick a fix. Options:
 Record the choice and why in the T12 PR. If it changes SPEC 9 or FR-3, change
 SPEC in the same PR.
 
-**Chosen in T12: the `ssh -v` fingerprint check, with the user's config
-kept.** `Verified` needs both: an `Authenticated to ...` line, and the
-*last* `debug1: Server accepts key: <path> <type> SHA256:<fp> ...` line
-names the key under test. The exit code is not used for this (it is the
-remote command's). Results:
+**Chosen in T12: the `ssh -v -E <log>` fingerprint check, with the user's
+config kept.** Only the main client's `-E` log file decides; it is a fresh
+0600 file in a private 0700 temp dir. `Verified` needs all of:
+
+- exit 0 (the command is `true`),
+- a line `Authenticated to ... using "publickey".`,
+- no `Authenticated using "publickey" with partial success.` (the server
+  needs more than one key: `Error(MoreThanOneKey)`, since removing one of
+  them could lock the user out),
+- the *last* `debug1: Server accepts key: <path> <TYPE> SHA256:<fp> ...`
+  line is exactly the `-i` path, our fingerprint, and only `explicit`,
+  `agent` or `token` after it. A `<TYPE>-CERT` line (ssh loads
+  `<key>-cert.pub` on its own) gives `Error(CertificateUsed)`.
+
+Why `-E`: a `ProxyJump` ssh also runs with `-v` and writes its own "accepts
+key" and "Authenticated to" lines for the jump host to the same stderr, and
+a server `Banner` can print any text there. Review round 1 showed both gave
+a false `Verified` when stderr was parsed. With `-E`, those stay on stderr,
+and stderr is used only for an error message when the log has none. With
+`IdentitiesOnly=yes`, an agent key is named by its identity file path, not
+by its comment (checked: a comment with a newline and a fake "accepts key"
+line did not show up in the log), and the line must end right after our
+fingerprint.
+
+Results and tests (`key-steward/crates/providers/tests/ssh_server.rs`):
 
 - Old key from the config logs in: `Missing`
   (`verify_missing_key_with_second_valid_key_in_config`; the test first
   checks that plain ssh with that config really exits 0).
 - The new key is installed but needs a passphrase and no agent holds it:
   the server accepts it, ssh cannot sign, and goes on to the old key. Only
-  "last accepted" catches this, so it gives `Error(KeyNotUsable)`, never
-  `Verified` (`verify_encrypted_key_without_agent_is_not_verified`).
-- The check pins `-o FingerprintHash=sha256` and `-v` beats a `LogLevel
-  QUIET` in the config (`verify_ignores_config_log_level_and_fingerprint_hash`).
+  "last accepted" catches this: `Error(KeyNotUsable)`
+  (`verify_encrypted_key_without_agent_is_not_verified`).
+- New key on the jump host only: `Missing`
+  (`proxyjump_success_on_jump_host_is_not_verified`, two test sshds).
+- Fake lines in the banner: `Missing` (`fake_lines_in_banner_are_not_verified`).
+- Certificate login: `Error(CertificateUsed)` (`certificate_login_is_not_verified`).
+- Two keys required: `Error(MoreThanOneKey)` (`partial_success_is_error`).
+- `-o FingerprintHash=sha256` and `-v` beat the config
+  (`verify_ignores_config_log_level_and_fingerprint_hash`).
+- `AddKeysToAgent yes` and `ForwardAgent yes` in the config change nothing
+  (`verify_does_not_add_key_to_agent`).
+
+`-o IdentityFile=none` does not reset the config's list, so this parsing is
+what protects S-3.
 
 Why not the clean temp config: rebuilding a config from `ssh -G` output
 risks losing or changing `ProxyJump`, `ProxyCommand`, `Match` and token
-expansion, and `-G` runs `Match exec` anyway. The check would then test a
+expansion, and `-G` runs `Match exec`. The check would then test a
 different connection than the one the user (and M2's `sh -s` edits) uses.
-The `-v` text was checked against OpenSSH 10.5p1 (SPEC 15) and is covered
-by unit tests with captured output, so a format change fails loudly (the
-result is then `Missing` or `Error`, never a false `Verified`).
+The texts were checked against OpenSSH 10.5p1 (SPEC 15) and are covered by
+unit tests, so a format change fails safe (`Missing` or `Error`, never a
+false `Verified`).
 
-Other options the check pins, since command line options win over the
-config: `UpdateHostKeys=no` (read-only, do not touch `known_hosts`),
-`ControlMaster=no` and `ControlPath=none` (a reused mux connection skips
-authentication), `ClearAllForwardings=yes`, `PermitLocalCommand=no`,
-`RemoteCommand=none`, `ServerAliveInterval=5`, `ServerAliveCountMax=3`, and
-a 60 s limit on the whole run. The alias goes after `--`. A server `Banner`
-is printed to stderr before authentication and could hold fake lines; it
-comes before the real ones, so "last accepted" still holds, and a server
-that wants to lie can simply accept any key anyway.
+Options the check pins so it has no side effects, since command line
+options win over the config (all accepted by OpenSSH 10.5p1):
+`StrictHostKeyChecking=yes`, `VerifyHostKeyDNS=no`, `UpdateHostKeys=no`
+(no `known_hosts` change), `AddKeysToAgent=no` (no agent change),
+`PreferredAuthentications=publickey`, `GSSAPIAuthentication=no`,
+`HostbasedAuthentication=no`, `ControlMaster=no` and `ControlPath=none` (a
+reused mux connection skips authentication), `ClearAllForwardings=yes`,
+`ForwardAgent=no` (`ClearAllForwardings` does not cover it), `ForwardX11=no`,
+`PermitLocalCommand=no`, `RemoteCommand=none`, `SessionType=default`,
+`ForkAfterAuthentication=no`, `ServerAliveInterval=5`,
+`ServerAliveCountMax=3`, and a 60 s limit on the whole run. The alias goes
+after `--`.
 
 ### Forge providers (FR-4)
 
