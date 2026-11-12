@@ -251,9 +251,9 @@ fn interop_openpgp_ours_to_gpg() {
             let ct = from.path(&format!("{name}-{armor}.msg"));
             let key = fixture(&format!("openpgp/{name}.asc"));
             let flags: &[&str] = if armor {
-                &["--armor", "--no-self-copy"]
+                &["--armor", "--no-self"]
             } else {
-                &["--no-self-copy"]
+                &["--no-self"]
             };
             ours_encrypt(&from, &[&key], &msg, &ct, flags);
             let bytes = fs::read(&ct).unwrap();
@@ -292,7 +292,7 @@ fn interop_openpgp_unsigned_ours_to_gpg() {
     let (msg, plain) = message(&from, "m.txt");
     let ct = from.path("m.gpg");
     let key = fixture("openpgp/alice.asc");
-    ours_encrypt(&from, &[&key], &msg, &ct, &["--no-sign", "--no-self-copy"]);
+    ours_encrypt(&from, &[&key], &msg, &ct, &["--no-sign", "--no-self"]);
     let out = gpg_decrypt(&to, &ct);
     assert_success(&out, "gpg --decrypt");
     assert_eq!(out.stdout, plain);
@@ -354,9 +354,9 @@ fn interop_age_ours_to_age() {
             let (msg, plain) = message(&env, &format!("{name}-{armor}.txt"));
             let ct = env.path(&format!("{name}-{armor}.age"));
             let flags: &[&str] = if armor {
-                &["--armor", "--no-self-copy"]
+                &["--armor", "--no-self"]
             } else {
-                &["--no-self-copy"]
+                &["--no-self"]
             };
             ours_encrypt(&env, &[&recipient], &msg, &ct, flags);
             let bytes = fs::read(&ct).unwrap();
@@ -436,8 +436,8 @@ fn interop_age_to_ours_default_ssh_identities() {
 
 #[test]
 fn interop_per_recipient_outputs() {
-    // One OpenPGP and one age recipient in one run, plus the self copy.
-    // Each output opens with plain gpg or age by its own recipient only.
+    // One OpenPGP and one age recipient in one run. Each output opens with
+    // plain gpg or age by its own recipient and by the sender, nobody else.
     let from = sender();
     let alice = openpgp_recipient("alice");
     let dave = fixture("age/dave.txt");
@@ -455,13 +455,16 @@ fn interop_per_recipient_outputs() {
         let ext = if armor { "asc" } else { "gpg" };
         let to_alice = PathBuf::from(format!("{}.alice.{ext}", base.display()));
         let to_dave = PathBuf::from(format!("{}.dave.age", base.display()));
-        let to_self = PathBuf::from(format!("{}.self.{ext}", base.display()));
+        let mine = from.config_home().join("send-secret/identities");
 
         assert_gpg_opened_signed(&gpg_decrypt(&alice, &to_alice), &plain);
         let out = age_decrypt(&alice, &dave, &to_dave);
         assert_success(&out, "age --decrypt");
         assert_eq!(out.stdout, plain);
-        assert_gpg_opened_signed(&gpg_decrypt(&from, &to_self), &plain);
+        assert_gpg_opened_signed(&gpg_decrypt(&from, &to_alice), &plain);
+        let out = age_decrypt(&from, &mine, &to_dave);
+        assert_success(&out, "age --decrypt with the sender's identity");
+        assert_eq!(out.stdout, plain);
 
         // Nobody else opens them.
         let out = gpg_decrypt(&alice, &to_dave);
@@ -471,45 +474,57 @@ fn interop_per_recipient_outputs() {
         let out = age_decrypt(&alice, &other, &to_dave);
         assert!(!out.status.success());
         assert!(out.stdout.is_empty());
-        let out = gpg_decrypt(&alice, &to_self);
-        assert!(!out.status.success());
-        assert!(out.stdout.is_empty());
-        let out = gpg_decrypt(&from, &to_alice);
+        let bob = openpgp_recipient("bob-rsa");
+        let out = gpg_decrypt(&bob, &to_alice);
         assert!(!out.status.success());
         assert!(out.stdout.is_empty());
     }
 }
 
 #[test]
-fn interop_self_copy_age_opens_with_age() {
-    // No OpenPGP secret key: the self copy is age, to the sender's own
-    // X25519 identity, which plain `age -d -i` reads.
+fn interop_age_sender_identity_opens_with_age() {
+    // No OpenPGP secret key needed: an age message gets one X25519 stanza
+    // for the sender's own identity, which plain `age -d -i` reads. Never
+    // an SSH key of the sender.
     let from = TestEnv::new();
+    let ssh = from.home().join(".ssh");
+    fs::create_dir_all(&ssh).unwrap();
+    fs::rename(from.private_copy("ssh/frank_rsa"), ssh.join("id_rsa")).unwrap();
+    fs::copy(fixture("ssh/frank_rsa.pub"), ssh.join("id_rsa.pub")).unwrap();
     let (msg, plain) = message(&from, "m.txt");
-    let out_file = from.path("m.age");
-    ours_encrypt(&from, &[&fixture("age/dave.pub")], &msg, &out_file, &[]);
+    let ct = from.path("m.age");
+    ours_encrypt(&from, &[&fixture("ssh/erin_ed25519.pub")], &msg, &ct, &[]);
+    assert_eq!(age_stanzas(&ct), ["ssh-ed25519", "X25519"]);
     let identity = from.config_home().join("send-secret/identities");
-    let self_copy = from.path("m.self.age");
-    let out = age_decrypt(&from, &identity, &self_copy);
-    assert_success(&out, "age --decrypt self copy");
+    let out = age_decrypt(&from, &identity, &ct);
+    assert_success(&out, "age --decrypt with the sender's identity");
     assert_eq!(out.stdout, plain);
-    assert_eq!(age_stanzas(&self_copy), ["X25519"]);
-    let out = age_decrypt(&from, &identity, &out_file);
-    assert!(!out.status.success());
+    let erin = from.private_copy("ssh/erin_ed25519");
+    let out = age_decrypt(&from, &erin, &ct);
+    assert_success(&out, "age --decrypt with erin's key");
+    assert_eq!(out.stdout, plain);
+    let out = age_decrypt(&from, &ssh.join("id_rsa"), &ct);
+    assert!(!out.status.success(), "the sender's SSH key opens it");
 }
 
 #[test]
-fn interop_no_sender_key_in_recipient_output() {
+fn interop_sender_key_in_each_recipient_output() {
     let from = sender();
-    let sender_ids = all_key_ids("sender.asc");
-    // gpg.conf asks for the sender's key in every message; we turn it off.
+    from.import_openpgp("carol-pw.asc");
+    // gpg.conf asks for another key (carol) and the sender's key in every
+    // message; gpg.conf adds neither. We add the sender's key ourselves.
     fs::write(
         from.gnupg_home().join("gpg.conf"),
-        format!("encrypt-to {}\n", primary_fpr("sender.asc")),
+        format!(
+            "encrypt-to {}\nencrypt-to {}\n",
+            primary_fpr("carol-pw.asc"),
+            primary_fpr("sender.asc")
+        ),
     )
     .unwrap();
+    let carol_ids = all_key_ids("carol-pw.asc");
 
-    let (msg, _) = message(&from, "m.txt");
+    let (msg, plain) = message(&from, "m.txt");
     let base = from.path("m");
     ours_encrypt(
         &from,
@@ -521,16 +536,29 @@ fn interop_no_sender_key_in_recipient_output() {
         &base,
         &[],
     );
-    for name in ["alice", "bob-rsa"] {
-        let ids = message_key_ids(&from.path(&format!("m.{name}.gpg")));
-        assert_eq!(ids, encryption_key_ids(&format!("{name}.asc")), "{name}");
-        assert!(ids.iter().all(|id| !sender_ids.contains(id)), "{name}");
+    for (name, other) in [("alice", "bob-rsa"), ("bob-rsa", "alice")] {
+        let file = from.path(&format!("m.{name}.gpg"));
+        let mut ids = message_key_ids(&file);
+        ids.sort();
+        let mut want = encryption_key_ids(&format!("{name}.asc"));
+        want.extend(encryption_key_ids("sender.asc"));
+        want.sort();
+        assert_eq!(ids, want, "{name}");
+        assert!(ids.iter().all(|id| !carol_ids.contains(id)), "{name}");
+        assert!(
+            ids.iter()
+                .all(|id| !all_key_ids(&format!("{other}.asc")).contains(id)),
+            "{name}"
+        );
+        assert_gpg_opened_signed(&gpg_decrypt(&openpgp_recipient(name), &file), &plain);
+        assert_gpg_opened_signed(&gpg_decrypt(&from, &file), &plain);
+        let out = gpg_decrypt(&openpgp_recipient(other), &file);
+        assert!(!out.status.success(), "{name}");
+        assert!(out.stdout.is_empty(), "{name}");
     }
-    let self_ids = message_key_ids(&from.path("m.self.gpg"));
-    assert_eq!(self_ids, encryption_key_ids("sender.asc"));
 
-    // age: the sender's X25519 identity (made by an age self copy) opens
-    // no recipient message, and each holds only its recipient's stanza.
+    // age: each message holds its recipient's stanza plus one X25519
+    // stanza for the sender's identity, and nothing of the other.
     let base = from.path("a");
     ours_encrypt(
         &from,
@@ -540,16 +568,44 @@ fn interop_no_sender_key_in_recipient_output() {
         &["--format", "age"],
     );
     let identity = from.config_home().join("send-secret/identities");
-    for (name, stanzas) in [("dave", ["X25519"]), ("erin_ed25519", ["ssh-ed25519"])] {
+    let dave = fixture("age/dave.txt");
+    let erin = from.private_copy("ssh/erin_ed25519");
+    for (name, stanzas, own, other) in [
+        ("dave", ["X25519", "X25519"], &dave, &erin),
+        ("erin_ed25519", ["ssh-ed25519", "X25519"], &erin, &dave),
+    ] {
         let file = from.path(&format!("a.{name}.age"));
         assert_eq!(age_stanzas(&file), stanzas, "{name}");
-        let out = age_decrypt(&from, &identity, &file);
+        for key in [own, &identity] {
+            let out = age_decrypt(&from, key, &file);
+            assert_success(&out, &format!("age --decrypt {name}"));
+            assert_eq!(out.stdout, plain, "{name}");
+        }
+        let out = age_decrypt(&from, other, &file);
         assert!(!out.status.success(), "{name}");
         assert!(out.stdout.is_empty(), "{name}");
     }
-    let self_copy = from.path("a.self.age");
-    assert_eq!(age_stanzas(&self_copy), ["X25519"]);
-    assert_success(&age_decrypt(&from, &identity, &self_copy), "age self copy");
+}
+
+#[test]
+fn interop_no_self_holds_only_recipient_keys() {
+    let from = sender();
+    let (msg, _) = message(&from, "m.txt");
+    let base = from.path("m");
+    ours_encrypt(
+        &from,
+        &[&fixture("openpgp/alice.asc"), &fixture("age/dave.pub")],
+        &msg,
+        &base,
+        &["--no-self"],
+    );
+    let to_alice = from.path("m.alice.gpg");
+    assert_eq!(message_key_ids(&to_alice), encryption_key_ids("alice.asc"));
+    let out = gpg_decrypt(&from, &to_alice);
+    assert!(!out.status.success());
+    assert!(out.stdout.is_empty());
+    assert_eq!(age_stanzas(&from.path("m.dave.age")), ["X25519"]);
+    assert!(!from.config_home().join("send-secret").exists());
 }
 
 #[test]
@@ -570,7 +626,7 @@ fn interop_armor_is_gpgs_own() {
         &[&fixture("openpgp/alice.asc")],
         &msg,
         &ct,
-        &["--armor", "--no-self-copy"],
+        &["--armor", "--no-self"],
     );
     let text = fs::read_to_string(&ct).unwrap();
     let mut lines = text.lines();

@@ -20,12 +20,13 @@ pub struct EncryptOpts {
     /// (`GNUPGHOME` or `~/.gnupg`). Tests always set it.
     pub gnupg_home: Option<PathBuf>,
     /// Fingerprint of the signing key: [`crate::OpenPgpUser::signer`], the
-    /// same key as the self copy. Needed if `sign` is on and a message is
+    /// same key that is added for read-back (FR-12). Needed if `sign` is on and a message is
     /// OpenPGP; gpg's own default choice is never used.
     pub signer: Option<String>,
 }
 
-/// One message, to `plan.keys` only. Never adds any other key (S-8).
+/// One message, to `plan.keys` and `plan.sender` only. Never adds any
+/// other key (S-8).
 pub fn encrypt(
     input: impl Read + Send,
     output: impl Write + Send,
@@ -42,8 +43,7 @@ pub struct Sent {
     pub format: Format,
 }
 
-/// Runs [`encrypt`] once per plan, in order (recipients, then the self copy
-/// if the caller added it). Opens the input again for every message, so no
+/// Runs [`encrypt`] once per plan, in order. Opens the input again for every message, so no
 /// plaintext is buffered (S-4).
 ///
 /// Every plan is checked first (keys, OpenPGP key files, signer). If one
@@ -97,7 +97,8 @@ fn prepare(plan: &MessagePlan, opts: &EncryptOpts) -> Result<Prepared> {
             label: plan.label.clone(),
         });
     }
-    if plan.keys.iter().any(|k| k.format() != plan.format) {
+    let keys = || plan.keys.iter().chain(&plan.sender);
+    if keys().any(|k| k.format() != plan.format) {
         return Err(Error::WrongFormat {
             label: plan.label.clone(),
             format: plan.format,
@@ -105,9 +106,7 @@ fn prepare(plan: &MessagePlan, opts: &EncryptOpts) -> Result<Prepared> {
     }
     match plan.format {
         Format::OpenPgp => {
-            let certs: Vec<&OpenPgpCert> = plan
-                .keys
-                .iter()
+            let certs: Vec<&OpenPgpCert> = keys()
                 .filter_map(|k| match k {
                     Recipient::OpenPgp(cert) => Some(cert),
                     Recipient::Age(_) => None,
@@ -128,8 +127,7 @@ fn prepare(plan: &MessagePlan, opts: &EncryptOpts) -> Result<Prepared> {
             .map(|p| Prepared::OpenPgp(Box::new(p)))
         }
         Format::Age => Ok(Prepared::Age(
-            plan.keys
-                .iter()
+            keys()
                 .filter_map(|k| match k {
                     Recipient::Age(key) => Some(key.clone()),
                     Recipient::OpenPgp(_) => None,
@@ -158,7 +156,7 @@ impl DecryptCtx {
         self.gnupg_home = Some(home.to_path_buf());
     }
 
-    /// The sender's own identity, to open self copies.
+    /// The sender's own age identity, to read back sent messages.
     pub fn add_self_identity(&mut self, identity: SelfIdentity) {
         self.age.push(identity.into_identity());
     }
@@ -367,7 +365,7 @@ mod tests {
         assert!(matches!(err, Error::UnknownFormat), "{err:?}");
     }
 
-    use crate::plan::{OpenPgpCert, OpenPgpSelf, Person, Sender, plan, self_plan};
+    use crate::plan::{OpenPgpCert, OpenPgpSelf, Person, Sender, add_sender, plan};
     use std::collections::HashSet;
     use std::sync::Mutex;
 
@@ -495,15 +493,11 @@ mod tests {
         ),
     ];
 
-    /// Encrypts to PEOPLE plus an age self copy. Returns the self identity
-    /// dir (keep it alive) and the outputs, self copy last.
-    fn send_with_self_copy() -> (tempfile::TempDir, Vec<Vec<u8>>) {
+    /// Encrypts to PEOPLE, with the sender's age identity added if
+    /// `with_sender`. Returns the identity dir (keep it alive) and one
+    /// output per person.
+    fn send_to_people(with_sender: bool) -> (tempfile::TempDir, Vec<Vec<u8>>) {
         let tmp = tempfile::tempdir().unwrap();
-        let me = SelfIdentity::load_or_create(&crate::self_identity_path(tmp.path())).unwrap();
-        let sender = Sender {
-            openpgp: OpenPgpSelf::NoSecretKey,
-            age: Some(me.recipient()),
-        };
         let people: Vec<_> = PEOPLE
             .iter()
             .map(|(label, files)| {
@@ -515,12 +509,24 @@ mod tests {
             })
             .collect();
         let mut plans = plan(&people, None).unwrap();
-        plans.push(self_plan(&sender, None).unwrap().0);
+        let me = my_sender(&tmp);
+        if with_sender {
+            add_sender(&mut plans, &me);
+        }
         let (results, outputs) = run(&plans, b"hello");
         let results = results.unwrap();
-        assert_eq!(results.len(), 4);
-        assert_eq!(results[3].as_ref().unwrap().label, "self");
+        assert_eq!(results.len(), 3);
+        assert!(results.iter().all(Result::is_ok));
         (tmp, outputs)
+    }
+
+    /// The sender with only an age identity, made in `dir`.
+    fn my_sender(dir: &tempfile::TempDir) -> Sender {
+        let me = SelfIdentity::load_or_create(&crate::self_identity_path(dir.path())).unwrap();
+        Sender {
+            openpgp: OpenPgpSelf::NoSecretKey,
+            age: Some(me.recipient()),
+        }
     }
 
     fn my_ctx(dir: &tempfile::TempDir) -> DecryptCtx {
@@ -537,6 +543,7 @@ mod tests {
             label: "erin".into(),
             format: Format::OpenPgp,
             keys: erin.keys.clone(),
+            sender: None,
         };
         let err = encrypt(&b"x"[..], Vec::new(), &wrong, &OPTS).unwrap_err();
         assert!(matches!(err, Error::WrongFormat { .. }), "{err:?}");
@@ -547,6 +554,7 @@ mod tests {
                 erin.keys[0].clone(),
                 Recipient::OpenPgp(OpenPgpCert::new(b"k".to_vec()).unwrap()),
             ],
+            sender: None,
         };
         let err = encrypt(&b"x"[..], Vec::new(), &mixed, &OPTS).unwrap_err();
         assert!(matches!(err, Error::WrongFormat { .. }), "{err:?}");
@@ -595,17 +603,18 @@ mod tests {
             },
         ];
         let mut plans = plan(&people, None).unwrap();
-        let bad_self = MessagePlan {
-            label: "self".into(),
+        let bad = MessagePlan {
+            label: "dave".into(),
             format: Format::Age,
             keys: vec![],
+            sender: None,
         };
         for (plans, want_no_signer) in [
             (plans.clone(), true),
             (
                 {
                     plans.truncate(1);
-                    plans.push(bad_self);
+                    plans.push(bad);
                     plans
                 },
                 false,
@@ -637,11 +646,15 @@ mod tests {
 
     #[test]
     fn recipient_cannot_open_others_message() {
+        // With the sender's key added: still none of the other recipient's.
         let people = [
             ssh_person("erin", "ssh/erin_ed25519.pub"),
             ssh_person("frank", "ssh/frank_rsa.pub"),
         ];
-        let (results, outputs) = run(&plan(&people, None).unwrap(), b"hello");
+        let dir = tempfile::tempdir().unwrap();
+        let mut plans = plan(&people, None).unwrap();
+        add_sender(&mut plans, &my_sender(&dir));
+        let (results, outputs) = run(&plans, b"hello");
         assert!(results.unwrap().iter().all(Result::is_ok));
         let (erin, frank) = (ssh_ctx("ssh/erin_ed25519"), ssh_ctx("ssh/frank_rsa"));
         assert_eq!(open(&outputs[0], &erin).unwrap(), b"hello");
@@ -654,38 +667,19 @@ mod tests {
             open(&outputs[1], &erin),
             Err(Error::NoMatchingKey)
         ));
-        assert_eq!(types(&outputs[0]), ["ssh-ed25519"]);
-        assert_eq!(types(&outputs[1]), ["ssh-rsa"]);
-    }
-
-    #[test]
-    fn self_copy_opens_with_sender_key() {
-        let (dir, outputs) = send_with_self_copy();
-        let self_copy = &outputs[3];
-        assert_eq!(open(self_copy, &my_ctx(&dir)).unwrap(), b"hello");
-        assert_eq!(types(self_copy), ["X25519"], "only the sender's X25519 key");
-        for secret in ["ssh/erin_ed25519", "ssh/frank_rsa"] {
-            assert!(matches!(
-                open(self_copy, &ssh_ctx(secret)),
-                Err(Error::NoMatchingKey)
-            ));
-        }
-        assert!(matches!(
-            open(self_copy, &dave()),
-            Err(Error::NoMatchingKey)
-        ));
-    }
-
-    #[test]
-    fn recipient_message_has_no_sender_key() {
-        let (dir, outputs) = send_with_self_copy();
+        assert_eq!(types(&outputs[0]), ["ssh-ed25519", "X25519"]);
+        assert_eq!(types(&outputs[1]), ["ssh-rsa", "X25519"]);
         let mine = my_ctx(&dir);
-        for ((label, files), ct) in PEOPLE.iter().zip(&outputs) {
-            assert!(
-                matches!(open(ct, &mine), Err(Error::NoMatchingKey)),
-                "{label}: opens with the sender's identity"
-            );
+        assert_eq!(open(&outputs[0], &mine).unwrap(), b"hello");
+        assert_eq!(open(&outputs[1], &mine).unwrap(), b"hello");
+    }
+
+    /// Checks each output holds exactly its person's stanzas, plus one
+    /// X25519 stanza if `extra_x25519`.
+    fn assert_people_stanzas(outputs: &[Vec<u8>], extra_x25519: bool) {
+        for ((label, files), ct) in PEOPLE.iter().zip(outputs) {
             let (want_tags, want_x25519) = expected_keys(files);
+            let want_x25519 = want_x25519 + usize::from(extra_x25519);
             let found = stanzas(ct);
             let tags: HashSet<String> = found
                 .iter()
@@ -704,14 +698,45 @@ mod tests {
     }
 
     #[test]
-    fn self_key_settled_before_any_output() {
-        // A forced format with no self key fails in planning, before the
-        // caller opens anything.
-        let sender = Sender {
-            openpgp: OpenPgpSelf::CannotEncrypt,
-            age: Some(age::x25519::Identity::generate().to_public()),
+    fn recipient_message_opens_with_sender_identity() {
+        let (dir, outputs) = send_to_people(true);
+        let mine = my_ctx(&dir);
+        for ((label, _), ct) in PEOPLE.iter().zip(&outputs) {
+            assert_eq!(open(ct, &mine).unwrap(), b"hello", "{label}");
+        }
+        // erin and multi have no X25519 key of their own: their one X25519
+        // stanza is the sender's.
+        assert_people_stanzas(&outputs, true);
+        for (ct, secret) in outputs.iter().zip(["ssh/erin_ed25519", "ssh/frank_rsa"]) {
+            assert_eq!(open(ct, &ssh_ctx(secret)).unwrap(), b"hello");
+        }
+        assert_eq!(open(&outputs[2], &dave()).unwrap(), b"hello");
+    }
+
+    #[test]
+    fn without_sender_message_has_only_recipient_keys() {
+        let (dir, outputs) = send_to_people(false);
+        let mine = my_ctx(&dir);
+        for ((label, _), ct) in PEOPLE.iter().zip(&outputs) {
+            assert!(
+                matches!(open(ct, &mine), Err(Error::NoMatchingKey)),
+                "{label}: opens with the sender's identity"
+            );
+        }
+        assert_people_stanzas(&outputs, false);
+    }
+
+    #[test]
+    fn sender_key_of_wrong_format_is_refused() {
+        let erin = ssh_person("erin", "ssh/erin_ed25519.pub");
+        let wrong = MessagePlan {
+            label: "erin".into(),
+            format: Format::Age,
+            keys: erin.keys,
+            sender: Some(Recipient::OpenPgp(OpenPgpCert::new(b"k".to_vec()).unwrap())),
         };
-        assert!(self_plan(&sender, Some(Format::OpenPgp)).is_err());
+        let err = encrypt(&b"x"[..], Vec::new(), &wrong, &OPTS).unwrap_err();
+        assert!(matches!(err, Error::WrongFormat { .. }), "{err:?}");
     }
 
     #[test]

@@ -72,11 +72,6 @@ pub enum PlanError {
         label: String,
         format: Option<Format>,
     },
-    /// The self copy (FR-12) was forced to a format the sender has no
-    /// usable key for. Raised before any output is written. The CLI adds
-    /// the hint to skip the self copy.
-    #[error("no {format} key of your own that can encrypt the self copy")]
-    NoSelfKey { format: Format },
 }
 
 fn gpg_conf_effect(option: &str) -> &'static str {
@@ -119,17 +114,6 @@ mod tests {
             format: Some(Format::Age),
         };
         assert_eq!(forced.to_string(), "bob has no usable age key");
-    }
-
-    #[test]
-    fn no_self_key_names_the_format() {
-        let err = PlanError::NoSelfKey {
-            format: Format::OpenPgp,
-        };
-        assert_eq!(
-            err.to_string(),
-            "no OpenPGP key of your own that can encrypt the self copy"
-        );
     }
 
     #[test]

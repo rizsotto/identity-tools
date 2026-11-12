@@ -15,8 +15,7 @@ pub use error::{Error, PlanError};
 pub use facade::{DecryptCtx, Decrypted, EncryptOpts, Sent, decrypt, encrypt, encrypt_each};
 pub use openpgp_backend::{OpenPgpUser, SignatureStatus, Signer, SignerValidity, openpgp_user};
 pub use plan::{
-    MessagePlan, OpenPgpCert, OpenPgpSelf, Person, Recipient, SELF_LABEL, SelfNote, Sender, plan,
-    self_format, self_plan,
+    MessagePlan, OpenPgpCert, OpenPgpSelf, Person, Recipient, Sender, add_sender, plan,
 };
 pub use recipient_file::{RecipientFile, RecipientFileError};
 pub use self_identity::{SelfIdentity, self_identity_path};

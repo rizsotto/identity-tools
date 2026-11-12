@@ -21,8 +21,8 @@ use crate::{Error, Result};
 
 const OPENPGP_END_MARKER: &[u8] = b"-----END PGP MESSAGE-----";
 
-/// The user's own OpenPGP keys: the self copy key and the signer. Both are
-/// the default secret key (`OpenPgpBackend::default_secret_key`), so they
+/// The user's own OpenPGP keys: the key added to each message for
+/// read-back (FR-12) and the signer. Both are the default secret key (`OpenPgpBackend::default_secret_key`), so they
 /// can not differ.
 #[derive(Debug, Clone)]
 pub struct OpenPgpUser {
@@ -110,7 +110,8 @@ fn check_gpg_conf(gpg: &Gpg, sign: bool) -> Result<()> {
 }
 
 /// Checks the keys, the user's gpg.conf and the signer before any output
-/// is written. All `certs` go into one message (one person's keys, FR-4).
+/// is written. All `certs` go into one message (one person's keys, FR-4,
+/// plus the sender's own key, FR-12).
 pub(crate) fn prepare(
     label: &str,
     certs: &[&OpenPgpCert],
