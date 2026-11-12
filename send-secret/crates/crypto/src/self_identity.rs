@@ -5,7 +5,7 @@
 use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, Read, Write};
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -30,18 +30,34 @@ pub struct SelfIdentity {
 
 impl SelfIdentity {
     /// Loads the identity at `path`, or creates it if the file does not
-    /// exist: parent dir 0700, file 0600, never overwritten.
+    /// exist: parent dir 0700, file 0600, never overwritten. An existing
+    /// parent dir that group or others can access is set to 0700; a
+    /// symlinked one is refused.
     pub fn load_or_create(path: &Path) -> Result<Self> {
-        if let Some(found) = Self::load(path)? {
-            return Ok(found);
-        }
         let dir = path
             .parent()
             .ok_or(Error::Identity("self identity path has no parent dir"))?;
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(dir)?;
+        match fs::symlink_metadata(dir) {
+            Ok(meta) if !meta.is_dir() => {
+                return Err(Error::Identity(
+                    "self identity dir is a symlink or not a dir",
+                ));
+            }
+            Ok(meta) if meta.permissions().mode() & 0o077 != 0 => {
+                fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                fs::DirBuilder::new()
+                    .recursive(true)
+                    .mode(0o700)
+                    .create(dir)?;
+            }
+            Err(e) => return Err(e.into()),
+        }
+        if let Some(found) = Self::load(path)? {
+            return Ok(found);
+        }
         let identity = age::x25519::Identity::generate();
         // Sized up front so the secret is never copied by a reallocation.
         let mut text = Zeroizing::new(String::with_capacity(512));
@@ -69,11 +85,19 @@ impl SelfIdentity {
     }
 
     /// Loads the identity at `path`. `None` if the file does not exist.
-    /// Refuses a file that group or others can access.
+    /// Refuses a file that group or others can access, a symlink, and
+    /// anything but a regular file (a FIFO does not block the open).
     pub fn load(path: &Path) -> Result<Option<Self>> {
-        let file = match fs::File::open(path) {
+        let opened = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path);
+        let file = match opened {
             Ok(f) => f,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
+                return Err(Error::Identity("self identity file is a symlink"));
+            }
             Err(e) => return Err(e.into()),
         };
         let meta = file.metadata()?;
@@ -85,7 +109,8 @@ impl SelfIdentity {
                 "self identity file is readable by others; it must be mode 0600",
             ));
         }
-        let mut bytes = Zeroizing::new(Vec::new());
+        // Sized up front so the key is never copied by a reallocation.
+        let mut bytes = Zeroizing::new(Vec::with_capacity(MAX_FILE as usize + 1));
         file.take(MAX_FILE + 1).read_to_end(&mut bytes)?;
         if bytes.len() as u64 > MAX_FILE {
             return Err(Error::Identity("self identity file is too large"));
@@ -158,6 +183,47 @@ mod tests {
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
         let err = SelfIdentity::load_or_create(&path).err().unwrap();
         assert!(err.to_string().contains("0600"), "{err}");
+    }
+
+    #[test]
+    fn loose_dir_is_tightened() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = self_identity_path(tmp.path());
+        fs::create_dir(path.parent().unwrap()).unwrap();
+        fs::set_permissions(path.parent().unwrap(), fs::Permissions::from_mode(0o755)).unwrap();
+        SelfIdentity::load_or_create(&path).unwrap();
+        assert_eq!(mode(path.parent().unwrap()), 0o700);
+    }
+
+    #[test]
+    fn symlinked_file_or_dir_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real");
+        SelfIdentity::load_or_create(&real.join("identities")).unwrap();
+
+        let path = self_identity_path(tmp.path());
+        fs::create_dir(path.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(real.join("identities"), &path).unwrap();
+        let err = SelfIdentity::load(&path).err().unwrap();
+        assert!(err.to_string().contains("symlink"), "{err}");
+
+        let linked_dir = tmp.path().join("linked");
+        std::os::unix::fs::symlink(&real, &linked_dir).unwrap();
+        let err = SelfIdentity::load_or_create(&linked_dir.join("identities"))
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("symlink"), "{err}");
+    }
+
+    #[test]
+    fn fifo_does_not_block() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("identities");
+        let c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: c is a valid NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        let err = SelfIdentity::load(&path).err().unwrap();
+        assert!(err.to_string().contains("regular file"), "{err}");
     }
 
     #[test]

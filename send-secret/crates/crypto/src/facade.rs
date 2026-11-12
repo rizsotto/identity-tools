@@ -35,18 +35,24 @@ pub struct Sent {
 
 /// Runs [`encrypt`] once per plan, in order (recipients, then the self copy
 /// if the caller added it). Opens the input again for every message, so no
-/// plaintext is buffered (S-4). A plan is checked before its input and
-/// output are opened. One result per plan; a failure does not stop the rest.
+/// plaintext is buffered (S-4).
+///
+/// Every plan is checked first. If one fails, the error is returned and no
+/// input or output is opened. Otherwise there is one result per plan; a
+/// failure does not stop the rest.
 pub fn encrypt_each<R: Read, W: Write>(
     mut open_input: impl FnMut() -> io::Result<R>,
     mut open_output: impl FnMut(&MessagePlan) -> io::Result<W>,
     plans: &[MessagePlan],
     opts: &EncryptOpts,
-) -> Vec<Result<Sent>> {
-    plans
+) -> Result<Vec<Result<Sent>>> {
+    let checked = plans
         .iter()
-        .map(|plan| {
-            let keys = checked_keys(plan)?;
+        .map(|plan| Ok((plan, checked_keys(plan)?)))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(checked
+        .into_iter()
+        .map(|(plan, keys)| {
             let input = open_input()?;
             let output = open_output(plan)?;
             age_backend::encrypt(input, output, &keys, opts.armor)?;
@@ -55,7 +61,7 @@ pub fn encrypt_each<R: Read, W: Write>(
                 format: plan.format,
             })
         })
-        .collect()
+        .collect())
 }
 
 /// The plan's age keys, after checking every key matches the format.
@@ -142,6 +148,9 @@ impl DecryptCtx {
 #[non_exhaustive]
 pub struct Decrypted {
     pub format: Format,
+    /// Another message follows the decrypted one (two pasted together).
+    /// Only the first was decrypted; the caller says so (not an error).
+    pub more_messages: bool,
 }
 
 /// Decrypts one message. Text before the armor (BOM, backticks, a header
@@ -159,9 +168,10 @@ pub fn decrypt(input: impl Read, output: impl Write, ctx: &DecryptCtx) -> Result
         }
         Detected::Unknown => return Err(Error::UnknownFormat),
     };
-    age_backend::decrypt(BufReader::new(reader), output, armored, &ctx.age)?;
+    let more_messages = age_backend::decrypt(BufReader::new(reader), output, armored, &ctx.age)?;
     Ok(Decrypted {
         format: Format::Age,
+        more_messages,
     })
 }
 
@@ -287,6 +297,7 @@ mod tests {
 
     use crate::plan::{OpenPgpCert, OpenPgpSelf, Person, Sender, plan, self_plan};
     use std::cell::RefCell;
+    use std::collections::HashSet;
 
     const OPTS: EncryptOpts = EncryptOpts {
         armor: false,
@@ -314,7 +325,7 @@ mod tests {
     }
 
     /// Runs `encrypt_each` with in-memory outputs, one per plan.
-    fn run(plans: &[MessagePlan], msg: &[u8]) -> (Vec<Result<Sent>>, Vec<Vec<u8>>) {
+    fn run(plans: &[MessagePlan], msg: &[u8]) -> (Result<Vec<Result<Sent>>>, Vec<Vec<u8>>) {
         let outputs = RefCell::new(Vec::new());
         let results = encrypt_each(
             || Ok(msg),
@@ -344,16 +355,104 @@ mod tests {
         }
     }
 
-    /// Stanza types of a binary age header, like `X25519`. The crate adds
-    /// a random `*-grease` stanza that holds no key; it is left out.
-    fn stanzas(ct: &[u8]) -> Vec<String> {
+    /// Stanzas of a binary age header as (type, args). The crate adds a
+    /// random `*-grease` stanza that holds no key; it is left out.
+    fn stanzas(ct: &[u8]) -> Vec<(String, Vec<String>)> {
         let end = ct.windows(4).position(|w| w == b"\n---").unwrap();
         String::from_utf8_lossy(&ct[..end])
             .lines()
-            .filter(|l| l.starts_with("-> "))
-            .map(|l| l.split(' ').nth(1).unwrap().to_owned())
-            .filter(|t| !t.ends_with("-grease"))
+            .filter_map(|l| l.strip_prefix("-> "))
+            .map(|l| {
+                let mut parts = l.split(' ').map(str::to_owned);
+                (parts.next().unwrap(), parts.collect())
+            })
+            .filter(|(t, _)| !t.ends_with("-grease"))
             .collect()
+    }
+
+    fn types(ct: &[u8]) -> Vec<String> {
+        stanzas(ct).into_iter().map(|(t, _)| t).collect()
+    }
+
+    /// The age SSH key tag: the first 4 bytes of SHA-256 of the wire key,
+    /// base64 without padding (age spec, ssh-ed25519 and ssh-rsa stanzas).
+    fn ssh_tag(encoded: &str) -> String {
+        use base64::Engine;
+        use sha2::Digest;
+        let b64 = encoded.split(' ').nth(1).unwrap();
+        let wire = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .unwrap();
+        base64::engine::general_purpose::STANDARD_NO_PAD.encode(&sha2::Sha256::digest(&wire)[..4])
+    }
+
+    /// SSH tags and the number of X25519 keys in some fixture key files.
+    fn expected_keys(files: &[&str]) -> (HashSet<String>, usize) {
+        let mut tags = HashSet::new();
+        let mut x25519 = 0;
+        for rel in files {
+            for line in identity_core::parse_public_keys(&fixture(rel)).unwrap() {
+                let key = line.key.unwrap();
+                if age_backend::age_key(&key).is_err() {
+                    continue;
+                }
+                match key {
+                    identity_core::PublicKey::Ssh(k) => {
+                        tags.insert(ssh_tag(&k.encoded));
+                    }
+                    _ => x25519 += 1,
+                }
+            }
+        }
+        (tags, x25519)
+    }
+
+    const PEOPLE: [(&str, &[&str]); 3] = [
+        ("erin", &["ssh/erin_ed25519.pub"]),
+        ("multi", &["ssh/multi.keys"]),
+        (
+            "combo",
+            &[
+                "ssh/grace_ed25519_pw.pub",
+                "age/dave.pub",
+                "ssh/frank_rsa.pub",
+            ],
+        ),
+    ];
+
+    /// Encrypts to PEOPLE plus an age self copy. Returns the self identity
+    /// dir (keep it alive) and the outputs, self copy last.
+    fn send_with_self_copy() -> (tempfile::TempDir, Vec<Vec<u8>>) {
+        let tmp = tempfile::tempdir().unwrap();
+        let me = SelfIdentity::load_or_create(&crate::self_identity_path(tmp.path())).unwrap();
+        let sender = Sender {
+            openpgp: OpenPgpSelf::NoSecretKey,
+            age: me.recipient(),
+        };
+        let people: Vec<_> = PEOPLE
+            .iter()
+            .map(|(label, files)| {
+                let mut person = ssh_person(label, files[0]);
+                for rel in &files[1..] {
+                    person.keys.extend(ssh_person(label, rel).keys);
+                }
+                person
+            })
+            .collect();
+        let mut plans = plan(&people, None).unwrap();
+        plans.push(self_plan(&sender, None).unwrap().0);
+        let (results, outputs) = run(&plans, b"hello");
+        let results = results.unwrap();
+        assert_eq!(results.len(), 4);
+        assert_eq!(results[3].as_ref().unwrap().label, "self");
+        (tmp, outputs)
+    }
+
+    fn my_ctx(dir: &tempfile::TempDir) -> DecryptCtx {
+        let mut ctx = DecryptCtx::new();
+        let path = crate::self_identity_path(dir.path());
+        ctx.add_self_identity(SelfIdentity::load(&path).unwrap().unwrap());
+        ctx
     }
 
     #[test]
@@ -388,26 +487,81 @@ mod tests {
     fn encrypt_each_one_result_per_recipient() {
         let people = [
             ssh_person("erin", "ssh/erin_ed25519.pub"),
-            Person {
-                label: "alice".into(),
-                keys: vec![Recipient::OpenPgp(OpenPgpCert::new(b"k".to_vec()).unwrap())],
-            },
+            ssh_person("dave", "age/dave.pub"),
             ssh_person("frank", "ssh/frank_rsa.pub"),
         ];
         let plans = plan(&people, None).unwrap();
         let (results, outputs) = run(&plans, b"hello");
-        assert_eq!(results.len(), 3);
+        let labels: Vec<_> = results
+            .unwrap()
+            .into_iter()
+            .map(|r| r.unwrap())
+            .map(|s| (s.label, s.format))
+            .collect();
         assert_eq!(
-            results[0].as_ref().unwrap(),
-            &Sent {
-                label: "erin".into(),
-                format: Format::Age
-            }
+            labels,
+            [
+                ("erin".to_owned(), Format::Age),
+                ("dave".to_owned(), Format::Age),
+                ("frank".to_owned(), Format::Age)
+            ]
         );
-        // OpenPGP waits for T08b; its output is never opened.
-        assert!(matches!(results[1], Err(Error::NotYet(Format::OpenPgp))));
-        assert_eq!(results[2].as_ref().unwrap().label, "frank");
-        assert_eq!(outputs.len(), 2);
+        assert_eq!(outputs.len(), 3);
+    }
+
+    #[test]
+    fn encrypt_each_checks_all_plans_before_writing() {
+        let opened = RefCell::new(0);
+        let people = [
+            ssh_person("erin", "ssh/erin_ed25519.pub"),
+            Person {
+                label: "alice".into(),
+                keys: vec![Recipient::OpenPgp(OpenPgpCert::new(b"k".to_vec()).unwrap())],
+            },
+        ];
+        let mut plans = plan(&people, None).unwrap();
+        let bad_self = MessagePlan {
+            label: "self".into(),
+            format: Format::Age,
+            keys: vec![],
+        };
+        for (plans, want_not_yet) in [
+            (plans.clone(), true),
+            (
+                {
+                    plans.truncate(1);
+                    plans.push(bad_self);
+                    plans
+                },
+                false,
+            ),
+        ] {
+            let err = encrypt_each(
+                || {
+                    *opened.borrow_mut() += 1;
+                    Ok(&b"hello"[..])
+                },
+                |_| -> io::Result<Vec<u8>> {
+                    *opened.borrow_mut() += 1;
+                    Ok(Vec::new())
+                },
+                &plans,
+                &OPTS,
+            )
+            .unwrap_err();
+            // OpenPGP waits for T08b.
+            assert_eq!(
+                matches!(err, Error::NotYet(Format::OpenPgp)),
+                want_not_yet,
+                "{err:?}"
+            );
+            assert_eq!(
+                matches!(err, Error::NoKeys { .. }),
+                !want_not_yet,
+                "{err:?}"
+            );
+        }
+        assert_eq!(*opened.borrow(), 0, "nothing may be opened");
     }
 
     #[test]
@@ -417,7 +571,7 @@ mod tests {
             ssh_person("frank", "ssh/frank_rsa.pub"),
         ];
         let (results, outputs) = run(&plan(&people, None).unwrap(), b"hello");
-        assert!(results.iter().all(Result::is_ok));
+        assert!(results.unwrap().iter().all(Result::is_ok));
         let (erin, frank) = (ssh_ctx("ssh/erin_ed25519"), ssh_ctx("ssh/frank_rsa"));
         assert_eq!(open(&outputs[0], &erin).unwrap(), b"hello");
         assert_eq!(open(&outputs[1], &frank).unwrap(), b"hello");
@@ -429,41 +583,53 @@ mod tests {
             open(&outputs[1], &erin),
             Err(Error::NoMatchingKey)
         ));
-        assert_eq!(stanzas(&outputs[0]), ["ssh-ed25519"]);
-        assert_eq!(stanzas(&outputs[1]), ["ssh-rsa"]);
+        assert_eq!(types(&outputs[0]), ["ssh-ed25519"]);
+        assert_eq!(types(&outputs[1]), ["ssh-rsa"]);
     }
 
     #[test]
-    fn age_self_copy_and_recipient_message_keep_keys_apart() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = crate::self_identity_path(tmp.path());
-        let me = SelfIdentity::load_or_create(&path).unwrap();
-        let sender = Sender {
-            openpgp: OpenPgpSelf::NoSecretKey,
-            age: me.recipient(),
-        };
-        let mut plans = plan(&[ssh_person("erin", "ssh/erin_ed25519.pub")], None).unwrap();
-        let (self_copy, note) = self_plan(&sender, None).unwrap();
-        assert!(note.is_some());
-        plans.push(self_copy);
-        let (results, outputs) = run(&plans, b"hello");
-        assert_eq!(results[1].as_ref().unwrap().label, "self");
+    fn self_copy_opens_with_sender_key() {
+        let (dir, outputs) = send_with_self_copy();
+        let self_copy = &outputs[3];
+        assert_eq!(open(self_copy, &my_ctx(&dir)).unwrap(), b"hello");
+        assert_eq!(types(self_copy), ["X25519"], "only the sender's X25519 key");
+        for secret in ["ssh/erin_ed25519", "ssh/frank_rsa"] {
+            assert!(matches!(
+                open(self_copy, &ssh_ctx(secret)),
+                Err(Error::NoMatchingKey)
+            ));
+        }
+        assert!(matches!(
+            open(self_copy, &dave()),
+            Err(Error::NoMatchingKey)
+        ));
+    }
 
-        let mut mine = DecryptCtx::new();
-        mine.add_self_identity(SelfIdentity::load(&path).unwrap().unwrap());
-        // self_copy_opens_with_sender_key
-        assert_eq!(open(&outputs[1], &mine).unwrap(), b"hello");
-        assert_eq!(stanzas(&outputs[1]), ["X25519"]);
-        assert!(matches!(
-            open(&outputs[1], &ssh_ctx("ssh/erin_ed25519")),
-            Err(Error::NoMatchingKey)
-        ));
-        // recipient_message_has_no_sender_key
-        assert!(matches!(
-            open(&outputs[0], &mine),
-            Err(Error::NoMatchingKey)
-        ));
-        assert_eq!(stanzas(&outputs[0]), ["ssh-ed25519"]);
+    #[test]
+    fn recipient_message_has_no_sender_key() {
+        let (dir, outputs) = send_with_self_copy();
+        let mine = my_ctx(&dir);
+        for ((label, files), ct) in PEOPLE.iter().zip(&outputs) {
+            assert!(
+                matches!(open(ct, &mine), Err(Error::NoMatchingKey)),
+                "{label}: opens with the sender's identity"
+            );
+            let (want_tags, want_x25519) = expected_keys(files);
+            let found = stanzas(ct);
+            let tags: HashSet<String> = found
+                .iter()
+                .filter(|(t, _)| t.starts_with("ssh-"))
+                .map(|(_, args)| args[0].clone())
+                .collect();
+            assert_eq!(tags, want_tags, "{label}: SSH tags");
+            let x25519 = found.iter().filter(|(t, _)| t == "X25519").count();
+            assert_eq!(x25519, want_x25519, "{label}: X25519 stanzas");
+            assert_eq!(
+                found.len(),
+                want_tags.len() + want_x25519,
+                "{label}: {found:?}"
+            );
+        }
     }
 
     #[test]
@@ -475,15 +641,6 @@ mod tests {
             age: age::x25519::Identity::generate().to_public(),
         };
         assert!(self_plan(&sender, Some(Format::OpenPgp)).is_err());
-        // And encrypt_each never opens an output for a plan it cannot run.
-        let bad = MessagePlan {
-            label: "self".into(),
-            format: Format::Age,
-            keys: vec![],
-        };
-        let (results, outputs) = run(&[bad], b"hello");
-        assert!(matches!(results[0], Err(Error::NoKeys { .. })));
-        assert!(outputs.is_empty());
     }
 
     #[test]
