@@ -1,0 +1,21 @@
+{
+  "name": "key-steward",
+  "build": {
+    "dockerfile": "Containerfile"
+  },
+  "runArgs": [
+    "--userns=keep-id",
+    "--security-opt",
+    "label=disable"
+  ],
+  "remoteUser": "dev",
+  "postCreateCommand": "rustup show && cargo fetch",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "tamasfe.even-better-toml"
+      ]
+    }
+  }
+}

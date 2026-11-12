@@ -200,3 +200,13 @@ New facts to add to SPEC 15 (proposed, not added yet):
   first window needs an app ID (SPEC 16 item 1).
 - `identity-core` may move to another repo (decision 0001). Keep its public API
   small and documented.
+
+## Devcontainer packages to add
+
+The devcontainer starts minimal (Rust only). Add these Fedora packages to
+`.devcontainer/Containerfile` in the task that first needs them:
+
+`gpgme-devel libgpg-error-devel gnupg2 openssh-clients openssh-server sqlite-devel`
+
+Also add `gtk4-devel libadwaita-devel` and `xvfb-run` for GTK tests when the
+first GTK crate gets real code.

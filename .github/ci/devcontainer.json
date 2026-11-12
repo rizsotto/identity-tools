@@ -1,0 +1,8 @@
+{
+  "name": "key-steward-ci",
+  "build": {
+    "dockerfile": "../../.devcontainer/Containerfile",
+    "context": "../../.devcontainer"
+  },
+  "remoteUser": "dev"
+}

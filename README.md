@@ -35,7 +35,7 @@ Inside the container:
 ```sh
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
-xvfb-run -a cargo test --workspace
+cargo test --workspace
 ```
 
 ## Docs
