@@ -97,7 +97,7 @@ impl Action {
             } => {
                 let opts = match options {
                     Some(o) => format!("with the same options ({o})"),
-                    None => "with no options, like it".into(),
+                    None => "without options, as on that line".into(),
                 };
                 format!(
                     "~/.ssh/authorized_keys: add the new key after line {after_line} {opts} \
@@ -449,8 +449,10 @@ fn describe(l: &PlanLocation) -> String {
     )
 }
 
-/// The old key in the ssh dir: its private path and fingerprint.
-fn find_old_key(ssh_dir: &Path, key: &str) -> Result<(PathBuf, Fingerprint), PlanError> {
+/// A key in the ssh dir, by path (private or `.pub`) or `SHA256:`
+/// fingerprint: its private path and fingerprint. The key must have a
+/// private key file (never opened, S-1).
+pub fn find_key(ssh_dir: &Path, key: &str) -> Result<(PathBuf, Fingerprint), PlanError> {
     let scan = scan_ssh_dir(ssh_dir).map_err(|e| {
         PlanError::Refused(format!(
             "cannot read the ssh dir {}: {e}",
@@ -752,7 +754,7 @@ pub async fn plan(
     env: &EngineEnv,
     req: &PlanRequest,
 ) -> Result<Plan, PlanError> {
-    let (old_path, old_fpr) = find_old_key(&env.ssh_dir, &req.key)?;
+    let (old_path, old_fpr) = find_key(&env.ssh_dir, &req.key)?;
     let new_path = req
         .new_path
         .clone()

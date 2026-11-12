@@ -6,3 +6,13 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+clap = { version = "4", features = ["derive"] }
+identity-core = { path = "../../../crates/identity-core" }
+inventory = { path = "../inventory" }
+providers = { path = "../providers" }
+rotation = { path = "../rotation" }
+serde_json = "1"
+tokio = { version = "1", features = ["rt"] }
+
+[dev-dependencies]
+test-support = { path = "../test-support" }

@@ -467,7 +467,8 @@ CREATE TABLE rotation_steps (
 The `app` crate builds the `key-steward` binary. M2 gives it subcommands
 and no window. Global options for tests and odd setups: `--db <file>`,
 `--ssh-dir <dir>`, `--ssh-config <file>`, `--known-hosts <file>`,
-`--allow-config-commands`.
+`--allow-config-commands`, `--ssh-program <file>` (the ssh to run; the
+kill tests pass a wrapper).
 
 ```
 key-steward locations list [--key <path|fpr>]
@@ -476,20 +477,32 @@ key-steward locations add-forge --kind github|gitlab|forgejo --base-url <url> --
 key-steward locations check --key <path|fpr>
 
 key-steward rotate plan  --key <path|fpr> [--type ed25519|ecdsa|rsa] [--new-path <path>]
-                         [--skip <location id>]... [--update-config] [--no-passphrase] [--json]
+                         [--skip <location id>]... [--update-config] [--no-passphrase]
+                         [--comment <text>] [--json]
 key-steward rotate start <same options> [--yes]
 key-steward rotate status [<rotation id>]
-key-steward rotate resume <rotation id>
-key-steward rotate retry  <rotation id> --location <id>
-key-steward rotate skip   <rotation id> --location <id>
+key-steward rotate resume <rotation id> [--yes]
+key-steward rotate retry  <rotation id> [--location <id>] [--yes]
+key-steward rotate skip   <rotation id> --location <id> [--yes]
 key-steward rotate abort  <rotation id> [--rollback]
 key-steward rotate log    <rotation id>      # journal and network log
 ```
 
 - `plan` is the dry-run (FR-10). `start` prints the plan and asks for
-  `yes`; `--yes` skips the question (tests, scripts). Every change still
-  goes through the plan.
-- Tokens come from Secret Service (`SecretServiceTokens`). Storing a token
+  `yes`; `--yes` skips the question (tests, scripts). Without `--yes` and
+  without a terminal, `start` refuses. Every change still goes through
+  the plan. `--yes` also answers the retire question (S-2); without it
+  and without a terminal, retire is skipped and the summary says so.
+- Only the locations the dry-run marks "rotate" enter the rotation.
+  Skipped and refused ones keep the old key; the engine then keeps the
+  old key files (retire checks every stored location of the old key).
+- The network log of each run is appended to
+  `rotation-<id>.netlog` (0600) next to the database at every journal
+  point; `rotate log` shows it with the journal. It holds no key blob or
+  token (the providers scrub them).
+- Tokens come from Secret Service (`SecretServiceTokens`), read once per
+  run and only when a forge location is involved; each is registered
+  with `Store::add_secret` before the first journal write. Storing a token
   is not in M2's CLI; that comes with the UI. CLI process tests use SSH
   locations only; forge flows are covered in-process.
 - Exit codes: 0 done, 1 error, 2 refused (pre-flight), 3 rotation stopped
