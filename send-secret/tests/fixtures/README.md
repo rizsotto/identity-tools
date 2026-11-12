@@ -9,9 +9,11 @@ Test keys for OpenPGP, age and SSH live here.
 - These keys are for tests only and are public: the private keys are in
   this repo on purpose. They protect nothing. Never use them for real
   data, and never trust them outside the tests. OpenPGP user IDs say
-  `(test fixture)`, and every address is `@example.org`.
+  `(test fixture)`, and every address is `@example.org` or `@example.net`.
 - `crates/cli/tests/fixtures.rs` checks that every file exists and has the
   right type.
+- `gen.sh` also writes the canned server answers in `../mock-sources/`
+  (SPEC 11), used by the resolver's mock servers.
 - Git does not keep 0600 modes. Tests that need a private key copy it into
   their temp dir and set the mode there.
 
@@ -36,5 +38,16 @@ The passphrase for every protected key is `fixture-passphrase`.
 | `ssh/multi.keys` | erin, frank, heidi, judy, ivan and kim public keys, like a GitHub `.keys` list |
 | `ciphertext/openpgp-armored.asc`, `openpgp-binary.gpg` | `gpg` output for alice |
 | `ciphertext/age-armored.age`, `age-binary.age` | Go `age` output for dave |
+| `openpgp/alice-new.asc`, `.sec.asc` | A second key for `alice@example.org` (the "changed key") |
+| `openpgp/mallory-other.asc` | User ID `mallory@example.net` only (S-6 mismatch when served for alice) |
+| `openpgp/olivia-two-uids.asc` | User IDs `olivia@example.org` and `olivia@example.net` |
+| `openpgp/rita-revoked-uid.asc` | User ID `rita@example.org` revoked, `rita@example.net` valid |
+| `openpgp/eve-expired.asc` | Made in 2020, encryption subkey expired 2020-01-02, primary never expires |
+| `openpgp/alice.gpg` | alice, binary export (as WKD serves it) |
+| `openpgp/alice-mallory.gpg` | alice and mallory, binary, concatenated |
+| `../mock-sources/github-empty.gpg` | GitHub's `.gpg` answer for a user with no key, byte for byte (SPEC 15) |
+| `../mock-sources/junk.bin` | Bytes 0 to 255, not a key |
+| `../mock-sources/not-found.html` | An HTML error page, not a key |
+| `../mock-sources/broken-armor.asc` | alice's armor cut short |
 
 The sample message in every ciphertext is `Send Secret fixture message`.

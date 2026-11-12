@@ -1,0 +1,3 @@
+cert-authority,principals="alice,bob" {OLD} ca line
+CERT-AUTHORITY {CA} ca
+{OLD} old

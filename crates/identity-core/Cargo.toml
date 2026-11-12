@@ -9,7 +9,9 @@ publish.workspace = true
 base64ct = { version = "1", features = ["alloc"] }
 bech32 = "0.12"
 gpgme = "0.11"
+sha1 = "0.10"
 ssh-key = { version = "0.6", default-features = false, features = ["std", "ecdsa"] }
+tempfile = "3"
 thiserror = "2"
 
 [dev-dependencies]

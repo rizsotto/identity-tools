@@ -38,4 +38,36 @@ pub enum ProviderError {
     OpenPgp(String),
     #[error("HTTP {status} from {url}")]
     HttpStatus { status: u16, url: String },
+    #[error(transparent)]
+    AuthorizedKeys(#[from] crate::ssh_server::AuthorizedKeysError),
+    /// A forge write did not take effect: the list read after it does
+    /// not show the change. `message` is the forge's text, scrubbed and
+    /// cut short.
+    #[error("{forge} answered HTTP {status} and did not make the change: {message}")]
+    WriteFailed {
+        forge: LocationKind,
+        status: u16,
+        message: String,
+    },
+    /// 401 or 403 on a forge write. `advice` names the token scopes.
+    #[error("{forge} did not allow the change (HTTP {status}). {advice}")]
+    Denied {
+        forge: LocationKind,
+        status: u16,
+        advice: String,
+    },
+    /// A forge write gave no clear answer and the list after it failed,
+    /// so it is not known whether the change was made.
+    #[error(
+        "{forge}: not known whether the change was made. The write gave: {write}. \
+         The list after it gave: {list}"
+    )]
+    Unsettled {
+        forge: LocationKind,
+        write: String,
+        list: String,
+    },
+    /// The provider cannot do this (for example a GPG key on a forge in M2).
+    #[error("{0}")]
+    Unsupported(String),
 }

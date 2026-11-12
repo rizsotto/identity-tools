@@ -38,6 +38,9 @@ pub struct Resolution {
     pub rejected: Vec<Rejected>,
     /// Per source, in SPEC 4 order. Shown, never fatal alone.
     pub errors: Vec<(SourceKind, SourceError)>,
+    /// Sources that returned keys but had a part fail ([`Found::incomplete`]).
+    /// Keys from these may be missing: never narrow a pin on them.
+    pub partial: Vec<(SourceKind, SourceError)>,
     /// Every DNS check and HTTP request of this lookup (NFR-2): the
     /// resolver's `NetLog` entries added while it ran. Lookups that run at
     /// the same time on one `Net` mix their entries here.
@@ -77,7 +80,11 @@ impl Resolver {
         let mut out = Resolution::default();
         for (kind, result) in results {
             match result {
-                Ok(found) => merge(&mut out, found),
+                Ok(mut found) => {
+                    out.partial
+                        .extend(found.incomplete.drain(..).map(|e| (kind, e)));
+                    merge(&mut out, found);
+                }
                 Err(e) => out.errors.push((kind, e)),
             }
         }

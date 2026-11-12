@@ -1,0 +1,5 @@
+# windows
+{OTHER} other
+restrict {OLD} old
+restrict {NEW} new@example.org
+

@@ -125,6 +125,28 @@ pub fn classify(
     VerifyStatus::Error(VerifyError::Other(message))
 }
 
+/// True only on proof in the main client's log that the server refused
+/// `key`: ssh offered it (`Offering public key: <identity> <TYPE> <fp>`,
+/// not a certificate), the server accepted no key, ssh printed
+/// `Permission denied (`, did not authenticate, and exited 255. A key
+/// that was never offered (missing or unreadable file) or a log in a form
+/// we do not know is not proof.
+pub fn refused(exit: Option<i32>, log: &str, identity: &Path, key: &Fingerprint) -> bool {
+    let lines: Vec<&str> = log.lines().collect();
+    let offered = lines.iter().any(|l| {
+        l.strip_prefix("debug1: Offering public key: ")
+            .is_some_and(|rest| matches!(parse_accepted(rest, identity, key), Accepted::Ours))
+    });
+    exit == Some(255)
+        && offered
+        && !lines.iter().any(|l| {
+            l.starts_with("debug1: Server accepts key: ")
+                || l.starts_with("Authenticated to ")
+                || l.starts_with("Authenticated using ")
+        })
+        && lines.iter().any(|l| l.contains("Permission denied ("))
+}
+
 enum Accepted {
     Ours,
     OursCert,
@@ -265,6 +287,55 @@ mod tests {
         assert!(!ours(&format!(
             "/k/new key ED25519 {NEW} ED25519 {OLD} agent"
         )));
+    }
+
+    fn offers(path: &str, kind: &str, fp: &str) -> String {
+        format!("debug1: Offering public key: {path} {kind} {fp} explicit\n")
+    }
+
+    fn r(exit: i32, log: &str) -> bool {
+        refused(
+            Some(exit),
+            log,
+            Path::new("/k/new key"),
+            &Fingerprint::Ssh(NEW.into()),
+        )
+    }
+
+    #[test]
+    fn refused_needs_proof() {
+        let denied = "dev@127.0.0.1: Permission denied (publickey).\n";
+        let ok = offers("/k/new key", "ED25519", NEW) + denied;
+        assert!(r(255, &ok));
+        // Never offered: the private key file is gone or unreadable.
+        assert!(!r(255, denied));
+        assert!(!r(255, &(offers("/k/other", "ED25519", NEW) + denied)));
+        assert!(!r(255, &(offers("/k/new key", "ED25519", OLD) + denied)));
+        assert!(!r(
+            255,
+            &(offers("/k/new key", "ED25519-CERT", NEW) + denied)
+        ));
+        // The server accepted it, or the login worked.
+        assert!(!r(
+            255,
+            &(offers("/k/new key", "ED25519", NEW)
+                + &accepts("/k/new key", "ED25519", NEW)
+                + denied)
+        ));
+        assert!(!r(0, &(offers("/k/new key", "ED25519", NEW) + AUTH)));
+        assert!(!r(
+            255,
+            &(offers("/k/new key", "ED25519", NEW) + AUTH + denied)
+        ));
+        // A log we do not understand, or another exit code.
+        assert!(!r(255, &offers("/k/new key", "ED25519", NEW)));
+        assert!(!r(1, &ok));
+        assert!(!refused(
+            None,
+            &ok,
+            Path::new("/k/new key"),
+            &Fingerprint::Ssh(NEW.into())
+        ));
     }
 
     #[test]
