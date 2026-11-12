@@ -8,7 +8,7 @@ use std::time::SystemTime;
 
 use identity_core::{
     Fingerprint, KeyAlgo, KeyKind, KeyWarning, OpenPgpBackend, OpenPgpKey, OpenPgpSubkey,
-    PublicKey, SshScan, scan_ssh_dir, weak_key_warnings,
+    PublicKey, SshScan, WeakReason, scan_ssh_dir, weak_key_warnings,
 };
 
 use crate::store::{Store, StoreError};
@@ -52,7 +52,7 @@ pub struct KeyRow {
     pub subkeys: Vec<OpenPgpSubkey>,
     /// Number of stored locations that hold this key.
     pub location_count: usize,
-    /// Weak key warnings (SPEC 9.4).
+    /// Weak key warnings (SPEC 9.4), for the key and its valid subkeys.
     pub warnings: Vec<KeyWarning>,
     pub source: KeySource,
 }
@@ -195,10 +195,31 @@ impl KeyList {
                     .cloned()
                     .collect(),
                 location_count: count(&key.fingerprint),
-                warnings: weak_key_warnings(&PublicKey::OpenPgp(key.clone()), None),
+                warnings: openpgp_warnings(key),
                 source: KeySource::OpenPgp,
             });
         }
         Ok(list)
     }
+}
+
+/// Weak key rules (SPEC 9.4) for an OpenPGP key: all rules on the primary
+/// key, and the algorithm rules on each subkey that is not revoked or
+/// expired. "No expiry" is about the key as a whole, so only the primary
+/// key gives it. Each warning is listed once.
+fn openpgp_warnings(key: &OpenPgpKey) -> Vec<KeyWarning> {
+    let mut out = weak_key_warnings(&PublicKey::OpenPgp(key.clone()), None);
+    for sub in &key.subkeys {
+        if sub.fingerprint == key.fingerprint || sub.revoked || sub.expired {
+            continue;
+        }
+        let mut as_key = key.clone();
+        as_key.algo = sub.algo.clone();
+        for w in weak_key_warnings(&PublicKey::OpenPgp(as_key), None) {
+            if w.reason != WeakReason::NoExpiry && !out.contains(&w) {
+                out.push(w);
+            }
+        }
+    }
+    out
 }

@@ -117,6 +117,8 @@ fn key_list_has_all_fr1_fields() {
         ],
     );
     let bob = fpr_of(&gnupg, "bob@example.invalid");
+    // A weak subkey under a strong primary key still warns (SPEC 9.4).
+    gpg(&gnupg, &["--quick-add-key", &bob, "rsa2048", "encr", "1y"]);
     // A public key without its secret key is someone else's: not listed.
     gpg(
         &gnupg,
@@ -214,7 +216,15 @@ fn key_list_has_all_fr1_fields() {
     let b = row(&list, "Bob <bob@example.invalid>");
     assert_eq!(b.fingerprint, Fingerprint::OpenPgp(bob));
     assert_eq!(b.expiry, None);
-    assert_eq!(reasons(b), vec![(Severity::Info, WeakReason::NoExpiry)]);
+    assert_eq!(b.algo, KeyAlgo::Ed25519);
+    assert_eq!(b.subkeys[0].algo, KeyAlgo::Rsa(2048));
+    assert_eq!(
+        reasons(b),
+        vec![
+            (Severity::Info, WeakReason::NoExpiry),
+            (Severity::Warning, WeakReason::RsaTooShort(2048)),
+        ]
+    );
 
     assert!(
         !list
