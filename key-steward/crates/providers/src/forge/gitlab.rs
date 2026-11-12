@@ -13,7 +13,7 @@ use super::{
 use crate::error::ProviderError;
 use crate::http::AuthStyle;
 use crate::netlog::NetLog;
-use crate::provider::{AddOpts, KeyRef, Provider, PublicKeyRef, VerifyStatus};
+use crate::provider::{AddOpts, KeyRef, Provider, PublicKeyRef, RemoveOpts, VerifyStatus};
 use crate::token::TokenSource;
 
 const KIND: LocationKind = LocationKind::GitLab;
@@ -91,7 +91,12 @@ impl Provider for GitLab {
         Err(ProviderError::NotYet("adding a key to GitLab"))
     }
 
-    async fn remove(&self, _target: &Target, _key: &Fingerprint) -> Result<(), ProviderError> {
+    async fn remove(
+        &self,
+        _target: &Target,
+        _key: &Fingerprint,
+        _opts: &RemoveOpts,
+    ) -> Result<(), ProviderError> {
         Err(ProviderError::NotYet("removing a key from GitLab"))
     }
 

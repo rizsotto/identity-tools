@@ -34,7 +34,9 @@ pub use classify::classify;
 
 use crate::error::ProviderError;
 use crate::netlog::NetLog;
-use crate::provider::{AddOpts, KeyRef, Provider, PublicKeyRef, VerifyError, VerifyStatus};
+use crate::provider::{
+    AddOpts, KeyRef, Provider, PublicKeyRef, RemoveOpts, VerifyError, VerifyStatus,
+};
 
 /// Hard limit for one check, on top of `ConnectTimeout`.
 const RUN_TIMEOUT: Duration = Duration::from_secs(60);
@@ -445,7 +447,12 @@ impl Provider for SshServer {
         Err(ProviderError::NotYet("adding a key to an SSH server (M2)"))
     }
 
-    async fn remove(&self, _target: &Target, _key: &Fingerprint) -> Result<(), ProviderError> {
+    async fn remove(
+        &self,
+        _target: &Target,
+        _key: &Fingerprint,
+        _opts: &RemoveOpts,
+    ) -> Result<(), ProviderError> {
         Err(ProviderError::NotYet(
             "removing a key from an SSH server (M2)",
         ))

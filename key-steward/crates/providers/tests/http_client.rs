@@ -222,3 +222,93 @@ async fn token_never_in_error_or_log() {
     assert!(rendered.contains("HTTP 401"), "{rendered}");
     assert!(!format!("{c:?}").contains(TOKEN), "token in client Debug");
 }
+
+#[tokio::test]
+async fn post_and_delete_are_logged_and_scrubbed() {
+    let server = MockServer::start().await;
+    let sent = serde_json::json!({ "title": "laptop", "key": "ssh-ed25519 AAAA" });
+    Mock::given(method("POST"))
+        .and(path("/user/keys"))
+        .and(header("authorization", format!("Bearer {TOKEN}").as_str()))
+        .and(header("content-type", "application/json"))
+        .and(wiremock::matchers::body_json(&sent))
+        .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({ "id": 7 })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    // Error answers that echo the token, in JSON and in plain text.
+    Mock::given(method("POST"))
+        .and(path("/echo"))
+        .respond_with(ResponseTemplate::new(422).set_body_json(serde_json::json!({
+            "message": "Validation failed",
+            "errors": [{ "message": format!("bad {TOKEN}") }],
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/user/keys/7"))
+        .and(header("authorization", format!("Bearer {TOKEN}").as_str()))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/user/keys/8"))
+        .respond_with(ResponseTemplate::new(404).set_body_string(format!("no {TOKEN} here")))
+        .mount(&server)
+        .await;
+
+    let log = NetLog::new();
+    let c = client(&server.uri(), AuthStyle::Bearer, &log);
+    let r = c.post_json("/user/keys", &sent).await.unwrap();
+    assert_eq!(r.status, 201);
+    assert_eq!(r.body["id"], 7);
+    let r = c.post_json("/echo", &sent).await.unwrap();
+    assert_eq!(r.status, 422);
+    assert_eq!(r.body["message"], "Validation failed");
+    let echoed = r.body.to_string();
+    assert!(!echoed.contains(TOKEN), "{echoed}");
+    assert!(echoed.contains("[redacted]"), "{echoed}");
+    let r = c.delete("/user/keys/7").await.unwrap();
+    assert_eq!((r.status, &r.body), (204, &serde_json::Value::Null));
+    let r = c.delete("/user/keys/8").await.unwrap();
+    assert_eq!(r.status, 404);
+    assert_eq!(r.body, serde_json::json!("no [redacted] here"));
+    // A token in the path (a caller mistake) and a connection error.
+    let r = c.delete(&format!("/user/keys/{TOKEN}")).await.unwrap();
+    assert_eq!(r.status, 404);
+    // wiremock keeps dropped servers in a pool, so use a closed port.
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let closed_url = format!("http://{}", closed.local_addr().unwrap());
+    drop(closed);
+    let err = client(&closed_url, AuthStyle::Bearer, &log)
+        .post_json(&format!("/x?t={TOKEN}"), &sent)
+        .await
+        .unwrap_err();
+    for text in [err.to_string(), format!("{err:?}")] {
+        assert!(!text.contains(TOKEN), "token in error: {text}");
+    }
+
+    let entries = log.entries();
+    let lines: Vec<(&str, &str)> = entries
+        .iter()
+        .map(|e| (e.action.as_str(), e.outcome.as_str()))
+        .collect();
+    assert_eq!(lines.len(), 6, "{lines:?}");
+    assert!(lines[0].0.starts_with("POST ") && lines[0].0.ends_with("/user/keys"));
+    assert_eq!(lines[0].1, "HTTP 201");
+    assert_eq!(lines[1].1, "HTTP 422");
+    assert!(lines[2].0.starts_with("DELETE ") && lines[2].0.ends_with("/user/keys/7"));
+    assert_eq!(lines[2].1, "HTTP 204");
+    assert_eq!(lines[3].1, "HTTP 404");
+    assert!(
+        lines[4].0.ends_with("/user/keys/[redacted]"),
+        "{}",
+        lines[4].0
+    );
+    assert!(lines[5].0.starts_with("POST "));
+    let rendered = log.render();
+    assert!(!rendered.contains(TOKEN), "token in log: {rendered}");
+    // The body is not logged: it holds the key, which the log does not need.
+    assert!(!rendered.contains("ssh-ed25519"), "{rendered}");
+}

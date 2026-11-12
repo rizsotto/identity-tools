@@ -10,8 +10,8 @@
 use std::time::Duration;
 
 use inventory::{LocationKind, Target};
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue, LINK, USER_AGENT};
-use reqwest::{Client, StatusCode, Url, redirect};
+use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, LINK, USER_AGENT};
+use reqwest::{Client, Method, RequestBuilder, Response, StatusCode, Url, redirect};
 
 use crate::error::ProviderError;
 use crate::netlog::NetLog;
@@ -129,6 +129,69 @@ impl HttpClient {
         )))
     }
 
+    /// `POST <base><path>` with a JSON body. Any HTTP status is an `Ok`
+    /// reply; the caller decides what it means. The body is not logged.
+    pub async fn post_json(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<HttpReply, ProviderError> {
+        let url = self.url(path)?;
+        let body = serde_json::to_vec(body)
+            .map_err(|e| ProviderError::Http(format!("cannot encode the request: {e}")))?;
+        let req = self
+            .client
+            .post(url.clone())
+            .header(CONTENT_TYPE, "application/json")
+            .body(body);
+        self.write(Method::POST, url, req).await
+    }
+
+    /// `DELETE <base><path>`. Any HTTP status is an `Ok` reply.
+    pub async fn delete(&self, path: &str) -> Result<HttpReply, ProviderError> {
+        let url = self.url(path)?;
+        let req = self.client.delete(url.clone());
+        self.write(Method::DELETE, url, req).await
+    }
+
+    async fn write(
+        &self,
+        method: Method,
+        url: Url,
+        req: RequestBuilder,
+    ) -> Result<HttpReply, ProviderError> {
+        let action = self.scrub(&format!("{method} {url}"));
+        let result = self.send(url, req).await;
+        let outcome = match &result {
+            Ok(r) => format!("HTTP {}", r.status),
+            Err(e) => e.to_string(),
+        };
+        self.netlog.record(self.kind, &self.target, action, outcome);
+        result
+    }
+
+    async fn send(&self, url: Url, req: RequestBuilder) -> Result<HttpReply, ProviderError> {
+        self.check_origin(&url)?;
+        let mut resp = req
+            .send()
+            .await
+            .map_err(|e| ProviderError::Http(self.scrub(&error_chain(&e))))?;
+        let status = resp.status().as_u16();
+        let body = self.read_body(&mut resp).await?;
+        let body = if body.iter().all(u8::is_ascii_whitespace) {
+            serde_json::Value::Null
+        } else {
+            match serde_json::from_slice(&body) {
+                Ok(json) => scrub_json(json, self.token.as_ref()),
+                Err(_) => {
+                    let text: String = String::from_utf8_lossy(&body).chars().take(1000).collect();
+                    serde_json::Value::String(self.scrub(&text))
+                }
+            }
+        };
+        Ok(HttpReply { status, body })
+    }
+
     fn url(&self, path: &str) -> Result<Url, ProviderError> {
         let mut base = self.base.as_str().trim_end_matches('/').to_string();
         base.push_str(path);
@@ -154,13 +217,7 @@ impl HttpClient {
     }
 
     async fn fetch(&self, url: Url) -> Result<(serde_json::Value, Option<Url>), ProviderError> {
-        if !self.same_origin(&url) {
-            return Err(ProviderError::Http(self.scrub(&format!(
-                "refused to send the token to {}, which is not {}",
-                url.origin().ascii_serialization(),
-                self.base.origin().ascii_serialization()
-            ))));
-        }
+        self.check_origin(&url)?;
         let mut resp = self
             .client
             .get(url.clone())
@@ -180,6 +237,24 @@ impl HttpClient {
             .map_err(|e| ProviderError::Http(self.scrub(&format!("bad next page link: {e}"))))?
             .or_else(|| next_page_param(resp.headers()).map(|n| with_page(&url, n)));
 
+        let body = self.read_body(&mut resp).await?;
+        let json = serde_json::from_slice(&body)
+            .map_err(|e| ProviderError::Http(format!("response is not valid JSON: {e}")))?;
+        Ok((json, next))
+    }
+
+    fn check_origin(&self, url: &Url) -> Result<(), ProviderError> {
+        if self.same_origin(url) {
+            return Ok(());
+        }
+        Err(ProviderError::Http(self.scrub(&format!(
+            "refused to send the token to {}, which is not {}",
+            url.origin().ascii_serialization(),
+            self.base.origin().ascii_serialization()
+        ))))
+    }
+
+    async fn read_body(&self, resp: &mut Response) -> Result<Vec<u8>, ProviderError> {
         let mut body = Vec::new();
         while let Some(chunk) = resp
             .chunk()
@@ -193,13 +268,35 @@ impl HttpClient {
             }
             body.extend_from_slice(&chunk);
         }
-        let json = serde_json::from_slice(&body)
-            .map_err(|e| ProviderError::Http(format!("response is not valid JSON: {e}")))?;
-        Ok((json, next))
+        Ok(body)
     }
 
     fn scrub(&self, text: &str) -> String {
         scrub_token(text, self.token.as_ref())
+    }
+}
+
+/// The answer to a `POST` or `DELETE`. `body` is the JSON the forge sent,
+/// its text as a JSON string if it is not JSON, or `null` if empty. The
+/// token is scrubbed from it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HttpReply {
+    pub status: u16,
+    pub body: serde_json::Value,
+}
+
+/// Scrubs the token from every string in `value`.
+fn scrub_json(value: serde_json::Value, token: Option<&Token>) -> serde_json::Value {
+    use serde_json::Value;
+    match value {
+        Value::String(s) => Value::String(scrub_token(&s, token)),
+        Value::Array(a) => Value::Array(a.into_iter().map(|v| scrub_json(v, token)).collect()),
+        Value::Object(o) => Value::Object(
+            o.into_iter()
+                .map(|(k, v)| (scrub_token(&k, token), scrub_json(v, token)))
+                .collect(),
+        ),
+        other => other,
     }
 }
 

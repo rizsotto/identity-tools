@@ -160,10 +160,21 @@ pub trait Provider {
     fn kind(&self) -> LocationKind;
     async fn list(&self, target: &Target) -> Result<Vec<PublicKeyRef>>;
     async fn add(&self, target: &Target, key: &PublicKey, opts: &AddOpts) -> Result<()>;
-    async fn remove(&self, target: &Target, key: &Fingerprint) -> Result<()>;
+    async fn remove(&self, target: &Target, key: &Fingerprint, opts: &RemoveOpts) -> Result<()>;
     async fn verify(&self, target: &Target, key: &KeyRef) -> Result<VerifyStatus>;
 }
+
+pub struct AddOpts {
+    pub purpose: Purpose,
+    pub title: Option<String>,
+    pub like: Option<KeyRef>,   // SSH: copy this key's line options; also the login key
+}
+pub struct RemoveOpts {
+    pub purpose: Purpose,
+    pub keep: Option<KeyRef>,   // SSH: log in with this key; it must stay in the file
+}
 ```
+A forge uses only the purpose (and the title on add).
 
 ### 7.2 SSH rotation state machine
 ```
