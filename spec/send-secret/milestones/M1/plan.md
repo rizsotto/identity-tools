@@ -109,8 +109,15 @@ pub fn detect_format(head: &[u8]) -> Detected;  // OpenPgpArmor, AgeArmor, OpenP
 ### OpenPGP backend
 
 - gpgme, user's normal keyring and gpg-agent for signing and decrypting.
-- Encrypt to a key file without importing it into the user's keyring (see
-  fact F3). If that is not possible, stop and open a decision record.
+- Encrypt to a key file without importing it into the user's keyring (fact
+  F3, verified): `gpgme_op_encrypt_sign_ext` with `--file\n<path>`, one
+  `unsafe` call into `gpgme-sys`. The recipient string is an injection point
+  (a newline adds recipients or keywords such as `--hidden`). So the wrapper
+  takes key bytes, not a path: size check, exactly one key (`read_keys`),
+  write to a fresh 0700 temp dir as 0600 under our own name, pass that
+  absolute path, delete after. Paths from outside, if ever accepted, must be
+  absolute UTF-8 with no control characters and no leading or trailing
+  spaces. Mapped errors, no `unwrap`. Details in SPEC 15, F3.
 - Sign with the default secret key. Decrypt reports signer fingerprint and
   validity.
 
