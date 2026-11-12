@@ -104,12 +104,12 @@ The same app opens secrets sent to you.
 - **FR-4** GitHub/GitLab `.keys` can list several keys. Encrypt to all supported ones (any of their devices can open it). Skip unsupported types with a note (for example ECDSA and `sk-` keys are not age recipients).
 - **FR-5** TOFU: on first use, show the fingerprint and ask "Use this key for Alice?". Store the pin. On change: block with a red warning, show old and new fingerprints, and require an explicit "I verified the new key" action.
 - **FR-6** Output text has a short header the user can remove: `Encrypted for Alice (github:alice) with age. Open with: Send Secret, or 'age -d -i ~/.ssh/id_ed25519'.`
-- **FR-7** Decrypt: detect the format (OpenPGP armor, age armor, binary). Use GnuPG for OpenPGP. For age, try `~/.ssh/id_ed25519`, `~/.ssh/id_rsa` and the age identities in `$XDG_CONFIG_HOME/send-secret/identities`. Show the verified signer for OpenPGP.
+- **FR-7** Decrypt: detect the format (OpenPGP armor, age armor, binary). Armor is found at the start of a line within the first bytes, so pasted text with a UTF-8 BOM, blank lines, triple backticks (section 9) or a header line (FR-6) before it still works; decryption starts at the armor line. Use GnuPG for OpenPGP. For age, try `~/.ssh/id_ed25519`, `~/.ssh/id_rsa` and the age identities in `$XDG_CONFIG_HOME/send-secret/identities`. Show the verified signer for OpenPGP.
 - **FR-8** Plaintext is never written to disk, except when the user saves a decrypted file explicitly.
 - **FR-9** Clipboard: copy output, then clear after the timeout only if the clipboard still holds our content.
 - **FR-10** Large content: if the armored text is longer than a configurable limit (default 20,000 characters), suggest file output instead.
 - **FR-11** Several recipients: make one message per recipient, always, even when they all share a format. Each message uses that recipient's format (FR-3) and holds only that recipient's keys, never the sender's (S-8). Each result names its recipient. A recipient with no usable key is an error that names them; never drop one silently. See [decision 0002](decisions/0002-mixed-recipients.md).
-- **FR-12** Self copy: to let the sender read back what they sent, make one extra message encrypted only to the sender (on by default, can be turned off). OpenPGP: the sender's default secret key. age: the sender's own native X25519 identity (section 9), never an SSH key, so the self copy carries no linkable SSH tag. Format: the forced format if set, else OpenPGP if the sender has a default secret key, else age. One self copy per send, even with several recipients. See [decision 0002](decisions/0002-mixed-recipients.md).
+- **FR-12** Self copy: to let the sender read back what they sent, make one extra message encrypted only to the sender (on by default, can be turned off). OpenPGP: the sender's default secret key. age: the sender's own native X25519 identity (section 9), never an SSH key, so the self copy carries no linkable SSH tag. Format: the forced format if set, else OpenPGP if the sender has a default secret key that can encrypt, else age (with a note saying why). The self key is settled before any output is written; a forced format the sender has no key for is an error before anything is written. One self copy per send, even with several recipients. See [decision 0002](decisions/0002-mixed-recipients.md).
 
 ### Non-functional
 - **NFR-1** The whole send flow takes at most 3 interactions for a known contact.
@@ -231,7 +231,7 @@ Every recipient gets their own message (FR-11), so OpenPGP and age keys never mi
 - **S-5** Zero plaintext buffers after use. Don't log plaintext, ciphertext or passphrases at any log level.
 - **S-6** Verify that the email on a WKD or keys.openpgp.org result matches the query. Reject keys whose user IDs don't match.
 - **S-7** Treat all fetched keys as hostile input. Parse them in Rust/gpgme with size limits (reject keys > 1 MB).
-- **S-8** A recipient's message holds only that recipient's keys. Never add the sender's key or anyone else's. Turn off gpg.conf `encrypt-to` for these messages (gpgme `GPGME_ENCRYPT_NO_ENCRYPT_TO`). Read-back uses a separate self copy (FR-12).
+- **S-8** A recipient's message holds only that recipient's keys. Never add the sender's key or anyone else's. Turn off gpg.conf `encrypt-to` for these messages (gpgme `GPGME_ENCRYPT_NO_ENCRYPT_TO`). Armored output has no armor header lines (`Comment:`, `Version:`): they sit outside the encryption and gpg.conf `comment` can name the sender. How to enforce that with gpgme is [decision 0003](decisions/0003-openpgp-armor-headers.md). Read-back uses a separate self copy (FR-12).
 
 ---
 
@@ -330,6 +330,7 @@ send-secret/
 3. Should age mode offer an optional SSH signature in v1 (non-standard for age, but it proves the sender)?
 4. Default clipboard clear time (proposed 60 s).
 5. Is a web decryptor for recipients without the app worth doing early? It helps adoption a lot.
+6. How to keep gpg.conf `comment` / `emit-version` armor headers out of OpenPGP output, since gpgme cannot pass `--no-comments` (S-8). See [decision 0003](decisions/0003-openpgp-armor-headers.md) (research).
 
 ---
 

@@ -387,6 +387,12 @@ The rule:
    turns off gpg.conf `encrypt-to` / `default-recipient-self` for these
    messages (gpgme `GPGME_ENCRYPT_NO_ENCRYPT_TO`), so the user's gpg config
    cannot add the sender key behind our back.
+   - Armor headers are outside the encryption too. gpg.conf `comment` and
+     `emit-version` add `Comment:` and `Version:` lines to the armor, and a
+     comment can name the sender. Output armor must have no header lines.
+     gpgme 2.0.1 has no way to pass `--no-comments` / `--no-emit-version`
+     (checked 2026-11-12), so how to enforce this is
+     [decision 0003](0003-openpgp-armor-headers.md) (research).
 2. **Read-back is a separate self copy**, one extra message encrypted only
    to the sender. On by default.
    - OpenPGP: the sender's default secret key.
@@ -394,10 +400,17 @@ The rule:
      (`$XDG_CONFIG_HOME/send-secret/identities`, created on first use, mode
      0600). Never an SSH key, so the self copy carries no linkable tag.
    - Format: the forced format (`--format`) if set. Else OpenPGP if the
-     sender has a default secret key, else age. One self copy per run, even
-     when the recipients use both formats (the plaintext is the same).
-   - A forced OpenPGP self copy with no default secret key is an error
-     that says to use `--no-self-copy`.
+     sender has a default secret key that can encrypt, else age. One self
+     copy per run, even when the recipients use both formats (the plaintext
+     is the same).
+   - "A default secret key that can encrypt" means: gpg's default secret
+     key (gpg.conf `default-key`, else the first secret key) has a valid
+     (not expired, not revoked) encryption subkey we can use.
+   - The self key is settled before any output is written. Not forced and
+     no such key: fall back to age, with a note on stderr that says why.
+     Forced OpenPGP and no such key: an error before anything is written
+     (the CLI suggests `--no-self-copy`). A failing self copy never leaves
+     recipient files behind.
 3. **Signing stays inside the encryption.** OpenPGP messages are signed,
    then encrypted (gpgme sign and encrypt in one operation). The signature,
    with the sender's key ID, is inside the encrypted part, so only the
@@ -420,7 +433,9 @@ The rule:
   file named `self.*` is a usage error (exit 2).
 - One recipient: `-o OUT` is the exact message file. The self copy goes to
   `BASE.self.<ext>`, where BASE is OUT without a trailing `.asc`, `.gpg` or
-  `.age` (`-o msg.age` gives `msg.self.age`). The self copy needs a second
+  `.age`, and `<ext>` follows the self copy's own format and armor
+  (`-o msg.age` gives `msg.self.age` for an age self copy, `msg.self.asc`
+  for an armored OpenPGP one). The self copy needs a second
   read of the input and a file to write to, so it needs both `-i FILE` and
   `-o OUT`. Without them (stdin or stdout), the run still succeeds, writes
   no self copy, and prints a note on stderr that names the missing option
