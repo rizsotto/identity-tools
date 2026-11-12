@@ -21,6 +21,7 @@ needs can run in parallel.
 | T12 (done) | Security tests: no plaintext on disk (scan temp `HOME` for the marker), no plaintext in logs or errors, oversized key rejected via CLI. | T11 | `no_plaintext_on_disk` (runs under `strace` and fails on any created file outside the outputs, recipient key dirs, self identity and gpg's own files, even if deleted again; also scans the env, the temp dir, `/var/tmp` and `/dev/shm` for the marker), `no_plaintext_in_stderr`, `cli_rejects_huge_key`. |
 | T13 (done) | CI: make sure the devcontainer has `gpg` and `age`, run interop tests, fail if they are skipped. | T11 | CI run on the PR shows interop tests ran. `.github/ci/check-tests-ran.sh` (self-test `check-tests-ran-selftest.sh`) reads the `cargo test` log and fails unless `interop.rs` and `security.rs` ran with at least their known test count and no test anywhere was ignored. `interop_tools_present` fails if `gpg` or `age` is missing. |
 | T14 | Accept M1: tick every box in `spec.md` with evidence. Update SPEC.md. **Review done 2026-11-12: 21 of 22 boxes ticked; the zeroing box waits for SPEC 16 question 7, so SPEC 12 is not marked accepted. Added tests `no_ciphertext_in_stderr`, `ssh_passphrase_never_echoed`, `self_copy_uses_default_key_not_another_secret_key`; fixed two test helpers that ran gpg in the real home.** | all | Review only. |
+| T15 (done) | Decision 0004: the sender's key goes into each recipient's message instead of a separate self copy file. `add_sender` and `MessagePlan::sender` replace `self_plan`, `self_format`, `SelfNote`, `PlanError::NoSelfKey` and `SELF_LABEL`. OpenPGP: default secret key through our own `--file` list (`NO_ENCRYPT_TO` and the gpg.conf refusals stay). age: the sender's X25519 identity as one more stanza, never an SSH key. `--no-self-copy` becomes `--no-self`. No usable OpenPGP key: message without the sender, stderr note naming the recipient, exit 0. Tick the S-4/S-5 box (SPEC 16 question 7 answered). Supersedes the self copy parts of T09, T10 and T11. | T14 | `add_sender_adds_key_of_each_format`, `add_sender_without_openpgp_key_leaves_openpgp_messages_alone`, `add_sender_never_uses_an_ssh_key`, `recipient_message_opens_with_sender_identity`, `without_sender_message_has_only_recipient_keys`, `sender_key_of_wrong_format_is_refused`, `recipient_message_opens_with_recipient_and_sender_key`, `without_sender_message_has_only_recipient_key`, `sender_without_encryption_key_is_left_out`, `sender_key_is_default_key_not_another_secret_key`, `encrypt_to_in_gpg_conf_ignored` (`encrypt-to <other>`), `two_recipients_messages_hold_only_own_and_sender_keys`, `sender_reads_back_every_message`, `no_self_flag`, `one_recipient_stdin_to_stdout`, `no_openpgp_key_note_names_recipient`, `forced_openpgp_with_sign_only_key_notes_and_sends`, `read_back_note_not_printed_when_run_fails`, `self_label_is_not_reserved`, `interop_sender_key_in_each_recipient_output`, `interop_age_sender_identity_opens_with_age`, `interop_no_self_holds_only_recipient_keys`, `interop_per_recipient_outputs`. |
 
 ## Parallel lanes
 
@@ -38,9 +39,9 @@ needs can run in parallel.
   that way, or add the size so the caller can show it. Either way, do not
   drop such keys silently. Fixtures: `ssh/kim_rsa1024.pub` (too small),
   `ssh/ivan_rsa8192.pub` (too big), both also in `ssh/multi.keys`.
-- T06: the self copy needs "default secret key that can encrypt" (gpg.conf
+- T06: read-back (FR-12) needs "default secret key that can encrypt" (gpg.conf
   `default-key`, else the first secret key, with a valid encryption
   subkey). The gpgme wrapper should expose enough to answer that (decision
-  0002, FR-12).
+  0004, FR-12).
 - OpenPGP fixture user IDs now end in `(test fixture)`, for example
   `Alice Example (test fixture) <alice@example.org>`.
