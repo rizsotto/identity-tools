@@ -68,7 +68,8 @@ impl Session {
 }
 
 /// Encrypts to every key type and decrypts again, with and without
-/// armor, both self copy formats, stdin and stdout, and failing decrypts
+/// armor, read-back with the sender's own keys, stdin and stdout, and
+/// failing decrypts
 /// (damaged messages, wrong key, junk input, junk key file). Decrypted
 /// output goes to stdout or to `-o` files that the failed runs remove.
 fn session() -> Session {
@@ -115,7 +116,7 @@ fn session() -> Session {
     let env = &s.env;
     let o = |name: &str| out_dir.join(name);
 
-    // Encrypt: three recipients, OpenPGP self copy; armored; age self copy.
+    // Encrypt: three recipients; armored; big age; big OpenPGP.
     let mut runs: Vec<(&str, Command)> = Vec::new();
     let mut cmd = ours(env, &trace);
     cmd.args(["encrypt", "--to-key", &key("openpgp/alice.asc")])
@@ -144,7 +145,7 @@ fn session() -> Session {
     .arg(&big)
     .arg("-o")
     .arg(o("big.age"));
-    runs.push(("encrypt age self copy", cmd));
+    runs.push(("encrypt big age", cmd));
     let mut cmd = ours(env, &trace);
     cmd.args(["encrypt", "--to-key", &key("openpgp/alice.asc"), "-i"])
         .arg(&big)
@@ -169,17 +170,18 @@ fn session() -> Session {
     s.check("decrypt stdin", &out, true);
     assert!(String::from_utf8_lossy(&out.stdout).contains(&secret));
 
-    // Decrypt every output to stdout.
+    // Decrypt every output to stdout. Without --identity, age messages
+    // open with the sender's own identity (read-back).
     let opens: [(&str, &[&str]); 9] = [
         ("m.alice.gpg", &[]),
         ("m.erin_ed25519.age", &["--identity", erin]),
+        ("m.erin_ed25519.age", &[]),
         ("m.dave.age", &["--identity", &key("age/dave.txt")]),
-        ("m.self.gpg", &[]),
         ("a.alice.asc", &[]),
         ("a.dave.age", &["--identity", &key("age/dave.txt")]),
-        ("a.self.asc", &[]),
-        ("big.self.age", &[]),
-        ("big.self.gpg", &[]),
+        ("a.dave.age", &[]),
+        ("big.age", &[]),
+        ("big.gpg", &[]),
     ];
     for (file, extra) in opens {
         let env = &s.env;
@@ -365,7 +367,7 @@ fn created_files(dir: &Path) -> Vec<String> {
 
 /// The files a session may create: outputs (incl. decrypted `-o` files
 /// that failed runs remove), recipient key files in their own temp dirs,
-/// the self identity, and gpg's own files in `GNUPGHOME`.
+/// the sender's own age identity, and gpg's own files in `GNUPGHOME`.
 fn allowed_creation(env: &TestEnv, path: &str) -> bool {
     let path = Path::new(path);
     let tmp = env.path("tmp");
@@ -611,7 +613,7 @@ fn ssh_passphrase_never_echoed() {
     let ct = env.path("m.age");
     let out = run_with_input(
         env.ours()
-            .args(["encrypt", "--no-self-copy", "--to-key"])
+            .args(["encrypt", "--no-self", "--to-key"])
             .arg(fixture("ssh/grace_ed25519_pw.pub"))
             .arg("-o")
             .arg(&ct),
@@ -681,7 +683,7 @@ fn cli_rejects_huge_key() {
     for key in sized_keys(&env, 1) {
         let out = env
             .ours()
-            .args(["encrypt", "--no-self-copy", "--no-sign", "--to-key"])
+            .args(["encrypt", "--no-self", "--no-sign", "--to-key"])
             .arg(&key)
             .arg("-i")
             .arg(&msg)
@@ -702,7 +704,7 @@ fn cli_rejects_huge_key() {
     for key in at_limit {
         let out = env
             .ours()
-            .args(["encrypt", "--no-self-copy", "--no-sign", "--to-key"])
+            .args(["encrypt", "--no-self", "--no-sign", "--to-key"])
             .arg(key)
             .arg("-i")
             .arg(&msg)

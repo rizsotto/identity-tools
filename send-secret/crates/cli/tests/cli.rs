@@ -137,14 +137,11 @@ fn duplicate_labels_exit_2() {
 }
 
 #[test]
-fn self_label_reserved_exit_2() {
+fn self_label_is_not_reserved() {
     let env = TestEnv::new();
     fs::copy(fixture("age/dave.pub"), env.path("self.pub")).unwrap();
-    let out = encrypt(&env, &["--to-key", "self.pub", "--no-self-copy"])
-        .output()
-        .unwrap();
-    assert_eq!(out.status.code(), Some(2));
-    assert!(stderr(&out).contains("\"self\""));
+    let out = run_with_input(&mut encrypt(&env, &["--to-key", "self.pub"]), b"hi");
+    assert!(out.status.success(), "{}", stderr(&out));
 }
 
 /// Encrypts `msg` for alice (OpenPGP), erin (SSH) and dave (age) as the
@@ -173,12 +170,7 @@ fn several_recipients_write_base_label_files() {
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(
         names(&dir),
-        [
-            "m.alice.gpg",
-            "m.dave.age",
-            "m.erin_ed25519.age",
-            "m.self.gpg"
-        ]
+        ["m.alice.gpg", "m.dave.age", "m.erin_ed25519.age"]
     );
     let text = fs::read_to_string(env.path("msg.txt")).unwrap();
     let dave = open(
@@ -218,7 +210,6 @@ fn stderr_lists_outputs() {
         ("alice", "m.alice.gpg", "OpenPGP, signed"),
         ("erin_ed25519", "m.erin_ed25519.age", "age"),
         ("dave", "m.dave.age", "age"),
-        ("self", "m.self.gpg", "OpenPGP, signed"),
     ] {
         let line = format!("{label}: {} ({format})", dir.join(file).display());
         assert!(err.contains(&line), "missing {line:?} in {err}");
@@ -232,12 +223,7 @@ fn output_ext_matches_format_and_armor() {
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(
         names(&dir),
-        [
-            "m.alice.asc",
-            "m.dave.age",
-            "m.erin_ed25519.age",
-            "m.self.asc"
-        ]
+        ["m.alice.asc", "m.dave.age", "m.erin_ed25519.age"]
     );
     let head = |f: &str| fs::read_to_string(dir.join(f)).unwrap();
     assert!(head("m.alice.asc").starts_with("-----BEGIN PGP MESSAGE-----\n"));
@@ -264,114 +250,119 @@ fn unreachable_recipient_writes_nothing() {
 }
 
 #[test]
-fn self_copy_written_next_to_outputs() {
+fn sender_reads_back_every_message() {
+    // Each recipient's message also opens with the sender's own keys: the
+    // OpenPGP one with the default secret key, the age ones with the
+    // sender's X25519 identity (found by decrypt without --identity).
     let env = TestEnv::new();
     let (dir, out) = send_three(&env, &[]);
     assert!(out.status.success(), "{}", stderr(&out));
-    let opened = open(&env, &dir.join("m.self.gpg"), &[]);
-    assert!(opened.status.success(), "{}", stderr(&opened));
-    let text = fs::read_to_string(env.path("msg.txt")).unwrap();
-    assert!(stderr(&opened).contains(&fpr("sender.asc")));
-    assert_eq!(String::from_utf8(opened.stdout).unwrap(), text);
-}
-
-#[test]
-fn self_copy_base_strips_ext() {
-    let env = TestEnv::new();
-    env.import_openpgp("sender.sec.asc");
-    let (msg, _) = message(&env);
-    let dir = out_dir(&env);
-    encrypt(
-        &env,
-        &["--to-key", &key("ssh/erin_ed25519.pub"), "-a", "-i"],
-    )
-    .arg(&msg)
-    .arg("-o")
-    .arg(dir.join("msg.age"))
-    .assert()
-    .success();
-    assert_eq!(names(&dir), ["msg.age", "msg.self.asc"]);
-}
-
-#[test]
-fn no_self_copy_flag() {
-    let env = TestEnv::new();
-    env.import_openpgp("sender.sec.asc");
-    let (msg, _) = message(&env);
-    let dir = out_dir(&env);
-    let out = encrypt(&env, &["--to-key", &key("age/dave.pub"), "--no-self-copy"])
-        .arg("-i")
-        .arg(&msg)
-        .arg("-o")
-        .arg(dir.join("m.age"))
-        .output()
-        .unwrap();
-    assert!(out.status.success());
-    assert_eq!(names(&dir), ["m.age"]);
-    assert!(!stderr(&out).contains("self"));
-    // Stdout and stdin: no note either.
-    let out = run_with_input(
-        &mut encrypt(&env, &["--to-key", &key("age/dave.pub"), "--no-self-copy"]),
-        b"hi",
-    );
-    assert!(out.status.success());
     assert!(!stderr(&out).contains("note"), "{}", stderr(&out));
-}
-
-#[test]
-fn self_copy_needs_files_note() {
-    let env = TestEnv::new();
-    let dir = out_dir(&env);
-    let out = run_with_input(
-        encrypt(&env, &["--to-key", &key("age/dave.pub"), "-o"]).arg(dir.join("m.age")),
-        b"hello",
-    );
-    assert!(out.status.success(), "{}", stderr(&out));
-    let err = stderr(&out);
-    assert!(err.contains("needs -i FILE"), "{err}");
-    assert!(err.contains("--no-self-copy"), "{err}");
-    assert_eq!(names(&dir), ["m.age"]);
-
-    let (msg, _) = message(&env);
-    let out = encrypt(&env, &["--to-key", &key("age/dave.pub"), "-i"])
-        .arg(&msg)
-        .output()
-        .unwrap();
-    assert!(out.status.success());
-    assert!(stderr(&out).contains("needs -o"), "{}", stderr(&out));
-    assert!(out.stdout.starts_with(b"age-encryption.org/v1\n"));
-}
-
-#[test]
-fn self_copy_fallback_note_on_stderr() {
-    let env = TestEnv::new();
-    let (msg, text) = message(&env);
-    let dir = out_dir(&env);
-    let out = encrypt(&env, &["--to-key", &key("age/dave.pub"), "-i"])
-        .arg(&msg)
-        .arg("-o")
-        .arg(dir.join("m.age"))
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "{}", stderr(&out));
-    assert!(
-        stderr(&out).contains("no OpenPGP secret key, so the self copy uses age"),
-        "{}",
-        stderr(&out)
-    );
-    assert_eq!(names(&dir), ["m.age", "m.self.age"]);
+    let text = fs::read_to_string(env.path("msg.txt")).unwrap();
+    for file in ["m.alice.gpg", "m.dave.age", "m.erin_ed25519.age"] {
+        let opened = open(&env, &dir.join(file), &[]);
+        assert!(opened.status.success(), "{file}: {}", stderr(&opened));
+        assert_eq!(String::from_utf8(opened.stdout).unwrap(), text, "{file}");
+    }
+    let opened = open(&env, &dir.join("m.alice.gpg"), &[]);
+    assert!(stderr(&opened).contains(&fpr("sender.asc")));
     let identity = env.config_home().join("send-secret/identities");
     let mode = fs::metadata(&identity).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o600);
-    // The default decrypt identities include the self identity.
-    let opened = open(&env, &dir.join("m.self.age"), &[]);
-    assert!(opened.status.success(), "{}", stderr(&opened));
+}
+
+#[test]
+fn no_self_flag() {
+    let env = TestEnv::new();
+    env.import_openpgp("sender.sec.asc");
+    let (msg, _) = message(&env);
+    let dir = out_dir(&env);
+    let out = encrypt(&env, &["--to-key", &key("age/dave.pub"), "--no-self"])
+        .args(["--to-key", &key("openpgp/alice.asc"), "-i"])
+        .arg(&msg)
+        .arg("-o")
+        .arg(dir.join("m"))
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(!stderr(&out).contains("note"), "{}", stderr(&out));
+    assert_eq!(names(&dir), ["m.alice.gpg", "m.dave.age"]);
+    // No age identity was made, and the sender opens neither message.
+    assert!(!env.config_home().join("send-secret").exists());
+    for file in ["m.alice.gpg", "m.dave.age"] {
+        let opened = open(&env, &dir.join(file), &[]);
+        assert_eq!(opened.status.code(), Some(1), "{file}");
+    }
+}
+
+#[test]
+fn one_recipient_stdin_to_stdout() {
+    let env = TestEnv::new();
+    let out = run_with_input(
+        &mut encrypt(&env, &["--to-key", &key("age/dave.pub")]),
+        b"hello",
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(!stderr(&out).contains("note"), "{}", stderr(&out));
+    assert!(out.stdout.starts_with(b"age-encryption.org/v1\n"));
+    let ct = env.path("m.age");
+    fs::write(&ct, &out.stdout).unwrap();
+    let mine = open(&env, &ct, &[]);
+    assert_eq!(mine.stdout, b"hello", "{}", stderr(&mine));
+    let dave = open(&env, &ct, &["--identity", &key("age/dave.txt")]);
+    assert_eq!(dave.stdout, b"hello", "{}", stderr(&dave));
+}
+
+#[test]
+fn no_openpgp_key_note_names_recipient() {
+    // No OpenPGP secret key: alice's message is made without the sender's
+    // key and stderr says so; dave's age message still has it. Exit 0.
+    let env = TestEnv::new();
+    let (msg, text) = message(&env);
+    let dir = out_dir(&env);
+    let out = encrypt(&env, &["--to-key", &key("openpgp/alice.asc")])
+        .args(["--to-key", &key("age/dave.pub"), "--no-sign", "-i"])
+        .arg(&msg)
+        .arg("-o")
+        .arg(dir.join("m"))
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let err = stderr(&out);
+    assert!(
+        err.contains(
+            "note: alice: your own key is not in this message, so you can not read it back \
+             (you have no OpenPGP secret key)"
+        ),
+        "{err}"
+    );
+    assert!(!err.contains("note: dave"), "{err}");
+    assert_eq!(names(&dir), ["m.alice.gpg", "m.dave.age"]);
+    assert_eq!(
+        open(&env, &dir.join("m.alice.gpg"), &[]).status.code(),
+        Some(1)
+    );
+    let opened = open(&env, &dir.join("m.dave.age"), &[]);
+    assert_eq!(String::from_utf8(opened.stdout).unwrap(), text);
+    let alice = TestEnv::new();
+    alice.import_openpgp("alice.sec.asc");
+    let opened = open(&alice, &dir.join("m.alice.gpg"), &[]);
     assert_eq!(String::from_utf8(opened.stdout).unwrap(), text);
 }
 
 #[test]
-fn forced_openpgp_self_copy_without_key_writes_nothing() {
+fn forced_openpgp_with_sign_only_key_notes_and_sends() {
+    // The default key can sign but not encrypt; --format openpgp follows
+    // the same rule: the message is made, signed, without the sender.
     let env = TestEnv::new();
+    let out = env
+        .gpg()
+        .args(["--passphrase", "", "--quick-gen-key"])
+        .args(["Sign Only (test fixture) <signonly@example.org>", "ed25519"])
+        .args(["sign", "1y"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
     let (msg, _) = message(&env);
     let dir = out_dir(&env);
     let out = encrypt(&env, &["--to-key", &key("openpgp/alice.asc")])
@@ -381,10 +372,15 @@ fn forced_openpgp_self_copy_without_key_writes_nothing() {
         .arg(dir.join("m.gpg"))
         .output()
         .unwrap();
-    assert_eq!(out.status.code(), Some(1));
-    assert!(stderr(&out).contains("--no-self-copy"), "{}", stderr(&out));
-    assert!(names(&dir).is_empty());
-    assert!(!env.config_home().join("send-secret").exists());
+    assert!(out.status.success(), "{}", stderr(&out));
+    let err = stderr(&out);
+    assert!(
+        err.contains("alice: your own key is not in this message"),
+        "{err}"
+    );
+    assert!(err.contains("default OpenPGP key cannot encrypt"), "{err}");
+    assert!(err.contains("(OpenPGP, signed)"), "{err}");
+    assert_eq!(names(&dir), ["m.gpg"]);
 }
 
 #[test]
@@ -465,15 +461,12 @@ fn damaged_age_message(env: &TestEnv) -> PathBuf {
     let big = env.path("big.txt");
     fs::write(&big, vec![b'x'; 200_000]).unwrap();
     let ct = env.path("big.age");
-    encrypt(
-        env,
-        &["--to-key", &key("age/dave.pub"), "--no-self-copy", "-i"],
-    )
-    .arg(&big)
-    .arg("-o")
-    .arg(&ct)
-    .assert()
-    .success();
+    encrypt(env, &["--to-key", &key("age/dave.pub"), "--no-self", "-i"])
+        .arg(&big)
+        .arg("-o")
+        .arg(&ct)
+        .assert()
+        .success();
     let mut bytes = fs::read(&ct).unwrap();
     let at = bytes.len() - 5;
     bytes[at] ^= 0x01;
@@ -505,15 +498,12 @@ fn decrypt_output_file_created_0600_no_temp() {
     let env = TestEnv::new();
     let (msg, text) = message(&env);
     let ct = env.path("m.age");
-    encrypt(
-        &env,
-        &["--to-key", &key("age/dave.pub"), "--no-self-copy", "-i"],
-    )
-    .arg(&msg)
-    .arg("-o")
-    .arg(&ct)
-    .assert()
-    .success();
+    encrypt(&env, &["--to-key", &key("age/dave.pub"), "--no-self", "-i"])
+        .arg(&msg)
+        .arg("-o")
+        .arg(&ct)
+        .assert()
+        .success();
     let dir = out_dir(&env);
     let plain = dir.join("plain.txt");
     let args = [
@@ -592,24 +582,28 @@ fn encrypt_refuses_existing_output() {
     let env = TestEnv::new();
     let (msg, _) = message(&env);
     let dir = out_dir(&env);
-    // The self copy path exists: nothing is written, not even m.age.
-    fs::write(dir.join("m.self.age"), "keep").unwrap();
-    let out = encrypt(&env, &["--to-key", &key("age/dave.pub"), "-i"])
+    // One output path exists: nothing is written, not even the other.
+    fs::write(dir.join("m.erin_ed25519.age"), "keep").unwrap();
+    let out = encrypt(&env, &["--to-key", &key("age/dave.pub")])
+        .args(["--to-key", &key("ssh/erin_ed25519.pub"), "-i"])
         .arg(&msg)
         .arg("-o")
-        .arg(dir.join("m.age"))
+        .arg(dir.join("m"))
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(1));
     assert!(stderr(&out).contains("file exists"), "{}", stderr(&out));
-    assert_eq!(names(&dir), ["m.self.age"]);
-    assert_eq!(fs::read_to_string(dir.join("m.self.age")).unwrap(), "keep");
+    assert_eq!(names(&dir), ["m.erin_ed25519.age"]);
+    assert_eq!(
+        fs::read_to_string(dir.join("m.erin_ed25519.age")).unwrap(),
+        "keep"
+    );
 }
 
 #[test]
-fn self_copy_note_not_printed_when_run_fails() {
-    // No secret key: the self copy would be age, but signing the OpenPGP
-    // message fails first, so no note about the self copy.
+fn read_back_note_not_printed_when_run_fails() {
+    // No secret key: alice's message would get the note, but signing it
+    // fails first, so no note about reading it back.
     let env = TestEnv::new();
     let (msg, _) = message(&env);
     let dir = out_dir(&env);
@@ -622,6 +616,6 @@ fn self_copy_note_not_printed_when_run_fails() {
     assert_eq!(out.status.code(), Some(1));
     let err = stderr(&out);
     assert!(err.contains("--no-sign"), "{err}");
-    assert!(!err.contains("self copy uses age"), "{err}");
+    assert!(!err.contains("read it back"), "{err}");
     assert!(names(&dir).is_empty());
 }

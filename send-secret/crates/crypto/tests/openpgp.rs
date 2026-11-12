@@ -6,7 +6,8 @@ use std::process::Command;
 
 use crypto::{
     DecryptCtx, EncryptOpts, Error, Format, MessagePlan, OpenPgpCert, OpenPgpSelf, Person,
-    Recipient, SignatureStatus, decrypt, encrypt, encrypt_each, openpgp_user, plan, self_plan,
+    Recipient, Sender, SignatureStatus, add_sender, decrypt, encrypt, encrypt_each, openpgp_user,
+    plan,
 };
 use tempfile::TempDir;
 
@@ -194,7 +195,7 @@ fn signer_without_public_key_is_reported_unknown() {
 #[test]
 fn signer_is_the_default_key_not_another_secret_key() {
     // Two secret keys; gpg.conf names sender as default-key. Signing and
-    // the self copy both use it.
+    // the read-back key both use it.
     let sender = Home::with(&["bob-rsa.sec.asc", "sender.sec.asc"]);
     std::fs::write(
         sender.path().join("gpg.conf"),
@@ -212,8 +213,27 @@ fn signer_is_the_default_key_not_another_secret_key() {
     );
 }
 
+/// `alice_plan` with the sender's key from `home` added (FR-12).
+fn alice_plan_with_sender(home: &Home) -> MessagePlan {
+    let mut plans = vec![alice_plan()];
+    add_sender(&mut plans, &sender_of(home));
+    plans.remove(0)
+}
+
+fn sender_of(home: &Home) -> Sender {
+    Sender {
+        openpgp: openpgp_user(Some(home.path())).unwrap().self_key,
+        age: None,
+    }
+}
+
+fn sorted(mut ids: Vec<String>) -> Vec<String> {
+    ids.sort();
+    ids
+}
+
 #[test]
-fn self_copy_uses_default_key_not_another_secret_key() {
+fn sender_key_is_default_key_not_another_secret_key() {
     // Two secret keys, bob-rsa first; gpg.conf names sender as default-key.
     let home = Home::with(&["bob-rsa.sec.asc", "sender.sec.asc"]);
     std::fs::write(
@@ -221,15 +241,11 @@ fn self_copy_uses_default_key_not_another_secret_key() {
         format!("default-key {}\n", fpr("sender.asc")),
     )
     .unwrap();
-    let user = openpgp_user(Some(home.path())).unwrap();
-    let me = crypto::Sender {
-        openpgp: user.self_key,
-        age: None,
-    };
-    let (self_copy, _) = self_plan(&me, None).unwrap();
-    assert_eq!(self_copy.format, Format::OpenPgp);
-    let ct = encrypt_to(&self_copy, &home.opts(false));
-    assert_eq!(packet_keyids(&ct), [enc_keyid("sender.asc")]);
+    let ct = encrypt_to(&alice_plan_with_sender(&home), &home.opts(false));
+    assert_eq!(
+        sorted(packet_keyids(&ct)),
+        sorted(vec![enc_keyid("alice.asc"), enc_keyid("sender.asc")])
+    );
 }
 
 #[test]
@@ -347,6 +363,7 @@ fn key_file_with_two_keys_gives_one_message_both_open() {
         label: "pair".into(),
         format: Format::OpenPgp,
         keys: vec![Recipient::OpenPgp(OpenPgpCert::new(two).unwrap())],
+        sender: None,
     };
     let ct = encrypt_to(&p, &sender.opts(false));
     let mut ids = packet_keyids(&ct);
@@ -383,6 +400,7 @@ fn key_file_with_an_unusable_key_is_refused_before_output() {
         label: "pair".into(),
         format: Format::OpenPgp,
         keys: vec![Recipient::OpenPgp(OpenPgpCert::new(two).unwrap())],
+        sender: None,
     };
     let err = encrypt_each(
         || -> std::io::Result<&[u8]> { panic!("input opened") },
@@ -488,26 +506,28 @@ fn gpg_conf_options_that_add_keys_are_refused() {
 }
 
 #[test]
-fn self_copy_opens_with_sender_key() {
+fn recipient_message_opens_with_recipient_and_sender_key() {
     let sender = Home::with(&["sender.sec.asc"]);
-    let user = openpgp_user(Some(sender.path())).unwrap();
-    let me = crypto::Sender {
-        openpgp: user.self_key,
-        age: None,
-    };
-    let (self_copy, note) = self_plan(&me, None).unwrap();
-    assert_eq!((self_copy.format, note), (Format::OpenPgp, None));
-    let ct = encrypt_to(&self_copy, &sender.opts(true));
-    let (plain, found) = open(&ct, &sender).unwrap();
-    assert_eq!(plain, MSG);
-    assert_eq!(found.signer.unwrap().status, SignatureStatus::Good);
-    assert_eq!(packet_keyids(&ct), [enc_keyid("sender.asc")]);
-    let alice = Home::with(&["alice.sec.asc"]);
-    assert!(matches!(open(&ct, &alice), Err(Error::NoMatchingKey)));
+    let alice = Home::with(&["alice.sec.asc", "sender.asc"]);
+    for armor in [true, false] {
+        let ct = encrypt_to(&alice_plan_with_sender(&sender), &sender.opts(armor));
+        assert_eq!(
+            sorted(packet_keyids(&ct)),
+            sorted(vec![enc_keyid("alice.asc"), enc_keyid("sender.asc")]),
+            "armor {armor}"
+        );
+        for home in [&alice, &sender] {
+            let (plain, found) = open(&ct, home).unwrap();
+            assert_eq!(plain, MSG);
+            assert_eq!(found.signer.unwrap().status, SignatureStatus::Good);
+        }
+        let bob = Home::with(&["bob-rsa.sec.asc"]);
+        assert!(matches!(open(&ct, &bob), Err(Error::NoMatchingKey)));
+    }
 }
 
 #[test]
-fn recipient_message_has_no_sender_key() {
+fn without_sender_message_has_only_recipient_key() {
     let sender = Home::with(&["sender.sec.asc"]);
     let ct = encrypt_to(&alice_plan(), &sender.opts(false));
     assert_eq!(packet_keyids(&ct), [enc_keyid("alice.asc")]);
@@ -515,14 +535,38 @@ fn recipient_message_has_no_sender_key() {
 }
 
 #[test]
+fn sender_without_encryption_key_is_left_out() {
+    let home = Home::with(&[]);
+    home.gpg(&[
+        "--quick-gen-key",
+        "Sign Only (test fixture) <signonly@example.org>",
+        "ed25519",
+        "sign",
+        "1y",
+    ]);
+    let p = alice_plan_with_sender(&home);
+    assert!(p.sender.is_none());
+    let ct = encrypt_to(&p, &home.opts(false));
+    assert_eq!(packet_keyids(&ct), [enc_keyid("alice.asc")]);
+}
+
+#[test]
 fn encrypt_to_in_gpg_conf_ignored() {
-    let sender = Home::with(&["sender.sec.asc"]);
+    // gpg.conf asks for another key (bob, in the keyring) and the sender's
+    // own key. Neither comes in through gpg.conf: without the sender
+    // added, only alice; with it, alice and the sender, never bob.
+    let sender = Home::with(&["sender.sec.asc", "bob-rsa.asc"]);
     let me = fpr("sender.asc");
+    let bob = fpr("bob-rsa.asc");
     std::fs::write(
         sender.path().join("gpg.conf"),
-        format!("encrypt-to {me}\nhidden-encrypt-to {me}\ndefault-recipient-self\n"),
+        format!(
+            "encrypt-to {bob}\nhidden-encrypt-to {bob}\nencrypt-to {me}\n\
+             hidden-encrypt-to {me}\ndefault-recipient-self\n"
+        ),
     )
     .unwrap();
+    let bob_home = Home::with(&["bob-rsa.sec.asc"]);
     for armor in [true, false] {
         let ct = encrypt_to(&alice_plan(), &sender.opts(armor));
         assert_eq!(
@@ -531,6 +575,57 @@ fn encrypt_to_in_gpg_conf_ignored() {
             "armor {armor}"
         );
         assert!(matches!(open(&ct, &sender), Err(Error::NoMatchingKey)));
+        let ct = encrypt_to(&alice_plan_with_sender(&sender), &sender.opts(armor));
+        assert_eq!(
+            sorted(packet_keyids(&ct)),
+            sorted(vec![enc_keyid("alice.asc"), enc_keyid("sender.asc")]),
+            "armor {armor}"
+        );
+        assert!(matches!(open(&ct, &bob_home), Err(Error::NoMatchingKey)));
+    }
+}
+
+#[test]
+fn two_recipients_messages_hold_only_own_and_sender_keys() {
+    let sender = Home::with(&["sender.sec.asc"]);
+    let people: Vec<Person> = ["alice", "bob-rsa"]
+        .iter()
+        .map(|name| Person {
+            label: (*name).into(),
+            keys: vec![Recipient::OpenPgp(
+                OpenPgpCert::new(read(&format!("openpgp/{name}.asc"))).unwrap(),
+            )],
+        })
+        .collect();
+    let mut plans = plan(&people, None).unwrap();
+    add_sender(&mut plans, &sender_of(&sender));
+    let out_dir = tempfile::tempdir().unwrap();
+    let results = encrypt_each(
+        || Ok(MSG),
+        |p| std::fs::File::create(out_dir.path().join(&p.label)),
+        &plans,
+        &sender.opts(false),
+    )
+    .unwrap();
+    assert!(results.iter().all(Result::is_ok));
+    for (name, other) in [("alice", "bob-rsa"), ("bob-rsa", "alice")] {
+        let ct = std::fs::read(out_dir.path().join(name)).unwrap();
+        assert_eq!(
+            sorted(packet_keyids(&ct)),
+            sorted(vec![
+                enc_keyid(&format!("{name}.asc")),
+                enc_keyid("sender.asc")
+            ]),
+            "{name}"
+        );
+        let own = Home::with(&[format!("{name}.sec.asc").as_str()]);
+        assert_eq!(open(&ct, &own).unwrap().0, MSG, "{name}");
+        assert_eq!(open(&ct, &sender).unwrap().0, MSG, "{name}");
+        let other = Home::with(&[format!("{other}.sec.asc").as_str()]);
+        assert!(
+            matches!(open(&ct, &other), Err(Error::NoMatchingKey)),
+            "{name}"
+        );
     }
 }
 

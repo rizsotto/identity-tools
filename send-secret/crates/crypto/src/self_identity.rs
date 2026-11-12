@@ -1,5 +1,6 @@
-//! The sender's own age identity for the self copy (FR-12, section 9).
-//! Always a native X25519 key, never an SSH key, so the self copy carries no
+//! The sender's own age identity, added to every age message so the sender
+//! can read it back (FR-12, section 9, decision 0004). Always a native
+//! X25519 key, never an SSH key, so a message carries no
 //! SSH key tag that links it to the sender.
 
 use std::fmt::Write as _;
@@ -63,7 +64,7 @@ impl SelfIdentity {
         let mut text = Zeroizing::new(String::with_capacity(512));
         write!(
             text,
-            "# Send Secret self copy identity. Keep it secret.\n# public key: {}\n{}\n",
+            "# Send Secret identity of your own. Keep it secret.\n# public key: {}\n{}\n",
             identity.to_public(),
             identity.to_string().expose_secret()
         )
@@ -131,7 +132,7 @@ impl SelfIdentity {
         Ok(Some(SelfIdentity { identity }))
     }
 
-    /// The public key, for the age self copy.
+    /// The public key, added to every age message (FR-12).
     pub fn recipient(&self) -> age::x25519::Recipient {
         self.identity.to_public()
     }
