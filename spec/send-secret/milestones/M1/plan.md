@@ -99,9 +99,8 @@ Follows SPEC section 7, adjusted to real types:
 
 ```rust
 pub enum Recipient {
-    OpenPgp(identity_core::PublicKey),   // spec sketch says Cert
-    Age(age::x25519::Recipient),
-    Ssh(age::ssh::Recipient),
+    OpenPgp(OpenPgpCert),   // key file bytes, max 1 MB; T08b checks one key (F3)
+    Age(AgeKey),            // AgeKey::X25519(age::x25519::Recipient) | AgeKey::Ssh(age::ssh::Recipient)
 }
 pub enum Format { OpenPgp, Age }
 pub struct EncryptOpts { pub armor: bool, pub sign: bool }
@@ -120,7 +119,7 @@ pub fn plan(people: &[Person], force: Option<Format>) -> Result<Vec<MessagePlan>
 pub struct Sender { pub openpgp: OpenPgpSelf, pub age: age::x25519::Recipient }
 /// The default secret key (gpg.conf `default-key`, else the first secret
 /// key) and whether it has a valid encryption subkey.
-pub enum OpenPgpSelf { CanEncrypt(Recipient), NoSecretKey, CannotEncrypt }
+pub enum OpenPgpSelf { CanEncrypt(OpenPgpCert), NoSecretKey, CannotEncrypt }
 /// Pure: label "self", only the sender's key. Forced format, else OpenPGP
 /// if `OpenPgpSelf::CanEncrypt`, else age plus a note saying why
 /// (`SelfNote`). Forced OpenPGP without `CanEncrypt`: `PlanError::NoSelfKey`.
@@ -131,20 +130,20 @@ pub fn self_plan(sender: &Sender, force: Option<Format>)
 pub fn encrypt(input: impl Read, output: impl Write,
                plan: &MessagePlan, opts: &EncryptOpts) -> Result<()>;
 
-/// One result per plan (recipients, then the self copy if present), in order.
+/// Checks ALL plans first; Err if one fails, and then nothing is opened.
+/// Else one result per plan (recipients, then the self copy), in order.
 pub struct Sent { pub label: String, pub format: Format }
 pub fn encrypt_each<R: Read, W: Write>(
     open_input: impl FnMut() -> io::Result<R>,
     open_output: impl FnMut(&MessagePlan) -> io::Result<W>,
-    plans: &[MessagePlan], opts: &EncryptOpts) -> Vec<Result<Sent>>;
+    plans: &[MessagePlan], opts: &EncryptOpts) -> Result<Vec<Result<Sent>>>;
 pub fn decrypt(input: impl Read, output: impl Write,
-               ctx: &DecryptCtx) -> Result<Decrypted>;  // format, signer
+               ctx: &DecryptCtx) -> Result<Decrypted>;  // format, more_messages, signer (T08b)
 pub fn detect_format(head: &[u8]) -> Detection;  // format: OpenPgpArmor, AgeArmor, OpenPgpBinary, AgeBinary, Unknown; start: offset of the armor line
 ```
 
-- Streaming `Read` to `Write`, never a temp file (S-4). The spec sketch uses
-  `Input`/`Output` types. Streams are simpler for M1. Change SPEC section 7 in
-  the same PR if we keep this.
+- Streaming `Read` to `Write`, never a temp file (S-4). SPEC section 7
+  now shows this shape.
 - In-memory plaintext uses `secrecy`/`zeroize` (NFR-3, S-5).
 - One message per recipient, always (decision 0002, FR-11). `encrypt_each`
   opens the input once per message, so no plaintext is buffered and no
@@ -170,8 +169,22 @@ pub fn detect_format(head: &[u8]) -> Detection;  // format: OpenPgpArmor, AgeArm
   (BOM, backticks, a header line) is skipped. Text after the END line
   (closing backticks) must not break decrypt either: T08a/T08b check how
   the `age` crate and gpgme handle trailing text, and cut the input at the
-  END line if they reject it.
+  END line if they reject it. Done for age (T08a): the backend stops
+  reading after the END line. If another armored message follows (two
+  pasted together), only the first is decrypted and
+  `Decrypted::more_messages` is true; the CLI prints a note on stderr
+  (not an error).
 - Errors never contain plaintext or key material.
+- **Decrypt output on error.** Plaintext is written as it is authenticated
+  (age: per 64 KiB chunk), so a damaged or truncated message can leave
+  up to a few hundred KB of plaintext in the output before `Err`. The
+  callers must handle it:
+  - File output (`-o FILE`): open the final path with `create_new` and mode
+    0600, no temp file. On error, `set_len(0)`, remove the file, exit 1.
+  - Stdout: exit 1 and stderr says "output incomplete, discard it".
+  - GUI (M3): decrypt into a pre-sized zeroizing buffer and show nothing
+    on error.
+  - No `BufWriter` around plaintext output (its buffer is not zeroed).
 
 ### age backend
 
@@ -190,7 +203,17 @@ pub fn detect_format(head: &[u8]) -> Detection;  // format: OpenPgpArmor, AgeArm
   `$XDG_CONFIG_HOME/send-secret/identities`, created on the first encrypt
   that makes an age self copy, file mode 0600 (parent dir 0700). Never an
   SSH key, so the self copy has no linkable SSH tag. Passphrase protection
-  is optional in the spec, not in M1.
+  is optional in the spec, not in M1. The file is opened with
+  `O_NOFOLLOW | O_NONBLOCK`; a symlink, a FIFO or a file group or others
+  can read is refused. An existing `send-secret` dir that is too open is
+  set to 0700; a symlinked one is refused.
+- `$XDG_CONFIG_HOME`: the CLI ignores it when it is unset, empty or a
+  relative path (the XDG spec says relative paths are invalid) and uses
+  `$HOME/.config` instead.
+- Hostile headers: the `age` crate parses the header again after every
+  read, so a 128 KiB header took 74 s. The backend caps the header at
+  16 KiB and uses `Decryptor::new_buffered` (a real header with eight SSH
+  RSA keys is about 5 KiB).
 - Recipient messages hold only the recipient's keys (S-8).
 
 ### OpenPGP backend
