@@ -406,3 +406,26 @@ async fn config_off_warns_that_config_names_old_key() {
         "{s:?}"
     );
 }
+
+#[tokio::test]
+async fn location_outside_the_rotation_blocks_retire() {
+    let f = Fixture::new();
+    // A stored location of the old key that the dry-run left out.
+    f.store()
+        .add(&inventory::NewLocation {
+            kind: LocationKind::SshServer,
+            target: Target::Ssh(SshHost::new("srv-left-out")),
+            key: f.old_fpr.clone(),
+            purpose: Purpose::SshAuth,
+        })
+        .unwrap();
+    let s = f.start(&NoHooks, true).await.unwrap();
+    assert_eq!(s.ending, Ending::Done, "{s:?}");
+    assert!(f.old_path.exists(), "old key files kept");
+    assert!(
+        s.notes
+            .iter()
+            .any(|n| n.contains("srv-left-out (not in this rotation)")),
+        "{s:?}"
+    );
+}

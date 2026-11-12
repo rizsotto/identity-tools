@@ -1847,6 +1847,17 @@ dependencies = [
 [[package]]
 name = "key-steward"
 version = "0.1.0"
+dependencies = [
+ "clap",
+ "identity-core",
+ "inventory",
+ "libc",
+ "providers",
+ "rotation",
+ "serde_json",
+ "test-support",
+ "tokio",
+]
 
 [[package]]
 name = "lazy_static"
@@ -2750,6 +2761,7 @@ dependencies = [
  "inventory",
  "libc",
  "providers",
+ "serde_json",
  "test-support",
  "thiserror 2.0.21",
  "tokio",

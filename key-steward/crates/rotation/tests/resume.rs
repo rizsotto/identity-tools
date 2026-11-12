@@ -432,3 +432,48 @@ async fn skip_refused_while_a_step_is_unfinished() {
     let steps = f.store().steps(ID).unwrap();
     assert!(!steps.iter().any(|e| e.step == Step::Skip));
 }
+
+#[tokio::test]
+async fn skip_refused_after_a_failed_removal_that_took_effect() {
+    let f = Fixture::new();
+    let gl = "alice at https://gitlab.test";
+    {
+        let mut faults = f.world.faults.lock().unwrap();
+        for (target, ..) in common::sites() {
+            if target.label() != gl {
+                faults.remove_fails.insert(target.label());
+            }
+        }
+        faults.remove_lost.insert(gl.into());
+    }
+    let s = f.start(&NoHooks, true).await.unwrap();
+    assert_eq!(s.ending, Ending::Stopped);
+    let loc = s
+        .locations
+        .iter()
+        .find(|l| l.target.label() == gl)
+        .unwrap()
+        .location_id;
+    assert!(!f.world.has(gl, &f.old_fpr, Purpose::SshAuth));
+    f.world.faults.lock().unwrap().remove_lost.clear();
+
+    let r = f
+        .with_engine(ID, &NoHooks, true, async |e| e.skip(loc).await)
+        .await;
+    assert!(
+        matches!(&r, Err(EngineError::Refused(m)) if m.contains("already gone")),
+        "{r:?}"
+    );
+    let steps = f.store().steps(ID).unwrap();
+    assert!(!steps.iter().any(|e| e.step == Step::Skip));
+    let l = f
+        .store()
+        .rotation_locations(ID)
+        .unwrap()
+        .into_iter()
+        .find(|l| l.location_id == loc)
+        .unwrap();
+    assert_eq!(l.phase, Phase::OldRemoved);
+    assert!(f.store().get(loc).unwrap().is_none(), "old row removed");
+    assert_invariants(&f);
+}

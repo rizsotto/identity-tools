@@ -11,7 +11,7 @@ mod store;
 
 pub use journal::{
     Event, JournalTx, MAX_DETAIL, NewRotation, Phase, Rotation, RotationId, RotationLocation, Step,
-    StepEntry, scrub_detail,
+    StepEntry, cut_known_secrets, scrub_detail,
 };
 pub use key_list::{Created, KeyList, KeyProblem, KeyRow, KeySource};
 pub use location::{

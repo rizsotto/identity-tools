@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use identity_core::Fingerprint;
 use inventory::{LocationKind, Target};
+use providers::authorized_keys::KeyLine;
 use providers::{
     KeyRef, OldKeyCheck, Provider, ProviderError, PublicKeyRef, RemoveOpts, SshServer,
 };
@@ -55,6 +56,19 @@ pub trait Providers: Send + Sync {
     ) -> Result<OldKeyCheck, ProviderError> {
         let _ = (kind, target, old);
         Ok(OldKeyCheck::Unknown("this provider cannot check".into()))
+    }
+
+    /// SSH: every key line of `authorized_keys` with its options, logging
+    /// in with `login`. Read only; for the dry-run. The default has none.
+    async fn ssh_lines(
+        &self,
+        target: &Target,
+        login: &KeyRef,
+    ) -> Result<Vec<KeyLine>, ProviderError> {
+        let _ = (target, login);
+        Err(ProviderError::WrongTarget {
+            kind: LocationKind::SshServer,
+        })
     }
 
     /// [`Provider::remove`] plus its report. The default reports nothing
@@ -145,6 +159,19 @@ impl Providers for ProviderMap {
         match self.ssh(kind) {
             Some(s) => s.check_old_key(target, old).await,
             None => Ok(OldKeyCheck::Unknown("this provider cannot check".into())),
+        }
+    }
+
+    async fn ssh_lines(
+        &self,
+        target: &Target,
+        login: &KeyRef,
+    ) -> Result<Vec<KeyLine>, ProviderError> {
+        match self.ssh(LocationKind::SshServer) {
+            Some(s) => s.lines_as(target, login).await,
+            None => Err(ProviderError::WrongTarget {
+                kind: LocationKind::SshServer,
+            }),
         }
     }
 

@@ -24,7 +24,7 @@ use identity_core::{Fingerprint, SshPublicKey};
 use inventory::{LocationKind, Purpose, Status, Target};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
-use super::authorized_keys::{AuthorizedKeys, EditError, MAX_FILE};
+use super::authorized_keys::{AuthorizedKeys, EditError, KeyLine, MAX_FILE};
 use super::remote::{self, ApplyReply, Cksum, ProtocolError, ReadReply, Script};
 use super::{RUN_TIMEOUT, SshServer, Workdir, config, read_capped, render_command};
 use crate::error::ProviderError;
@@ -259,10 +259,10 @@ impl SshServer {
         target: &Target,
         login: &KeyRef,
     ) -> Result<Vec<PublicKeyRef>, ProviderError> {
-        let (content, _) = self.read_file(target, login).await?;
-        let file = AuthorizedKeys::parse(&content)?;
-        Ok(file
-            .keys()
+        Ok(self
+            .lines_as(target, login)
+            .await?
+            .iter()
             .filter(|k| !k.cert_authority)
             .map(|k| PublicKeyRef {
                 fingerprint: k.key.fingerprint.clone(),
@@ -271,6 +271,17 @@ impl SshServer {
                 remote_id: Some(k.line.to_string()),
             })
             .collect())
+    }
+
+    /// Every key line of `~/.ssh/authorized_keys` (CA lines included),
+    /// logging in with `login`. For the dry-run: line numbers and options.
+    pub async fn lines_as(
+        &self,
+        target: &Target,
+        login: &KeyRef,
+    ) -> Result<Vec<KeyLine>, ProviderError> {
+        let (content, _) = self.read_file(target, login).await?;
+        Ok(AuthorizedKeys::parse(&content)?.keys().cloned().collect())
     }
 
     /// The file and its checksum, logging in with `login`.

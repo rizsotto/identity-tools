@@ -612,6 +612,8 @@ impl Fixture {
             new_key_path: self.new_path.clone(),
             new_key_type: "ed25519".into(),
             update_config: self.update_config,
+            no_passphrase: self.env.passphrase == Passphrase::Empty,
+            new_key_comment: self.env.comment.clone(),
             state: String::new(),
             locations: self.locations.clone(),
         }

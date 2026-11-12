@@ -53,6 +53,8 @@ pub struct EngineEnv {
     /// (`inventory::scan_config`), for the config update.
     pub config_files: Vec<PathBuf>,
     pub keygen_program: PathBuf,
+    /// For the dry-run and a new rotation. A running rotation uses the
+    /// choices stored in its row.
     pub passphrase: Passphrase,
     pub comment: Option<String>,
 }
@@ -320,6 +322,11 @@ impl<'a> Engine<'a> {
         self.rot.id
     }
 
+    /// The rotation row as last read.
+    pub fn rotation(&self) -> &Rotation {
+        &self.rot
+    }
+
     /// Runs every step that is left, in order. A failed step stops its
     /// location, not the others.
     pub async fn run(&mut self) -> Result<Summary, EngineError> {
@@ -528,8 +535,14 @@ impl<'a> Engine<'a> {
         let env = self.ctx.env;
         let mut req = KeygenRequest::new(&env.ssh_dir, &self.rot.new_key_path);
         req.key_type = key_type;
-        req.comment = env.comment.clone();
-        req.passphrase = env.passphrase;
+        // The choices stored with the rotation, so a resume makes the key
+        // the user asked for.
+        req.comment = self.rot.new_key_comment.clone();
+        req.passphrase = if self.rot.no_passphrase {
+            Passphrase::Empty
+        } else {
+            Passphrase::Terminal
+        };
         req.program = env.keygen_program.clone();
         Ok(req)
     }
@@ -746,8 +759,8 @@ impl<'a> Engine<'a> {
     }
 
     fn retire_skip_reason(&self) -> Result<Option<String>, EngineError> {
-        let held: Vec<String> = self
-            .locations()?
+        let locations = self.locations()?;
+        let mut held: Vec<String> = locations
             .iter()
             .filter(|l| l.phase != Phase::OldRemoved || l.reason.is_some())
             .map(|l| {
@@ -758,6 +771,15 @@ impl<'a> Engine<'a> {
                 format!("{} ({why})", l.target.label())
             })
             .collect();
+        // Locations of the old key left out of this rotation (skipped or
+        // refused in the dry-run) still hold it.
+        held.extend(
+            self.store
+                .list_for_key(&self.rot.old_fingerprint)?
+                .iter()
+                .filter(|r| !locations.iter().any(|l| l.location_id == r.id))
+                .map(|r| format!("{} (not in this rotation)", r.target.label())),
+        );
         if held.is_empty() {
             return Ok(None);
         }
@@ -986,6 +1008,28 @@ impl<'a> Engine<'a> {
                 loc.phase.as_str()
             )));
         }
+        // A failed removal may have taken effect (a lost answer). Then
+        // the old key is gone and "skipped" would be wrong.
+        if j.has(Step::RemoveOld, Some(location), Event::Start) {
+            match self.list(&loc, true).await {
+                Err(e) => {
+                    return Err(EngineError::Refused(format!(
+                        "location {location} cannot be skipped: {e}"
+                    )));
+                }
+                Ok(keys) if listed(&keys, &self.rot.old_fingerprint, loc.purpose) => {}
+                Ok(_) => {
+                    let end = End {
+                        detail: Some("settled before a skip: the old key is gone".into()),
+                        ..gone_end(&loc)
+                    };
+                    self.write_end(Step::RemoveOld, Some(location), end)?;
+                    return Err(EngineError::Refused(format!(
+                        "location {location} cannot be skipped: the old key is already gone there"
+                    )));
+                }
+            }
+        }
         let mut tx = self.store.journal_tx()?;
         let why = "skipped by the user";
         tx.step(
@@ -1042,10 +1086,7 @@ impl<'a> Engine<'a> {
                 Ok(_) => {
                     let end = End {
                         detail: Some("settled during abort: the old key is gone".into()),
-                        reason: (loc.kind == LocationKind::SshServer)
-                            .then(|| "old key removed; cert-authority lines not checked".into()),
-                        remove_row: Some(loc.location_id),
-                        ..End::done().phase(Phase::OldRemoved)
+                        ..gone_end(&loc)
                     };
                     self.write_end(Step::RemoveOld, l, end)?;
                 }
@@ -1298,6 +1339,17 @@ enum ConfigGate {
     Hold,
     /// Not wanted, done, or skipped.
     Pass,
+}
+
+/// The end entry of a removal found to have taken effect without its own
+/// answer. SSH: the `cert-authority` lines were not checked.
+fn gone_end(loc: &RotationLocation) -> End {
+    End {
+        reason: (loc.kind == LocationKind::SshServer)
+            .then(|| "old key removed; cert-authority lines not checked".into()),
+        remove_row: Some(loc.location_id),
+        ..End::done().phase(Phase::OldRemoved)
+    }
 }
 
 fn register(store: &mut Store, key: &PublicKey) {

@@ -8,6 +8,7 @@ mod hooks;
 mod invariants;
 mod keygen;
 mod lock;
+mod plan;
 mod sites;
 
 pub use config::{
@@ -24,8 +25,11 @@ pub use hooks::{Confirm, Crash, Hooks, JournalPoint, NoHooks, Point};
 pub use invariants::{KeyPresence, check_invariants};
 pub use keygen::{
     GEN_DIR_PREFIX, Generated, KeyType, KeygenError, KeygenRequest, Passphrase, Recovered,
-    generate, recover,
+    generate, recover, terminal_usable,
 };
 pub use lock::{LockError, RotationLock, lock_path};
+pub use plan::{
+    Action, DroppedLine, Outcome, Plan, PlanError, PlanLocation, PlanRequest, find_key, plan,
+};
 pub use providers::OldKeyCheck;
 pub use sites::{ProviderMap, Providers, Removed};

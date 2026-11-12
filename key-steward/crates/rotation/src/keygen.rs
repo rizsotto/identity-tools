@@ -8,15 +8,18 @@
 
 use std::ffi::OsString;
 use std::fs;
-use std::io;
+use std::io::{self, IsTerminal};
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use identity_core::{Fingerprint, PublicKey, parse_public_keys, read_key_file};
+use identity_core::{
+    Fingerprint, PrivateKeyProtection, PublicKey, parse_public_keys, private_key_protection,
+    read_key_file,
+};
 
-use crate::files::{Moved, file_name, move_group, pub_path, retired_dir, same_file};
+use crate::files::{Moved, RETIRED_DIR, file_name, move_group, pub_path, retired_dir, same_file};
 
 /// Prefix of the temp dirs `generate` makes next to `new_path`.
 pub const GEN_DIR_PREFIX: &str = ".keysteward-gen-";
@@ -112,6 +115,22 @@ pub enum KeygenError {
     Io { path: PathBuf, reason: String },
     #[error("{path} does not hold one SSH public key: {reason}")]
     BadPublicKey { path: PathBuf, reason: String },
+    /// A passphrase was asked for, and there is no terminal for
+    /// `ssh-keygen` to ask on. Without one it would make a key with no
+    /// passphrase.
+    #[error(
+        "no terminal to ask for the new key's passphrase; run this in a terminal, or pass \
+         --no-passphrase to make the new key without one"
+    )]
+    NoTerminal,
+    /// A passphrase was asked for, and the key `ssh-keygen` made has none
+    /// (or one we cannot see). The files were moved to the retired dir.
+    #[error(
+        "the new key was made without a passphrase although one was asked for; its files \
+         were moved to {0}. Run again in a terminal and set a passphrase, or pass \
+         --no-passphrase"
+    )]
+    NotProtected(PathBuf),
 }
 
 fn io_err(path: &Path) -> impl FnOnce(io::Error) -> KeygenError + '_ {
@@ -143,6 +162,41 @@ pub enum Recovered {
 /// if `new_path` or `<new_path>.pub` exists, before and after
 /// `ssh-keygen` runs.
 pub fn generate(req: &KeygenRequest) -> Result<Generated, KeygenError> {
+    generate_with(req, terminal_usable)
+}
+
+/// Whether `ssh-keygen` can ask for a passphrase: stdin is a terminal or
+/// the process has a controlling terminal.
+pub fn terminal_usable() -> bool {
+    io::stdin().is_terminal()
+        || fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/tty")
+            .is_ok()
+}
+
+/// Whether the private key file is protected as asked: a terminal
+/// passphrase must give an encrypted key. Header check only (S-1).
+fn protection_ok(req: &KeygenRequest, private: &Path) -> bool {
+    match req.passphrase {
+        Passphrase::Empty => true,
+        Passphrase::Terminal => {
+            matches!(
+                private_key_protection(private),
+                Ok(PrivateKeyProtection::Encrypted)
+            )
+        }
+    }
+}
+
+fn generate_with(
+    req: &KeygenRequest,
+    terminal: impl Fn() -> bool,
+) -> Result<Generated, KeygenError> {
+    if req.passphrase == Passphrase::Terminal && !terminal() {
+        return Err(KeygenError::NoTerminal);
+    }
     let pub_path = req.pub_path();
     for p in [&req.new_path, &pub_path] {
         if fs::symlink_metadata(p).is_ok() {
@@ -182,6 +236,11 @@ pub fn generate(req: &KeygenRequest) -> Result<Generated, KeygenError> {
         });
     }
 
+    if !protection_ok(req, &tmp_id) {
+        clean_leftovers(req, &[])?;
+        return Err(KeygenError::NotProtected(req.ssh_dir.join(RETIRED_DIR)));
+    }
+
     link_new(&tmp_id, &req.new_path)?;
     link_new(&tmp_pub, &pub_path)?;
     // Both final names exist now, so dropping the temp names removes no data.
@@ -201,11 +260,16 @@ pub fn recover(req: &KeygenRequest) -> Result<Recovered, KeygenError> {
         .into_iter()
         .filter_map(|p| fs::symlink_metadata(p).ok())
         .collect();
-    if finals.len() == 2 {
+    let complete = finals.len() == 2;
+    if complete {
         check_pair(req, &finals[0], &finals[1])?;
-        clean_leftovers(req, &finals)?;
-        return read_public(&req.new_path, &pub_path).map(|g| Recovered::Done(Box::new(g)));
+        if protection_ok(req, &req.new_path) {
+            clean_leftovers(req, &finals)?;
+            return read_public(&req.new_path, &pub_path).map(|g| Recovered::Done(Box::new(g)));
+        }
     }
+    // Half made, or made without the passphrase asked for: retire it and
+    // make it again.
     let mut moved = Vec::new();
     if !finals.is_empty() {
         let retired = retired_dir(&req.ssh_dir).map_err(io_err(&req.ssh_dir))?;
@@ -333,4 +397,79 @@ pub(crate) fn read_public(private_path: &Path, pub_path: &Path) -> Result<Genera
         fingerprint: key.fingerprint(),
         public_key: key,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use test_support::TempHome;
+
+    /// A stand-in for `ssh-keygen` run with no terminal: it makes a key
+    /// with no passphrase and exits 0 (seen with
+    /// `setsid ssh-keygen -f k </dev/null`).
+    fn silent_keygen(home: &TempHome) -> PathBuf {
+        let p = home.path().join("fake-ssh-keygen");
+        fs::write(&p, "#!/bin/sh\nexec ssh-keygen \"$@\" -N '' </dev/null\n").unwrap();
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o700)).unwrap();
+        p
+    }
+
+    fn request(home: &TempHome) -> KeygenRequest {
+        let ssh = home.ssh_dir();
+        let mut req = KeygenRequest::new(&ssh, ssh.join("id_new"));
+        req.program = silent_keygen(home);
+        req
+    }
+
+    #[test]
+    fn terminal_passphrase_without_terminal_is_refused() {
+        let home = TempHome::new(std::env::temp_dir());
+        let req = request(&home);
+        let r = generate_with(&req, || false);
+        assert!(matches!(r, Err(KeygenError::NoTerminal)), "{r:?}");
+        assert!(r.unwrap_err().to_string().contains("--no-passphrase"));
+        assert!(!req.new_path.exists());
+        let left: Vec<_> = fs::read_dir(home.ssh_dir()).unwrap().collect();
+        assert!(left.is_empty(), "ssh-keygen did not run, nothing written");
+    }
+
+    #[test]
+    fn key_without_the_asked_passphrase_is_retired() {
+        let home = TempHome::new(std::env::temp_dir());
+        let req = request(&home);
+        let r = generate_with(&req, || true);
+        assert!(matches!(r, Err(KeygenError::NotProtected(_))), "{r:?}");
+        assert!(!req.new_path.exists() && !req.pub_path().exists());
+        let retired: Vec<_> = fs::read_dir(home.ssh_dir().join(RETIRED_DIR))
+            .unwrap()
+            .collect();
+        assert_eq!(
+            retired.len(),
+            2,
+            "both files kept in retired/, never deleted"
+        );
+
+        // With --no-passphrase the same key is what was asked for.
+        let mut req = request(&home);
+        req.passphrase = Passphrase::Empty;
+        req.program = PathBuf::from("ssh-keygen");
+        assert!(generate_with(&req, || false).is_ok());
+    }
+
+    #[test]
+    fn recover_retires_an_unprotected_key_made_for_a_passphrase() {
+        let home = TempHome::new(std::env::temp_dir());
+        let mut req = request(&home);
+        req.passphrase = Passphrase::Empty;
+        req.program = PathBuf::from("ssh-keygen");
+        generate(&req).unwrap();
+        req.passphrase = Passphrase::Terminal;
+        let r = recover(&req).unwrap();
+        assert!(
+            matches!(r, Recovered::RunAgain { ref moved } if moved.len() == 2),
+            "{r:?}"
+        );
+        assert!(!req.new_path.exists());
+    }
 }
