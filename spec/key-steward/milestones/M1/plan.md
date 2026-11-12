@@ -125,8 +125,9 @@ Use the `ssh-key` crate for public keys (`.pub` files) and fingerprints only.
   `ssh -G` item.
 - `ssh -G` runs `Match exec` commands. The importer scans all files first
   and refuses (`ImportError::CommandsNeedConsent`) if any has `Match exec`
-  or `Match !exec`, or an `Include` it cannot list (glob in a directory
-  name, `~user`), unless `ImportOptions::allow_commands` is set. M1 has no
+  (any `exec` on a `Match` line, which also covers `exec="cmd"`), or an
+  `Include` it cannot list (glob in a directory name, `${VAR}`, a `%`
+  token, `~user`), unless `ImportOptions::allow_commands` is set. M1 has no
   UI, so it is an opt-in parameter, off by default; the UI must ask the
   user first (S-7). Each `ssh -G` run has a time limit (default 10 s).
 
@@ -196,72 +197,90 @@ server, and `verify` must return `Missing`. Then pick a fix. Options:
 Record the choice and why in the T12 PR. If it changes SPEC 9 or FR-3, change
 SPEC in the same PR.
 
-**Chosen in T12: the `ssh -v -E <log>` fingerprint check, with the user's
-config kept.** Only the main client's `-E` log file decides; it is a fresh
-0600 file in a private 0700 temp dir. `Verified` needs all of:
+**Chosen in T12, after two review rounds: a structural guard first, the
+log check second.** Code: `key-steward/crates/providers/src/ssh_server/`.
 
-- exit 0 (the command is `true`),
-- a line `Authenticated to ... using "publickey".`,
-- no `Authenticated using "publickey" with partial success.` (the server
-  needs more than one key: `Error(MoreThanOneKey)`, since removing one of
-  them could lock the user out),
-- the *last* `debug1: Server accepts key: <path> <TYPE> SHA256:<fp> ...`
-  line is exactly the `-i` path, our fingerprint, and only `explicit`,
-  `agent` or `token` after it. A `<TYPE>-CERT` line (ssh loads
-  `<key>-cert.pub` on its own) gives `Error(CertificateUsed)`.
+*Guard 1, structural (`config.rs`).* The check does not run with the
+user's config. It resolves the target with `ssh -G` (same consent rule
+for `Match exec` as the import, 10 s limit) and writes a temp config
+(0600, in a private 0700 dir, removed after the check):
 
-Why `-E`: a `ProxyJump` ssh also runs with `-v` and writes its own "accepts
-key" and "Authenticated to" lines for the jump host to the same stderr, and
-a server `Banner` can print any text there. Review round 1 showed both gave
-a false `Verified` when stderr was parsed. With `-E`, those stay on stderr,
-and stderr is used only for an error message when the log has none. With
-`IdentitiesOnly=yes`, an agent key is named by its identity file path, not
-by its comment (checked: a comment with a newline and a fake "accepts key"
-line did not show up in the log), and the line must end right after our
-fingerprint.
+- The target block pins `IdentityFile <dir>/id`, where `id` and `id.pub`
+  are symlinks to the key under test (never read, S-1), then
+  `IdentitiesOnly yes`, `PubkeyAuthentication yes`,
+  `PreferredAuthentications publickey`, `PasswordAuthentication no`,
+  `KbdInteractiveAuthentication no`, `GSSAPIAuthentication no`,
+  `HostbasedAuthentication no`, `BatchMode yes`, `LogVerbose none` and
+  all fixed options below. Pinned lines come first (ssh keeps the first
+  value).
+- From the `ssh -G` output it copies only connection and host key options
+  from a fixed list (`hostname`, `port`, `user`, crypto lists, known hosts
+  files, `proxycommand`, `proxyjump`, ...) plus `identityagent`. No other
+  `IdentityFile`, no `CertificateFile`, no `PKCS11Provider`. The fixed name
+  `id` means ssh finds no `<key>-cert.pub` either.
+- Each `ProxyJump` hop gets its own block, resolved with `ssh -G -l -p`, and
+  hops of hops too (at most 16). A hop keeps its own identities (it may
+  need the old key) but pins `BatchMode yes`, `StrictHostKeyChecking yes`,
+  `UpdateHostKeys no`, `AddKeysToAgent no`, `ControlPath none`,
+  `ForwardAgent no` and the other safety options. ssh passes `-F <temp
+  config>` to the jump ssh it starts, so the hop uses this block.
+- A user `ProxyCommand` gets `3>&- ... 9>&-` in front: ssh runs it as `exec
+  <command>`, and without this it inherits the `-E` log as fd 3.
 
-Results and tests (`key-steward/crates/providers/tests/ssh_server.rs`):
+So the target host can be offered only the key under test: an old key, a
+legacy PEM key without `.pub`, or a certificate cannot log in for it.
 
-- Old key from the config logs in: `Missing`
-  (`verify_missing_key_with_second_valid_key_in_config`; the test first
-  checks that plain ssh with that config really exits 0).
-- The new key is installed but needs a passphrase and no agent holds it:
-  the server accepts it, ssh cannot sign, and goes on to the old key. Only
-  "last accepted" catches this: `Error(KeyNotUsable)`
-  (`verify_encrypted_key_without_agent_is_not_verified`).
-- New key on the jump host only: `Missing`
-  (`proxyjump_success_on_jump_host_is_not_verified`, two test sshds).
-- Fake lines in the banner: `Missing` (`fake_lines_in_banner_are_not_verified`).
-- Certificate login: `Error(CertificateUsed)` (`certificate_login_is_not_verified`).
-- Two keys required: `Error(MoreThanOneKey)` (`partial_success_is_error`).
-- `-o FingerprintHash=sha256` and `-v` beat the config
-  (`verify_ignores_config_log_level_and_fingerprint_hash`).
-- `AddKeysToAgent yes` and `ForwardAgent yes` in the config change nothing
-  (`verify_does_not_add_key_to_agent`).
+*Guard 2, the log (`classify.rs`).* `ssh -v -E <private log>`. Verified only
+if: exit 0, `Authenticated to ... using "publickey".`, no partial success,
+the last "Server accepts key" line before it is exactly `<dir>/id` with our
+fingerprint and not a `-CERT` type, and no "Offering public key" or "Trying
+private key" line between that accept and the authentication. Only the main
+client writes to the `-E` file; a jump ssh (also `-v`), a server banner and
+the remote command write to stderr, which never decides the result.
 
-`-o IdentityFile=none` does not reset the config's list, so this parsing is
-what protects S-3.
+Tests (`key-steward/crates/providers/tests/ssh_server.rs`), all against real
+sshd processes: old key in the config (`Missing`), encrypted key with no
+agent (`KeyNotUsable`), mismatched `.pub` plus a PEM key in the config and
+encrypted key plus a PEM key (re-review attacks, `KeyNotUsable`), ProxyJump
+with the new key only on the jump (1 and 2 hops, `Missing`), fake banner
+lines, certificate next to the key and as `CertificateFile` (`Missing`),
+two keys required (`MoreThanOneKey`), `AddKeysToAgent`/`ForwardAgent` in
+the config and on the jump host (agent stays empty), `accept-new` on the
+jump host (refused, known_hosts untouched), `Match exec` (refused without
+consent), and a `ProxyCommand` that sees only fds 0, 1, 2.
 
-Why not the clean temp config: rebuilding a config from `ssh -G` output
-risks losing or changing `ProxyJump`, `ProxyCommand`, `Match` and token
-expansion, and `-G` runs `Match exec`. The check would then test a
-different connection than the one the user (and M2's `sh -s` edits) uses.
-The texts were checked against OpenSSH 10.5p1 (SPEC 15) and are covered by
-unit tests, so a format change fails safe (`Missing` or `Error`, never a
-false `Verified`).
+*Trade-offs.*
 
-Options the check pins so it has no side effects, since command line
-options win over the config (all accepted by OpenSSH 10.5p1):
-`StrictHostKeyChecking=yes`, `VerifyHostKeyDNS=no`, `UpdateHostKeys=no`
-(no `known_hosts` change), `AddKeysToAgent=no` (no agent change),
+- The user's agent stays usable for the target, against the review's
+  suggestion of `IdentityAgent none`: without an agent a key with a
+  passphrase can never be checked in `BatchMode`, which would make every
+  passphrase key (and M2's new keys) unverifiable. With `IdentitiesOnly
+  yes`, ssh uses only agent keys whose public half equals `<dir>/id.pub`,
+  so no other agent key is offered. If `id.pub` does not match the private
+  file and the agent holds the key of `id.pub`, that key logs in; it is
+  the key with the fingerprint under test, so the result is still true
+  for that fingerprint.
+- Options outside the copy list get ssh's default. A host that needs one
+  of them fails the check (`Error`/`Missing`), it never passes wrongly.
+  `ssh -G` prints lists unquoted, so a known hosts path with a space
+  breaks; that also fails safe.
+- With `with_config`, only that file is read (like `ssh -F`): the system
+  `/etc/ssh/ssh_config` is skipped for the target and the hops.
+- The `-E` log fd is closed for a user `ProxyCommand` (fds 3 to 9), not for
+  the jump ssh that `ProxyJump` starts; that ssh logs to stderr.
+- `-o IdentityFile=none` does not reset the config's list, which is why the
+  temp config is needed at all.
+
+Fixed options (target block and command line, all accepted by OpenSSH
+10.5p1): `BatchMode=yes`, `IdentitiesOnly=yes`, `ConnectTimeout=10`,
+`StrictHostKeyChecking=yes`, `VerifyHostKeyDNS=no`,
 `PreferredAuthentications=publickey`, `GSSAPIAuthentication=no`,
-`HostbasedAuthentication=no`, `ControlMaster=no` and `ControlPath=none` (a
-reused mux connection skips authentication), `ClearAllForwardings=yes`,
-`ForwardAgent=no` (`ClearAllForwardings` does not cover it), `ForwardX11=no`,
+`HostbasedAuthentication=no`, `UpdateHostKeys=no`, `AddKeysToAgent=no`,
+`FingerprintHash=sha256`, `ControlMaster=no`, `ControlPath=none`,
+`ClearAllForwardings=yes`, `ForwardAgent=no`, `ForwardX11=no`,
 `PermitLocalCommand=no`, `RemoteCommand=none`, `SessionType=default`,
-`ForkAfterAuthentication=no`, `ServerAliveInterval=5`,
-`ServerAliveCountMax=3`, and a 60 s limit on the whole run. The alias goes
-after `--`.
+`ForkAfterAuthentication=no`, `LogVerbose=none`, `ServerAliveInterval=5`,
+`ServerAliveCountMax=3`, plus a 60 s limit on the whole run.
 
 ### Forge providers (FR-4)
 

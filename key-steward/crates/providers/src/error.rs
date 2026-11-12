@@ -14,6 +14,12 @@ pub enum ProviderError {
     Spawn { program: String, reason: String },
     #[error(transparent)]
     Token(#[from] TokenError),
+    /// The ssh config can make `ssh -G` run commands (`Match exec`). Ask
+    /// the user, then allow it.
+    #[error("the ssh config can run commands when it is read: {}", .0.join("; "))]
+    CommandsNeedConsent(Vec<String>),
+    #[error("cannot read the ssh config: {0}")]
+    Config(String),
     /// The token is scrubbed from the text.
     #[error("HTTP request failed: {0}")]
     Http(String),

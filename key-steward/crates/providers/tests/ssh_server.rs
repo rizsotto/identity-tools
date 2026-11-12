@@ -82,7 +82,8 @@ async fn verify_ok_against_test_sshd() {
         "IdentitiesOnly=yes",
         "ConnectTimeout=10",
         "StrictHostKeyChecking=yes",
-        sshd.client_key().to_str().unwrap(),
+        " -E ",
+        " -- testsshd true",
     ] {
         assert!(e.action.contains(part), "{part} not in {}", e.action);
     }
@@ -376,8 +377,9 @@ async fn fake_lines_in_banner_are_not_verified() {
     assert_eq!(got, VerifyStatus::Missing, "{}", log.render());
 }
 
-/// `-i new` also loads `new-cert.pub`. A login with a certificate does not
-/// show that the key itself is in authorized_keys.
+/// `ssh -i new` also loads `new-cert.pub`, and a config can name a
+/// `CertificateFile`. A certificate login does not show that the key itself
+/// is in authorized_keys, so neither may count.
 #[tokio::test]
 async fn certificate_login_is_not_verified() {
     let sshd = Sshd::start_with(BASE, "TrustedUserCAKeys @DIR@/keys/ca.pub\n");
@@ -403,7 +405,21 @@ async fn certificate_login_is_not_verified() {
     let p = provider(&sshd, sshd.ssh_config(), &log);
     assert_eq!(
         verify(&p, &sshd, &new).await,
-        VerifyStatus::Error(VerifyError::CertificateUsed),
+        VerifyStatus::Missing,
+        "{}",
+        log.render()
+    );
+    let mut cert = new.clone().into_os_string();
+    cert.push("-cert.pub");
+    let cfg = config_with_identity(
+        &sshd,
+        &sshd.client_key(),
+        &format!("  CertificateFile {}\n", PathBuf::from(cert).display()),
+    );
+    let p = provider(&sshd, cfg, &log);
+    assert_eq!(
+        verify(&p, &sshd, &new).await,
+        VerifyStatus::Missing,
         "{}",
         log.render()
     );
@@ -498,4 +514,277 @@ async fn verify_does_not_add_key_to_agent() {
         log.render()
     );
     assert!(agent.list().contains("no identities"), "{}", agent.list());
+}
+
+fn keygen(dir: &Path, name: &str, args: &[&str], home: &Path) -> PathBuf {
+    let path = dir.join(name);
+    let out = Command::new("ssh-keygen")
+        .args(["-q", "-C", name])
+        .args(args)
+        .arg("-f")
+        .arg(&path)
+        .env("HOME", home)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    path
+}
+
+/// An old RSA key in PEM format with no `.pub` next to it. ssh can only
+/// use it as "Trying private key", with no "Server accepts key" line.
+fn pem_key_without_pub(sshd: &Sshd) -> PathBuf {
+    let pem = keygen(
+        &sshd.dir().join("keys"),
+        "oldpem",
+        &["-t", "rsa", "-b", "2048", "-m", "PEM", "-N", ""],
+        &sshd.client_home(),
+    );
+    sshd.authorize(&pem);
+    let mut public = pem.clone().into_os_string();
+    public.push(".pub");
+    fs::remove_file(public).unwrap();
+    pem
+}
+
+/// Re-review: the new key's `.pub` does not match its private file. The
+/// server accepts the public half, ssh cannot sign, and before the fix the
+/// PEM key from the config logged in after it.
+#[tokio::test]
+async fn mismatched_pub_with_pem_key_in_config_is_not_verified() {
+    let sshd = Sshd::start(BASE);
+    let pem = pem_key_without_pub(&sshd);
+    let new = sshd.new_key("new");
+    let stale = sshd.new_key("stale");
+    sshd.authorize(&stale);
+    let mut stale_pub = stale.into_os_string();
+    stale_pub.push(".pub");
+    let mut new_pub = new.clone().into_os_string();
+    new_pub.push(".pub");
+    fs::copy(&stale_pub, &new_pub).unwrap();
+
+    let cfg = config_with_identity(&sshd, &pem, "");
+    let log = NetLog::new();
+    let p = provider(&sshd, cfg, &log);
+    let got = verify(&p, &sshd, &new).await;
+    assert_eq!(
+        got,
+        VerifyStatus::Error(VerifyError::KeyNotUsable),
+        "{}",
+        log.render()
+    );
+}
+
+/// Re-review: an encrypted new key (no agent) is accepted but cannot sign;
+/// the PEM key from the config must not log in after it.
+#[tokio::test]
+async fn encrypted_key_with_pem_key_in_config_is_not_verified() {
+    let sshd = Sshd::start(BASE);
+    let pem = pem_key_without_pub(&sshd);
+    let enc = keygen(
+        &sshd.dir().join("keys"),
+        "newenc",
+        &["-t", "ed25519", "-N", "fake-passphrase"],
+        &sshd.client_home(),
+    );
+    sshd.authorize(&enc);
+    let cfg = config_with_identity(&sshd, &pem, "");
+    let log = NetLog::new();
+    let p = provider(&sshd, cfg, &log);
+    assert_eq!(
+        verify(&p, &sshd, &enc).await,
+        VerifyStatus::Error(VerifyError::KeyNotUsable),
+        "{}",
+        log.render()
+    );
+}
+
+/// Host block lines for a test sshd reached as `name`.
+fn host_block(name: &str, sshd: &Sshd, kh: &Path, extra: &str) -> String {
+    format!(
+        "Host {name}\n  HostName 127.0.0.1\n  Port {}\n  User {}\n  IdentitiesOnly yes\n  \
+         IdentityAgent none\n  UserKnownHostsFile {}\n  GlobalKnownHostsFile /dev/null\n  \
+         StrictHostKeyChecking yes\n  BatchMode yes\n{extra}",
+        sshd.port(),
+        user(),
+        kh.display()
+    )
+}
+
+fn known_hosts_of(servers: &[&Sshd], path: &Path) {
+    let all: String = servers
+        .iter()
+        .map(|s| fs::read_to_string(s.known_hosts()).unwrap())
+        .collect();
+    fs::write(path, all).unwrap();
+}
+
+/// Two jump hosts: `hop1` takes the new key, `hop2` needs the old key and
+/// is reached through `hop1`, the target has only the old key. The new key
+/// is not on the target, so the result must be `Missing`.
+#[tokio::test]
+async fn two_hop_proxyjump_is_not_verified() {
+    let hop1 = Sshd::start(BASE);
+    let hop2 = Sshd::start(BASE);
+    let tgt = Sshd::start(BASE);
+    let new = hop1.new_key("new");
+    hop1.authorize(&new);
+    let old = tgt.client_key();
+    hop2.authorize(&old);
+
+    let kh = tgt.dir().join("known_hosts_all");
+    known_hosts_of(&[&hop1, &hop2, &tgt], &kh);
+    let cfg = tgt.dir().join("ssh_config_hops");
+    fs::write(
+        &cfg,
+        host_block(
+            "hop1",
+            &hop1,
+            &kh,
+            &format!("  IdentityFile {}\n", new.display()),
+        ) + &host_block(
+            "hop2",
+            &hop2,
+            &kh,
+            &format!("  IdentityFile {}\n", old.display()),
+        ) + &host_block(
+            "far",
+            &tgt,
+            &kh,
+            &format!("  IdentityFile {}\n  ProxyJump hop1,hop2\n", old.display()),
+        ),
+    )
+    .unwrap();
+    let log = NetLog::new();
+    let p = SshServer::new(log.clone())
+        .with_config(&cfg)
+        .with_home(tgt.client_home())
+        .without_agent();
+    let far = Target::Ssh(SshHost::new("far"));
+    let got = p.verify(&far, &key_ref(&new)).await.unwrap();
+    assert_eq!(got, VerifyStatus::Missing, "{}", log.render());
+
+    tgt.authorize(&new);
+    let got = p.verify(&far, &key_ref(&new)).await.unwrap();
+    assert_eq!(got, VerifyStatus::Verified, "{}", log.render());
+}
+
+/// The jump ssh gets the safety options too: its `AddKeysToAgent yes` must
+/// not add a key, and its `StrictHostKeyChecking accept-new` must not write
+/// to known_hosts.
+#[tokio::test]
+async fn jump_host_gets_safe_options() {
+    let jump = Sshd::start(BASE);
+    let tgt = Sshd::start(BASE);
+    let agent = Agent::start(jump.dir());
+    let jkey = jump.client_key();
+    let kh = tgt.dir().join("known_hosts_all");
+    known_hosts_of(&[&jump, &tgt], &kh);
+    let jump_extra = format!(
+        "  IdentityFile {}\n  AddKeysToAgent yes\n  ForwardAgent yes\n",
+        jkey.display()
+    );
+    let cfg = tgt.dir().join("ssh_config_jump_opts");
+    fs::write(
+        &cfg,
+        host_block("jmp", &jump, &kh, &jump_extra).replace(
+            "IdentityAgent none",
+            &format!("IdentityAgent {}", agent.sock.display()),
+        ) + &host_block("far", &tgt, &kh, "  ProxyJump jmp\n"),
+    )
+    .unwrap();
+    let log = NetLog::new();
+    let p = SshServer::new(log.clone())
+        .with_config(&cfg)
+        .with_home(tgt.client_home());
+    let far = Target::Ssh(SshHost::new("far"));
+    let got = p.verify(&far, &key_ref(&tgt.client_key())).await.unwrap();
+    assert_eq!(got, VerifyStatus::Verified, "{}", log.render());
+    assert!(agent.list().contains("no identities"), "{}", agent.list());
+
+    // Unknown jump host key with accept-new: refused, nothing written.
+    let empty = tgt.dir().join("known_hosts_jump_empty");
+    fs::write(&empty, "").unwrap();
+    let cfg2 = tgt.dir().join("ssh_config_accept_new");
+    fs::write(
+        &cfg2,
+        host_block("jmp", &jump, &empty, &jump_extra).replace(
+            "StrictHostKeyChecking yes",
+            "StrictHostKeyChecking accept-new",
+        ) + &host_block("far", &tgt, &kh, "  ProxyJump jmp\n"),
+    )
+    .unwrap();
+    let p = SshServer::new(log.clone())
+        .with_config(&cfg2)
+        .with_home(tgt.client_home())
+        .without_agent();
+    let got = p.verify(&far, &key_ref(&tgt.client_key())).await.unwrap();
+    assert!(
+        matches!(got, VerifyStatus::Error(_)),
+        "{got:?}\n{}",
+        log.render()
+    );
+    assert_eq!(fs::read_to_string(&empty).unwrap(), "");
+}
+
+#[tokio::test]
+async fn match_exec_needs_consent() {
+    let sshd = Sshd::start(BASE);
+    let marker = sshd.dir().join("EXEC_RAN");
+    let cfg = sshd.dir().join("ssh_config_exec");
+    fs::write(
+        &cfg,
+        fs::read_to_string(sshd.ssh_config()).unwrap()
+            + &format!("Match exec=\"touch {}\"\n  User nobody\n", marker.display()),
+    )
+    .unwrap();
+    let log = NetLog::new();
+    let p = provider(&sshd, cfg.clone(), &log);
+    let err = p
+        .verify(&target(&sshd), &key_ref(&sshd.client_key()))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, ProviderError::CommandsNeedConsent(_)),
+        "{err}"
+    );
+    assert!(!marker.exists());
+
+    let p = provider(&sshd, cfg, &log).with_allow_commands(true);
+    let _ = p
+        .verify(&target(&sshd), &key_ref(&sshd.client_key()))
+        .await
+        .unwrap();
+    assert!(marker.exists());
+}
+
+/// A user ProxyCommand must not get the `-E` log file as an open fd.
+#[tokio::test]
+async fn proxy_command_does_not_inherit_the_log() {
+    let sshd = Sshd::start(BASE);
+    let fds = sshd.dir().join("proxy_fds");
+    let cfg = config_with_identity(
+        &sshd,
+        &sshd.new_key("unused"),
+        &format!(
+            "  ProxyCommand sh -c 'ls /proc/$$/fd > {}; exec /usr/sbin/sshd -i -f {}'\n",
+            fds.display(),
+            sshd.dir().join("sshd_config").display()
+        ),
+    );
+    let log = NetLog::new();
+    let p = provider(&sshd, cfg, &log);
+    assert_eq!(
+        verify(&p, &sshd, &sshd.client_key()).await,
+        VerifyStatus::Verified,
+        "{}",
+        log.render()
+    );
+    let listed = fs::read_to_string(&fds).unwrap();
+    let open: Vec<&str> = listed.split_whitespace().collect();
+    assert_eq!(open, ["0", "1", "2"], "{listed}");
 }
