@@ -1,0 +1,2 @@
+command="/usr/bin/rsync --server -logDtpre.iLsfxC . /srv/backup",no-agent-forwarding	{OLD}   backup key  
+command="/usr/bin/rsync --server -logDtpre.iLsfxC . /srv/backup",no-agent-forwarding {NEW} new@example.org

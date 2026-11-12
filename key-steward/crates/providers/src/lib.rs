@@ -24,4 +24,5 @@ pub use provider::{
 };
 pub use secret_service::SecretServiceTokens;
 pub use ssh_server::SshServer;
+pub use ssh_server::{authorized_keys, remote};
 pub use token::{InMemoryTokenSource, Token, TokenError, TokenKey, TokenSource};

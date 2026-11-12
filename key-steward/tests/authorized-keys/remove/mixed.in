@@ -1,0 +1,11 @@
+# header
+from="10.0.0.0/8" {OLD} lan
+
+command="echo \"hi there\"",no-pty {OTHER} quoted
+cert-authority,principals="a,b" {OLD} ca stays
+ssh-foo AAAA unknown type
+   	
+# {OLD} commented stays
+restrict {OLD} again
+restrict {NEW} new
+#end

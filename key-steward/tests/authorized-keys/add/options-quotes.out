@@ -1,0 +1,2 @@
+command="echo \"hi there\"",no-pty {OLD} old@example.org
+command="echo \"hi there\"",no-pty {NEW} new@example.org

@@ -14,8 +14,10 @@
 //! `ssh -G` runs `Match exec` commands from the user's config, so a config
 //! with them is refused unless the user agreed (S-7), as in the import.
 
+pub mod authorized_keys;
 mod classify;
 mod config;
+pub mod remote;
 
 use std::collections::{HashSet, VecDeque};
 use std::ffi::OsString;
