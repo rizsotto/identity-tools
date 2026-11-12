@@ -4,6 +4,9 @@ FROM registry.fedoraproject.org/fedora:45
 # (see spec/milestones/*/plan.md).
 RUN dnf -y install gcc git sudo && dnf clean all
 
+# Send Secret M1: fixture script and interop tests (gpg, age, ssh-keygen).
+RUN dnf -y install gnupg2 age openssh-clients && dnf clean all
+
 ARG USERNAME=dev
 ARG USER_UID=1000
 RUN useradd -m -u ${USER_UID} -s /bin/bash ${USERNAME} \
