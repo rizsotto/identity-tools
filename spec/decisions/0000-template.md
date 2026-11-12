@@ -1,6 +1,6 @@
 # NNNN: Title
 
-- Status: research | proposed | accepted | rejected | superseded by NNNN
+- Status: research | proposed | deferred | accepted | rejected | superseded by NNNN
 - Blocks: (milestone / task IDs)
 - SPEC refs: (section 16 item, FR/NFR IDs)
 

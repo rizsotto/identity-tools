@@ -7,8 +7,8 @@ See "Blocked on a decision" in `../workflow.md`.
 
 | No. | Title | Status | Blocks |
 |---|---|---|---|
-| [0001](0001-identity-core-sharing.md) | How to share identity-core with Key Steward | proposed | Key Steward use of the crate |
-| [0002](0002-mixed-recipients.md) | Mixed OpenPGP and age recipients (SPEC 16 q2) | proposed | M1 T09 final behavior, M3 |
+| [0001](0001-identity-core-sharing.md) | How to share identity-core with Key Steward | deferred | when the second app needs the crate (M1 builds it in this repo) |
+| [0002](0002-mixed-recipients.md) | Mixed OpenPGP and age recipients (SPEC 16 q2) | deferred | M3 (M1 refuses a mix of formats) |
 
 ## Pending (SPEC section 16, no record yet)
 

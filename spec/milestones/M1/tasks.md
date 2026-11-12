@@ -15,7 +15,7 @@ needs can run in parallel.
 | T07 | `crypto`: `detect_format` and error types. | none | Unit tests on the first bytes of each fixture ciphertext and on junk. |
 | T08a | `crypto`: age backend, encrypt and decrypt, x25519 and SSH Ed25519/RSA, armor, multiple recipients, streaming. | T05, T07 | Round trip per key type; two recipients each decrypt alone; armored and binary. |
 | T08b | `crypto`: OpenPGP backend, sign and encrypt, decrypt and verify, signer info. | T06, T07 | Round trip in temp `GNUPGHOME`; signer fingerprint reported; tampered input fails. |
-| T09 | `crypto`: facade `encrypt`/`decrypt`, format choice, mixed recipients error (interim, decision 0002), encrypt-to-self incl. age self identity at mode 0600. | T08a, T08b | `mixed_recipients_rejected`, `self_identity_created_0600`, `to_self_can_decrypt` per format. |
+| T09 | `crypto`: facade `encrypt`/`decrypt`, format choice, mixed formats refused with a clear error (decision 0002 deferred to M3), encrypt-to-self incl. age self identity at mode 0600. | T08a, T08b | `mixed_recipients_rejected`, `self_identity_created_0600`, `to_self_can_decrypt` per format. |
 | T10 | `cli`: `encrypt` and `decrypt` subcommands as in plan.md. | T09 | `assert_cmd` tests: usage errors exit 2; skipped key note on stderr; signer on stderr. |
 | T11 | Interop tests: ours to `gpg`/`age` and back, every key type, armored and binary, multiple recipients. | T04, T10 | `interop_*` tests in `crates/cli/tests/interop.rs`. |
 | T12 | Security tests: no plaintext on disk (scan temp `HOME` for the marker), no plaintext in logs or errors, oversized key rejected via CLI. | T11 | `no_plaintext_on_disk`, `no_plaintext_in_stderr`, `cli_rejects_huge_key`. |
@@ -27,5 +27,5 @@ needs can run in parallel.
 - Start at once: T01, T02, T03, T07.
 - After T03: T04. After T01+T03: T05. After T02+T03: T06.
 - T08a and T08b run in parallel.
-- T09 is the join point. Its mixed-recipient part follows decision 0002 once
-  accepted. The interim error is enough to continue.
+- T09 is the join point. A mix of formats is refused with a clear error.
+  Decision 0002 (deferred) sets the final behavior in M3.

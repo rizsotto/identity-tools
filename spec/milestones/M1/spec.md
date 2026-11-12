@@ -34,9 +34,9 @@ interoperates with `gpg` and Go `age`. No network, no UI, no TOFU store yet.
   Refs: UC-7, FR-7
 - [ ] Decrypt detects the format (OpenPGP armor, age armor, binary).
   Refs: FR-7
-- [ ] Mixed OpenPGP and age recipients: behavior per decision
-  [0002](../../decisions/0002-mixed-recipients.md). Until accepted, a clear
-  error.
+- [ ] Mixed OpenPGP and age recipients are refused with a clear error. The
+  final behavior is decision [0002](../../decisions/0002-mixed-recipients.md),
+  deferred to M3.
 - [ ] No plaintext in temp files. Files stream from source to output. Plaintext
   buffers are zeroed. Refs: [S-4](../../SPEC.md#10-security-rules-must),
   [S-5](../../SPEC.md#10-security-rules-must), FR-8, NFR-3

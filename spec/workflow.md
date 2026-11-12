@@ -21,8 +21,12 @@ to differ, change the spec first, in the same pull request.
    check it (docs, source, a small spike). Tick it in SPEC.md with a link.
 3. **Plan.** Write `plan.md`. Then `tasks.md`: small tasks, with dependencies
    marked, so independent tasks can run in parallel.
-4. **Gate: decisions.** If a task needs an answer that is not in SPEC.md or
-   `spec/decisions/`, it is blocked. See "Blocked on a decision" below.
+4. **Gate: decisions.** Scope first, decisions second. A question blocks a
+   task only if this milestone's acceptance criteria need the answer. If a
+   simple, safe default meets the criteria (for example: refuse the case with
+   a clear error), use it and defer the question. Deferred questions go in
+   `spec/decisions/README.md` with the milestone they block; do not research
+   them yet. Only a real blocker goes to "Blocked on a decision" below.
 5. **Implement.** One task per branch (`mN/tNN-short-name`). Test first.
    `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings`,
    `cargo test --workspace` must pass.

@@ -1,8 +1,8 @@
 # 0002: Mixed OpenPGP and age recipients
 
-- Status: proposed
-- Blocks: M1 T09 final behavior (the interim behavior below does not block
-  other tasks). Also M3 Send flow.
+- Status: deferred (research done, decide before M3)
+- Blocks: M3 Send flow. M1 only needs one format per message: a mix of
+  formats is refused with a clear error. That meets the M1 criteria.
 - SPEC refs: section 16 question 2, section 7 (crypto facade), FR-3, UC-8
 
 ## Question
