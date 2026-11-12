@@ -2,31 +2,28 @@
 
 First draft. Status: not reviewed. Acceptance criteria are in `spec.md`.
 
-## Proposed SPEC change: test sshd without Docker
+## Test sshd (decision 0002, accepted)
 
-Status: proposed. Needs a human OK. SPEC.md is not changed yet.
+Decided in [0002](../../decisions/0002-ssh-test-servers.md) on 2026-11-12:
+option A. SPEC 11, 13 and 14 are updated.
 
-SPEC 11 and 13 say integration tests start sshd in Docker containers
-(`tests/docker/`). Our devcontainer runs under podman. Nested containers inside
-it are awkward (extra privileges, a socket mount, or podman-in-podman).
-
-Proposal:
-
-- Integration tests start `/usr/sbin/sshd` as a plain process inside the
-  devcontainer, as the test user, on a random free port.
-- Each test run makes a temp dir with its own `sshd_config`, a fresh `HostKey`,
-  an `AuthorizedKeysFile` with an absolute path, `PidFile none`, `UsePAM no`,
-  and `ListenAddress 127.0.0.1`. Start with `sshd -D -e -f <config>`.
-- A non-root sshd can only log in as the user who runs it. That is fine for M1
-  and M2: the test user is the dev user.
-- Keep `tests/docker/` only if CI needs it later. Today CI runs inside the same
-  devcontainer image, so the same harness works there.
-- If accepted, update SPEC 11 and 13 in the same PR as task T10.
-
-Risk: some sshd behaviour differs when not root (no privilege separation
-user switch). We do not test that. M2 crash tests only need `authorized_keys`
-edits for one user, so this should be enough. Two servers for M2 means two
-sshd processes.
+- Integration tests start `/usr/sbin/sshd` as a plain process, as the test
+  user, on `127.0.0.1` and a free port. No root, no nested containers. The
+  setup is in 0002, "Steps (T10)".
+- Every test runs in CI, in the same devcontainer image. No `#[ignore]`, no
+  skip if sshd is missing. T10 adds `openssh-server` and `openssh-clients` to
+  the Containerfile.
+- Temp dirs go under `CARGO_TARGET_TMPDIR` (`<workspace>/target/tmp`), not
+  `/tmp`, so `StrictModes yes` works.
+- Child processes get a temp `HOME`. Since OpenSSH reads `~` from passwd,
+  every `ssh` also gets `-F` and `UserKnownHostsFile`.
+- The uid in CI differs from local (`devcontainers/ci` changes the `dev` uid
+  to match the runner). Use the current user and uid at run time. The real-home
+  guard uses the passwd home.
+- T10 is done only when its harness tests pass in GitHub CI. The open CI
+  checks are listed in 0002, "Not verified, and the check for each".
+- A non-root sshd can only log in as the user who runs it. That is fine for
+  M1 and M2. Two servers for M2 means two sshd processes.
 
 ## Crates touched
 
@@ -37,10 +34,9 @@ sshd processes.
 | `providers` | `Provider` trait, `ssh_server` verify, `github`, `gitlab`, `forgejo` list and verify, HTTP client with network log | GTK |
 | `rotation`, `reminders`, `app` | Nothing. They stay stubs. | |
 
-Proposed small addition to SPEC 11: a `crates/test-support` crate
-(`publish = false`, dev-dependency only) for the sshd harness, temp `HOME` and
-`GNUPGHOME` helpers and mock forge setup. Needs a human OK, see T10. Fallback:
-put the helpers in each crate's `tests/common/` module.
+`key-steward/crates/test-support` (`publish = false`, dev-dependency only)
+holds the sshd harness, temp `HOME` and `GNUPGHOME` helpers and mock forge
+setup. Accepted in decision 0002, now in SPEC 11.
 
 ## Key model (identity-core)
 
@@ -138,10 +134,35 @@ pub trait Provider: Send + Sync {
 - OpenSSH finds `~` from the passwd entry, not from `$HOME`. So a temp `HOME`
   does not isolate it. The command builder must accept an optional `-F
   <config>` and `-o UserKnownHostsFile=<file>`. Tests always set both.
-- Map results: exit 0 is `Verified`. "Permission denied (publickey)" is
-  `Missing`. "Host key verification failed" is `Error(UnknownHostKey)` with
+- Map results: exit 0 alone is not `Verified` (see the open item below).
+  "Permission denied (publickey)" is `Missing`. "Host key verification failed" is `Error(UnknownHostKey)` with
   advice to connect once in a terminal. Anything else is `Error`. Match on
   stderr text is fragile; keep the patterns in one place with tests.
+
+#### Open item for T12: `-i` does not replace the config's keys
+
+Found in the 0002 experiment. `-i <key>` (or `-o IdentityFile=<key>`) adds to
+the `IdentityFile` list from `~/.ssh/config`. It does not replace it, and
+`IdentityFile=none` does not clear it, even with `IdentitiesOnly yes`. So
+`verify` of the new key can exit 0 because the old key from the config logged
+in. Then S-3 would remove the old key and lock the user out.
+
+No fix is chosen yet. T12 starts with a failing test: the test ssh config
+holds a second valid key (the "old" key), the key under test is not on the
+server, and `verify` must return `Missing`. Then pick a fix. Options:
+
+- Run `ssh -v` and parse `Server accepts key: <path> <type> SHA256:...
+  explicit`. `Verified` only if that fingerprint is the key under test.
+  Suggested in 0002. T12 must confirm the text is stable in OpenSSH 10.x.
+- Do not pass the user's config to the check. Build a temp `-F` config from
+  `ssh -G` output (hostname, user, port, host key settings) without any
+  `IdentityFile`. Unverified: `ProxyJump`, `Match` and `Include` may be lost
+  or need care.
+- Both: the clean config as the main path, and the `-v` fingerprint as a
+  second check.
+
+Record the choice and why in the T12 PR. If it changes SPEC 9 or FR-3, change
+SPEC in the same PR.
 
 ### Forge providers (FR-4)
 
@@ -207,6 +228,9 @@ The devcontainer starts minimal (Rust only). Add these Fedora packages to
 `.devcontainer/Containerfile` in the task that first needs them:
 
 `gpgme-devel libgpg-error-devel gnupg2 openssh-clients openssh-server sqlite-devel`
+
+`openssh-clients` and `openssh-server` come in with T10. The sshd tests need
+them in CI (decision 0002).
 
 Also add `gtk4-devel libadwaita-devel` and `xvfb-run` for GTK tests when the
 first GTK crate gets real code.

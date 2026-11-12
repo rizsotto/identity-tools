@@ -4,7 +4,8 @@ Each task is one branch (`m1/tNN-short-name`) and one PR, under about 400
 lines. Write the named test first. "Needs" lists tasks that must be merged
 first. Tasks with no open "Needs" can run in parallel.
 
-Parallel start: T01a, T01b, T02, T10 have no dependencies.
+Parallel start: T01a, T01b, T02, T10 have no dependencies. Start T10 early:
+every SSH task waits for its harness to pass in GitHub CI.
 
 | ID | Task | Crate | Needs | Test |
 |---|---|---|---|---|
@@ -18,9 +19,9 @@ Parallel start: T01a, T01b, T02, T10 have no dependencies.
 | T07 | Location model and SQLite store with migrations. No token fields. | inventory | T02 | `migrations_apply_on_empty_db`, `location_roundtrip`, `schema_has_no_token_column` |
 | T08 | `KeyList`: join scanned SSH and OpenPGP keys with location counts and warnings (FR-1 rows). | inventory | T04, T05, T06, T07 | `key_list_has_all_fr1_fields` |
 | T09 | SSH config import: aliases from `Host` (with `Include`, skip wildcards), resolve with `ssh -G -F`. Store as `unverified`. | inventory | T07 | `imports_hosts_from_config_fixture` |
-| T10 | Test support: sshd harness (random port, temp `HostKey`, temp `known_hosts`), temp `HOME`/`GNUPGHOME` helpers, real-home guard. Needs human OK on the proposed SPEC change in `plan.md` and on `crates/test-support`. Update SPEC 11 and 13 in the same PR. | test-support | none (human OK) | `harness_sshd_accepts_test_key`, `guard_rejects_real_home` |
+| T10 | Test support, as in decision 0002 "Steps (T10)": sshd harness run as the test user (random port, temp `HostKey`, temp `known_hosts`, temp dirs under `CARGO_TARGET_TMPDIR`), temp `HOME`/`GNUPGHOME` helpers, real-home guard. Add `openssh-server openssh-clients` to the Containerfile. Delete `key-steward/tests/docker/`. **Done only when the harness tests pass in the GitHub CI run of this PR**, not only locally; link the run and tick the CI checks in 0002. No `#[ignore]`, no skip. | test-support | none | `harness_sshd_accepts_test_key`, `guard_rejects_real_home`, the other harness tests in 0002 step 8 |
 | T11 | `Provider` trait, `Target`, `VerifyStatus`, `NetLog`, `TokenSource` (in-memory impl). `add`/`remove` return `NotYet`. | providers | T07 | `netlog_records_entry`, `in_memory_token_source` |
-| T12 | `ssh_server` verify (FR-3, S-5): arg builder, stderr mapping, NetLog. Note: `-i` adds to the IdentityFile list from `~/.ssh/config`, so verify can pass with the old key. See decision 0002; needs a fix and a test that fails first. | providers | T10, T11 | `verify_ok_against_test_sshd`, `verify_missing_key`, `unknown_host_key_is_error` |
+| T12 | `ssh_server` verify (FR-3, S-5): arg builder, stderr mapping, NetLog. Open item: `-i` adds to the IdentityFile list from `~/.ssh/config`, so verify can pass with the old key. Write the failing test first, then pick a fix from the options in `plan.md`, "Open item for T12". | providers | T10 (harness green in CI), T11 | `verify_ok_against_test_sshd`, `verify_missing_key`, `verify_missing_key_with_second_valid_key_in_config`, `unknown_host_key_is_error` |
 | T13 | Shared HTTP client: base URL, auth header, pagination helper, NetLog, token scrubbing in errors. | providers | T11 | `token_never_in_error_or_log` |
 | T14 | GitHub `list` and `verify` (auth, signing, GPG keys). | providers | T01b, T13 | `github_list_against_mock`, `github_verify_by_fingerprint` |
 | T15 | GitLab `list` and `verify`, self-hosted base URL. | providers | T01b, T13 | `gitlab_list_against_mock`, `gitlab_verify_by_fingerprint` |
@@ -34,4 +35,5 @@ Parallel start: T01a, T01b, T02, T10 have no dependencies.
 - Keys: T02 then T03, T06 (parallel), then T04. T05 after T01a.
 - Store: T07 then T09, T11.
 - Network: T11 then T13, then T14, T15, T16 in parallel. T18 any time after T11.
-- SSH: T10 then T12.
+- SSH: T10 (green in GitHub CI) then T12, then T17. M2 rotation tests also
+  need T10.

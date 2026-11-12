@@ -269,17 +269,18 @@ Respect a non-default `AuthorizedKeysFile` only if the user configures it (v1: s
 ```
 key-steward/
 ├── Cargo.toml (workspace)
-├── crates/ identity-core/ inventory/ providers/ rotation/ reminders/ app/
+├── crates/ inventory/ providers/ rotation/ reminders/ app/ test-support/
 ├── remote-scripts/ authorized_keys_apply.sh
 ├── data/ (desktop, metainfo, icons, gschema)
 ├── po/
 ├── build-aux/flatpak/
 ├── tests/
-│   ├── docker/          # sshd container(s) for integration tests
 │   └── mock-forges/     # wiremock-based fake GitHub/GitLab/Forgejo APIs
 ├── spec/                 # SPEC.md, decisions, milestones (for developers)
 └── docs/                 # user documentation
 ```
+
+`key-steward/crates/test-support` holds test helpers: the test sshd harness, temp `HOME` and `GNUPGHOME`, the real-home guard and mock forge setup. It has `publish = false`. Other crates may use it only under `[dev-dependencies]`. See `spec/key-steward/decisions/0002-ssh-test-servers.md`.
 
 ---
 
@@ -287,11 +288,11 @@ key-steward/
 
 ### M1: Read-only inventory
 - Lists SSH keys in `~/.ssh` and OpenPGP keys from GnuPG with all FR-1 fields and warnings.
-- Imports hosts from `~/.ssh/config`. Checks servers (FR-3) against the Docker sshd in tests.
+- Imports hosts from `~/.ssh/config`. Checks servers (FR-3) against the test sshd (section 13) in tests.
 - GitHub, GitLab and Forgejo providers `list` against the mock forges.
 
 ### M2: SSH rotation
-- The full state machine against 2 Docker sshd servers + the mock forges.
+- The full state machine against 2 test sshd servers (section 13) + the mock forges.
 - Kill the app at each step: on restart it resumes correctly and never removes the old key early.
 - `authorized_keys` options and comments are preserved (fixture tests).
 
@@ -309,7 +310,8 @@ key-steward/
 ## 13. Test plan
 
 - Unit tests: `authorized_keys` parser/writer (options, comments, blank lines, CRLF), fingerprint calculation, WKD hash, state machine transitions.
-- Integration: `tests/docker/` starts `linuxserver/openssh-server` (or a minimal Alpine sshd) with a test user. Run real `ssh` against it.
+- Integration: `key-steward/crates/test-support` starts the system `/usr/sbin/sshd` as a normal process, as the user who runs the tests. No root, no containers. One process per server, on `127.0.0.1` and a free port. Each server has its own temp dir under `CARGO_TARGET_TMPDIR` (`<workspace>/target/tmp`, not `/tmp`, so `StrictModes yes` works) with its own `sshd_config`, a fresh host key, `UsePAM no`, `StrictModes yes`, `PerSourcePenalties no`, an absolute `AuthorizedKeysFile` and `SetEnv HOME=<temp server home>`. Run real `ssh` against it with `-F <temp ssh_config>`, `UserKnownHostsFile <temp>`, `GlobalKnownHostsFile /dev/null`, `IdentitiesOnly yes`, `IdentityAgent none` and `BatchMode yes`, with `SSH_AUTH_SOCK` removed and `HOME` set to a temp dir. Not covered: logging in as another user, root-only sshd code paths, and a distro's own `sshd_config`. See `spec/key-steward/decisions/0002-ssh-test-servers.md`.
+- These tests run in CI in the same devcontainer image (`openssh-server` and `openssh-clients` are in `.devcontainer/Containerfile`). They are never skipped or marked `#[ignore]`. The harness uses the current user and uid at run time, since CI changes the uid.
 - Mock forges with `wiremock`. Record real API responses once and keep them as fixtures (no tokens in fixtures).
 - Crash tests: inject a failure after each journal step and assert the invariants (S-3).
 - GnuPG tests: use a temporary `GNUPGHOME` with generated test keys. Never touch the developer's real keyring.
@@ -319,7 +321,7 @@ key-steward/
 
 ## 14. Instructions for agents
 
-- Never run tests against real servers, real forge accounts or the real `~/.ssh` / `~/.gnupg`. Use Docker, mocks and a temporary `GNUPGHOME` / `HOME`.
+- Never run tests against real servers, real forge accounts or the real `~/.ssh` / `~/.gnupg`. Use the test sshd from `key-steward/crates/test-support`, mocks and a temporary `GNUPGHOME` / `HOME`.
 - Keep `identity-core`, `inventory`, `providers` and `rotation` free of GTK.
 - Every provider must implement the full trait and have mock tests before the UI uses it.
 - Write the journal entry **before** doing a remote action and after it finishes.
@@ -349,7 +351,7 @@ key-steward/
 4. Default new subkey algorithm: Ed25519/Cv25519 (proposed), or offer post-quantum options when GnuPG supports them?
 5. Coordinate with the GNOME maintainers about the future of Seahorse's key features?
 6. How to share `identity-core` with Send Secret. Decided: one shared repository. See `spec/decisions/0001-identity-core-sharing.md`.
-7. Proposed: run integration test sshd as a plain process in the devcontainer instead of Docker containers (section 11 and 13). See `spec/key-steward/milestones/M1/plan.md`, "Proposed SPEC change".
+7. How integration tests get SSH servers. Decided: the system sshd as a plain process, as the test user, and every test runs in CI. See `spec/key-steward/decisions/0002-ssh-test-servers.md`.
 
 Status of each question: `spec/key-steward/decisions/README.md`.
 

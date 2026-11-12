@@ -57,6 +57,10 @@ Tick each box with evidence: a test name or command output.
       -o ConnectTimeout=10 <host> true` against the test sshd. Exit 0 gives
       `verified`. A key that is not installed gives `missing`.
       ([FR-3](../../SPEC.md#functional))
+- [ ] A key that is not installed gives `missing` even when the ssh config
+      holds another key that logs in. Exit 0 alone is not enough. (Decision
+      [0002](../../decisions/0002-ssh-test-servers.md), side finding; fix is
+      open, see `plan.md`.) ([S-3](../../SPEC.md#10-security-rules-must))
 - [ ] An unknown host key gives `error` with a clear reason. It is never
       accepted. ([S-5](../../SPEC.md#10-security-rules-must))
 - [ ] GitHub provider `list` returns SSH auth keys, SSH signing keys and GPG
@@ -80,3 +84,5 @@ Tick each box with evidence: a test name or command output.
       forge. ([SPEC 14](../../SPEC.md#14-instructions-for-agents))
 - [ ] `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings`
       and `cargo test --workspace` pass in the devcontainer and in CI.
+- [ ] The sshd tests run in GitHub CI. No test is `#[ignore]` or skipped.
+      ([SPEC 13](../../SPEC.md#13-test-plan))

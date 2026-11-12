@@ -8,7 +8,7 @@ process is in `../../workflow.md`, "Blocked on a decision".
 
 | ID | Title | Status | Blocks |
 |---|---|---|---|
-| [0002](0002-ssh-test-servers.md) | How integration tests get real SSH servers | proposed | M1 T10, M2 |
+| [0002](0002-ssh-test-servers.md) | How integration tests get real SSH servers | accepted 2026-11-12: option A, sshd as the test user, all tests in CI | nothing (T10 implements it) |
 
 ## Pending (no record yet)
 

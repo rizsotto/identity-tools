@@ -1,15 +1,15 @@
 # 0002: How integration tests get real SSH servers
 
-- Status: proposed
-- Blocks: M1 T10, M2 (rotation tests against 2 servers, kill-and-resume tests)
+- Status: accepted (option A, 2026-11-12)
+- Blocks: nothing now. Blocked M1 T10 and M2 (rotation tests against 2 servers, kill-and-resume tests) until accepted.
 - SPEC refs: section 16 item 7, sections 11, 12, 13, 14, FR-3, S-3, S-5
 
 ## Question
 
 How should integration tests get real SSH servers? SPEC 11 and 13 say Docker
-sshd containers in `tests/docker/`. The M1 plan proposes running the system
+sshd containers in `tests/docker/` (now `key-steward/tests/docker/`). The M1 plan proposes running the system
 `sshd` as a plain unprivileged process instead. Where should the test helpers
-live: a new `crates/test-support` crate, or a `tests/common/` module in each
+live: a new `key-steward/crates/test-support` crate, or a `tests/common/` module in each
 crate?
 
 ## Context
@@ -22,10 +22,15 @@ crate?
 - Tests must never touch the real `~/.ssh` (SPEC 14). This applies on both
   sides: the client config and the server side `~/.ssh` that the remote script
   edits.
-- The devcontainer is Fedora 45, run by rootless podman with
-  `--userns=keep-id` and `label=disable`. It already installs `openssh-server`
-  and `openssh-clients`. The `dev` user has passwordless sudo.
-- CI runs the same image through `devcontainers/ci` on `ubuntu-latest`.
+- The devcontainer is Fedora 45, run locally by rootless podman with
+  `--userns=keep-id` and `label=disable`. The image starts minimal (Rust
+  only). `openssh-server` and `openssh-clients` are not installed yet; T10
+  adds them. The `dev` user has passwordless sudo.
+- CI builds the same `.devcontainer/Containerfile` through `devcontainers/ci`
+  on `ubuntu-latest`, with Docker, using `.github/ci/devcontainer.json`. That
+  file has no `runArgs`, so `--userns=keep-id` is not passed in CI.
+- Root `CLAUDE.md`: every test runs in CI. No test is skipped or ignored
+  because it needs a server or a tool.
 - Fedora 45 ships OpenSSH 10.5p1 (checked: `openssh-server-10.5p1-1.fc45`).
 
 ### Experiment (done 2026-11-12)
@@ -155,7 +160,7 @@ Cons:
 
 ### The `test-support` crate question
 
-Option 1: `crates/test-support`, `publish = false`, used only as a
+Option 1: `key-steward/crates/test-support`, `publish = false`, used only as a
 dev-dependency. Option 2: a `tests/common/mod.rs` in each crate that needs
 it.
 
@@ -165,7 +170,7 @@ it.
 - `tests/common/` is per crate. Sharing it means copies or `#[path]` tricks,
   and it cannot be used from unit tests in `src/`.
 - A helper crate is the normal Rust pattern for this. Cargo itself has
-  `crates/cargo-test-support`. The workspace already includes `crates/*`, so
+  `crates/cargo-test-support`. The workspace already includes `key-steward/crates/*`, so
   no `Cargo.toml` change at the root.
 - Risk: someone adds it as a normal dependency. Rule: only under
   `[dev-dependencies]`. A reviewer checks it.
@@ -178,7 +183,7 @@ Choice: Option 1.
 ## Preferred option and why
 
 **A: sshd as a plain unprivileged process, with helpers in
-`crates/test-support`.**
+`key-steward/crates/test-support`.**
 
 Why: it runs the real OpenSSH server and client that users run, it works the
 same in the devcontainer and CI with no extra privileges, and it is fast and
@@ -190,12 +195,15 @@ devcontainer's sudo), as a new decision.
 
 ### Steps (T10)
 
-1. Create `crates/test-support` with `publish = false`. Dependencies:
+1. Create `key-steward/crates/test-support` with `publish = false`. Dependencies:
    `tempfile`, and `libc` if step 6 uses `PR_SET_PDEATHSIG`. Other crates add
    it under `[dev-dependencies]` only.
 2. `Sshd::start(base_dir)` makes a temp dir under `base_dir` (tests pass
-   `env!("CARGO_TARGET_TMPDIR")`). Before starting, check that no parent dir is
-   group or world writable, and fail with a clear message if one is.
+   `env!("CARGO_TARGET_TMPDIR")`, which is `<workspace>/target/tmp`). Before
+   starting, check that no parent dir is group or world writable and that
+   each is owned by root or the current user. If one fails, fail with a
+   message that names that dir, its owner and its mode. Refuse to run as
+   root, with a clear message (a root sshd wants the privsep user).
 3. In that dir: `ssh-keygen -q -t ed25519 -N '' -f hostkey`, a client key, a
    server home `srvhome/.ssh` (0700) with `authorized_keys` (0600), and this
    `sshd_config`:
@@ -245,11 +253,13 @@ devcontainer's sudo), as a new decision.
    mean (see the side finding). Every `ssh` the tests run (and the app under
    test) gets `-F <dir>/ssh_config`, which also skips `/etc/ssh/ssh_config`.
    Remove `SSH_AUTH_SOCK` and set `HOME` to a temp dir in the child's
-   environment.
+   environment. `User` is the current user from `getpwuid(geteuid())`, never
+   a fixed name or uid: in CI the uid differs (see "Running in CI").
 6. `Drop` kills sshd and waits. Also offer `stop()` and `restart()` on the
    same port for M2. To avoid stray sshd after an abort, set
    `PR_SET_PDEATHSIG` in `pre_exec` (Linux only; not tested yet).
-7. Fail loudly if `/usr/sbin/sshd` is missing. Do not skip the test.
+7. Fail loudly if `/usr/sbin/sshd` or `ssh` is missing. Do not skip the
+   test. No `#[ignore]`.
 8. Tests in the crate:
    - `harness_sshd_accepts_test_key`
    - `guard_rejects_real_home`
@@ -260,12 +270,26 @@ devcontainer's sudo), as a new decision.
    - `harness_strict_modes_rejects_group_writable_file`
    - `harness_ssh_config_has_no_real_home_paths` (`ssh -G -F <cfg> <alias>`
      output has no path under the real home)
+   - `harness_failed_logins_do_not_block` (about 10 logins with a wrong key,
+     then a login with the right key works; checks `PerSourcePenalties no`)
+   - `harness_no_stray_sshd_after_parent_dies` (only if step 6 uses
+     `PR_SET_PDEATHSIG`; see "Not verified")
 9. Add a note for T12: a test where the config holds a second valid key, and
-   `verify` of a missing key must still return `Missing`.
-10. Delete the empty `tests/docker/`. Apply the SPEC text change below in the
-    same PR. Point SPEC 16 item 7 at this record.
+   `verify` of a missing key must still return `Missing`. The fix is open, see
+   M1 `plan.md`, "ssh_server verify".
+10. Delete the empty `key-steward/tests/docker/`. Apply the SPEC text change below in the
+    same PR. Point SPEC 16 item 7 at this record. (The SPEC text was applied
+    when this record was accepted. T10 keeps it true.)
+11. Add `openssh-server openssh-clients` to `.devcontainer/Containerfile`.
+    Done means: the harness tests pass in the GitHub CI run of the T10 PR,
+    not only locally. Link the run in the PR and tick the CI checks below.
 
 ### Proposed SPEC.md text change
+
+Applied to SPEC.md on 2026-11-12, with the paths moved to `key-steward/`, the
+`identity-core` entry dropped from the app tree (it lives in `crates/` at the
+repo root), and a line that these tests run in CI. The text below is the
+original proposal.
 
 Section 11, replace the layout lines with:
 
@@ -282,7 +306,7 @@ Section 11, replace the layout lines with:
 
 and add after the block:
 
-> `crates/test-support` holds test helpers: the test sshd harness, temp `HOME`
+> `key-steward/crates/test-support` holds test helpers: the test sshd harness, temp `HOME`
 > and `GNUPGHOME`, the real-home guard and mock forge setup. It has
 > `publish = false`. Other crates may use it only under `[dev-dependencies]`.
 
@@ -299,7 +323,7 @@ Section 12, M2: replace "The full state machine against 2 Docker sshd servers
 
 Section 13, replace the "Integration:" bullet with:
 
-> - Integration: `crates/test-support` starts the system `/usr/sbin/sshd` as a
+> - Integration: `key-steward/crates/test-support` starts the system `/usr/sbin/sshd` as a
 >   normal process, as the user who runs the tests. One process per server, on
 >   `127.0.0.1` and a free port. Each server has its own temp dir under
 >   `CARGO_TARGET_TMPDIR` (not `/tmp`, so `StrictModes yes` works) with its own
@@ -315,7 +339,7 @@ Section 13, replace the "Integration:" bullet with:
 Section 14, first bullet: replace "Use Docker, mocks and a temporary
 `GNUPGHOME` / `HOME`." with:
 
-> Use the test sshd from `crates/test-support`, mocks and a temporary
+> Use the test sshd from `key-steward/crates/test-support`, mocks and a temporary
 > `GNUPGHOME` / `HOME`.
 
 Section 16, item 7: replace with:
@@ -323,24 +347,63 @@ Section 16, item 7: replace with:
 > 7. How integration tests get SSH servers. See
 >    `spec/key-steward/decisions/0002-ssh-test-servers.md`.
 
-### Not verified
+### Running in CI (hard requirement)
 
-- Nothing was run on GitHub Actions. CI uses `devcontainers/ci` on
-  `ubuntu-latest`, which most likely uses Docker. `--userns=keep-id` in
-  `runArgs` is a podman flag, and Docker may reject it. This is a CI issue on
-  its own, not caused by this decision. Option A does not need any container
-  runtime inside the job, so it is the least affected.
-- In CI, whether every parent dir of the workspace `target/tmp` is free of
-  group and world write. Step 2's check will tell.
-- `PerSourcePenalties` was not seen to trigger in the experiment. It is set
-  because curl's suite sets it.
-- `PR_SET_PDEATHSIG` for cleanup was not tried.
-- Load: tried 3 servers at once and 20 sequential connections. Not tried
-  dozens of tests in parallel.
-- Nested podman with `--userns=keep-id` after more setup (B1), and
-  `testcontainers-rs` against podman (B2).
-- Parsing `Server accepts key` from `ssh -v` as the T12 fix is a suggestion.
-  T12 should confirm the exact text is stable.
+Every sshd test runs in CI in the same devcontainer image. No `#[ignore]`, no
+"skip if sshd is missing". What that needs:
+
+- `openssh-server` and `openssh-clients` in `.devcontainer/Containerfile`,
+  added in T10. They are in the M1 plan's package list.
+- Temp dirs outside `/tmp`, because of `StrictModes yes`. Use
+  `CARGO_TARGET_TMPDIR`, which is `<workspace>/target/tmp`. In CI the
+  workspace is the bind mounted checkout.
+- A temp `HOME` for every child process. OpenSSH finds `~` from passwd, not
+  `$HOME`, so also pass `-F`, `UserKnownHostsFile` and
+  `GlobalKnownHostsFile /dev/null` every time. The real-home guard compares
+  against the passwd home, not a fixed `/home/dev`.
+- The uid differs. Locally `--userns=keep-id` maps the host user to `dev`
+  (uid 1000 in the image). In CI, `devcontainers/ci` uses the devcontainer
+  CLI, which by default changes the `remoteUser` uid and gid to match the
+  host user that owns the checkout (on GitHub runners this is likely 1001).
+  The harness must use the current uid and name at run time.
+
+### Not verified, and the check for each
+
+Each item becomes a check in the T10 PR. Record the result here or in the PR.
+
+- [ ] Tests run as `dev`, not root, in CI. Check: the harness refuses root
+      (step 2). Print `id` once in the T10 CI run.
+- [ ] The uid update in CI happens and `dev` owns the checkout. Check: in the
+      T10 CI run print `id -u`, `getent passwd dev` and
+      `stat -c '%u %g %a %n'` of the workspace and `target/tmp`.
+- [ ] Every parent dir of `<workspace>/target/tmp` in CI is owned by root or
+      `dev` and is not group or world writable. Check: step 2's check, which
+      names the bad dir. If it fails, options (pick in the T10 PR, not now):
+      `chmod go-w` on the bad dir in `runCmd` before `cargo test`; or a base
+      dir made in the Containerfile and chowned to `dev` in
+      `postCreateCommand`. Do not use the real home.
+- [ ] sshd binds `127.0.0.1` inside the Docker container in CI. Check:
+      `harness_sshd_accepts_test_key` passes in CI.
+- [ ] The passwd home of `dev` exists in CI (the sshd session starts there).
+      Check: `harness_server_home_is_temp` passes in CI and its stderr has no
+      "Could not chdir to home directory".
+- [ ] `PerSourcePenalties no` is needed and works. It was not seen to trigger
+      in the experiment. Check: `harness_failed_logins_do_not_block`.
+- [ ] `PR_SET_PDEATHSIG` cleanup. Not tried. Note: it fires when the parent
+      thread ends, not the process, and cargo runs tests on threads. Check:
+      `harness_no_stray_sshd_after_parent_dies`, or drop the idea and rely on
+      `Drop`.
+- [ ] Load: tried 3 servers at once and 20 sequential connections, not dozens
+      of tests in parallel. Check: the full suite in CI with default test
+      threads. Note the time in the PR.
+- [ ] Parsing `Server accepts key` from `ssh -v` as the T12 fix is only a
+      suggestion. T12 confirms the exact text, or picks another option (see
+      M1 `plan.md`).
+
+No longer relevant, because option A was chosen: nested podman with
+`--userns=keep-id` (B1) and `testcontainers-rs` against podman (B2). The old
+worry that Docker rejects `--userns=keep-id` does not apply: the CI config
+has no `runArgs`.
 
 ## Sources
 
@@ -382,3 +445,20 @@ Section 16, item 7: replace with:
   podman 6.1.3, 2026-11-12.
 
 ## Human decision
+
+Date: 2026-11-12. Quote:
+
+> make it possible to run as user. ensure all tests can be run in CI.
+
+How it was applied:
+
+- Option A accepted: the real sshd runs as the unprivileged test user. No
+  root, no nested containers. The `key-steward/crates/test-support` crate is
+  kept.
+- "All tests run in CI" is a hard rule: no `#[ignore]`, no skip if missing.
+  See "Running in CI" and the checks under "Not verified".
+- T10 is done only when the harness tests pass in GitHub CI (step 11). T12
+  and later SSH tasks, including M2 rotation tests, wait for T10.
+- SPEC.md sections 11, 12, 13, 14 and 16 item 7 are updated.
+- The `ssh -i` side finding stays an open item for T12, with a failing test
+  first. See M1 `plan.md`.
