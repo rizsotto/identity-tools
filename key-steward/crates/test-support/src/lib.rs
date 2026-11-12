@@ -5,11 +5,13 @@
 //! Use this crate only under `[dev-dependencies]`. See
 //! `spec/key-steward/decisions/0002-ssh-test-servers.md`.
 
+mod client;
 mod fake_forge;
 mod guard;
 mod home;
 mod sshd;
 
+pub use client::ClientConfig;
 pub use fake_forge::{
     FakeForge, FakeForgeBuilder, FakeKey, Fault, FaultOn, Flavour, KeyList, RecordedRequest,
 };

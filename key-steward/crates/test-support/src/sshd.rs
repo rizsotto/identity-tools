@@ -29,6 +29,7 @@ pub struct Sshd {
     user: User,
     reported: bool,
     extra_config: String,
+    alias: String,
 }
 
 enum StartError {
@@ -48,7 +49,25 @@ impl Sshd {
     /// value of an option, so these win over the defaults. Paths in them
     /// may use `@DIR@` for the server's temp dir and `@PORT@` for its port.
     pub fn start_with(base_dir: impl AsRef<Path>, extra_config: &str) -> Self {
+        Self::start_named_with(base_dir, ALIAS, extra_config)
+    }
+
+    /// Like [`Sshd::start`], with `alias` as the `Host` name. Use one alias
+    /// per server when several go into one [`crate::ClientConfig`].
+    pub fn start_named(base_dir: impl AsRef<Path>, alias: &str) -> Self {
+        Self::start_named_with(base_dir, alias, "")
+    }
+
+    /// [`Sshd::start_named`] plus [`Sshd::start_with`]'s extra lines.
+    pub fn start_named_with(base_dir: impl AsRef<Path>, alias: &str, extra_config: &str) -> Self {
         refuse_root();
+        assert!(
+            !alias.is_empty()
+                && alias
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)),
+            "test-support: bad alias {alias:?}"
+        );
         let base = base_dir.as_ref();
         fs::create_dir_all(base)
             .unwrap_or_else(|e| panic!("test-support: cannot create {}: {e}", base.display()));
@@ -75,6 +94,7 @@ impl Sshd {
             user,
             reported: false,
             extra_config: extra_config.to_string(),
+            alias: alias.to_string(),
         };
         sshd.setup_files();
 
@@ -98,14 +118,14 @@ impl Sshd {
     }
 
     pub fn alias(&self) -> &str {
-        ALIAS
+        &self.alias
     }
 
     pub fn dir(&self) -> &Path {
         self.dir.path()
     }
 
-    /// Client config with the `Host` alias [`ALIAS`]. Has no `IdentityFile`:
+    /// Client config with the `Host` [`Sshd::alias`]. Has no `IdentityFile`:
     /// pass the key you mean with `-i`.
     pub fn ssh_config(&self) -> PathBuf {
         self.dir().join("ssh_config")
@@ -182,7 +202,7 @@ impl Sshd {
         self.ssh()
             .arg("-i")
             .arg(key)
-            .arg(ALIAS)
+            .arg(&self.alias)
             .arg(remote)
             .output()
             .unwrap_or_else(|e| panic!("test-support: cannot run ssh: {e}"))
@@ -279,18 +299,24 @@ impl Sshd {
     }
 
     fn write_client_files(&self) {
+        fs::write(self.known_hosts(), self.known_hosts_line()).unwrap();
+        fs::write(self.ssh_config(), self.host_block(&self.known_hosts())).unwrap();
+    }
+
+    /// The `known_hosts` line for this server's host key.
+    pub(crate) fn known_hosts_line(&self) -> String {
         let mut hostpub = self.dir().join("hostkey").into_os_string();
         hostpub.push(".pub");
         let hostpub = fs::read_to_string(&hostpub).unwrap();
         let mut fields = hostpub.split_whitespace();
         let (kind, key) = (fields.next().unwrap(), fields.next().unwrap());
-        fs::write(
-            self.known_hosts(),
-            format!("[127.0.0.1]:{} {kind} {key}\n", self.port),
-        )
-        .unwrap();
-        let cfg = format!(
-            "Host {ALIAS}\n  \
+        format!("[127.0.0.1]:{} {kind} {key}\n", self.port)
+    }
+
+    /// The client `Host` block for this server, using `known_hosts`.
+    pub(crate) fn host_block(&self, known_hosts: &Path) -> String {
+        format!(
+            "Host {alias}\n  \
              HostName 127.0.0.1\n  \
              Port {port}\n  \
              User {user}\n  \
@@ -302,11 +328,11 @@ impl Sshd {
              StrictHostKeyChecking yes\n  \
              BatchMode yes\n  \
              ConnectTimeout 5\n",
+            alias = self.alias,
             port = self.port,
             user = self.user.name,
-            kh = self.known_hosts().display(),
-        );
-        fs::write(self.ssh_config(), cfg).unwrap();
+            kh = known_hosts.display(),
+        )
     }
 
     fn spawn(&mut self, port: u16) -> Result<(), StartError> {
