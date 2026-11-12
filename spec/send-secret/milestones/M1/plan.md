@@ -66,9 +66,8 @@ Follows SPEC section 7, adjusted to real types:
 
 ```rust
 pub enum Recipient {
-    OpenPgp(identity_core::PublicKey),   // spec sketch says Cert
-    Age(age::x25519::Recipient),
-    Ssh(age::ssh::Recipient),
+    OpenPgp(OpenPgpCert),   // key file bytes, max 1 MB; T08b checks one key (F3)
+    Age(AgeKey),            // AgeKey::X25519(age::x25519::Recipient) | AgeKey::Ssh(age::ssh::Recipient)
 }
 pub enum Format { OpenPgp, Age }
 pub struct EncryptOpts { pub armor: bool, pub sign: bool }
@@ -87,7 +86,7 @@ pub fn plan(people: &[Person], force: Option<Format>) -> Result<Vec<MessagePlan>
 pub struct Sender { pub openpgp: OpenPgpSelf, pub age: age::x25519::Recipient }
 /// The default secret key (gpg.conf `default-key`, else the first secret
 /// key) and whether it has a valid encryption subkey.
-pub enum OpenPgpSelf { CanEncrypt(Recipient), NoSecretKey, CannotEncrypt }
+pub enum OpenPgpSelf { CanEncrypt(OpenPgpCert), NoSecretKey, CannotEncrypt }
 /// Pure: label "self", only the sender's key. Forced format, else OpenPGP
 /// if `OpenPgpSelf::CanEncrypt`, else age plus a note saying why
 /// (`SelfNote`). Forced OpenPGP without `CanEncrypt`: `PlanError::NoSelfKey`.

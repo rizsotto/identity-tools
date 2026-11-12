@@ -23,8 +23,6 @@ pub enum AgeKey {
     Ssh(age::ssh::Recipient),
 }
 
-// Used by the encrypt facade (M1 T09).
-#[allow(dead_code)]
 impl AgeKey {
     fn as_recipient(&self) -> &dyn age::Recipient {
         match self {
@@ -139,7 +137,6 @@ pub fn age_key(key: &PublicKey) -> Result<AgeKey, Skipped> {
 
 /// Encrypts `input` to all `keys` in one age message (one person's devices,
 /// FR-4) and writes it to `output`. Streams; the plaintext buffer is zeroed.
-#[allow(dead_code)]
 pub(crate) fn encrypt(
     mut input: impl Read,
     output: impl Write,

@@ -38,6 +38,9 @@ pub enum Error {
     /// This format is not built yet (OpenPGP waits for M1 T08b).
     #[error("{0} is not supported yet")]
     NotYet(Format),
+    /// A key file is over the size limit (S-7).
+    #[error("key is larger than {limit} bytes")]
+    KeyTooLarge { limit: usize },
     /// An identity (private key) file could not be used. Fixed text.
     #[error("identity: {0}")]
     Identity(&'static str),
