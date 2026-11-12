@@ -130,7 +130,9 @@ impl HttpClient {
     }
 
     /// `POST <base><path>` with a JSON body. Any HTTP status is an `Ok`
-    /// reply; the caller decides what it means. The body is not logged.
+    /// reply. Callers match the exact documented codes (201 for a new
+    /// key); a 3xx is never success, as redirects are not followed. The
+    /// body is not logged.
     pub async fn post_json(
         &self,
         path: &str,
@@ -147,7 +149,8 @@ impl HttpClient {
         self.write(Method::POST, url, req).await
     }
 
-    /// `DELETE <base><path>`. Any HTTP status is an `Ok` reply.
+    /// `DELETE <base><path>`. Any HTTP status is an `Ok` reply. Callers
+    /// match the exact documented codes (204, or 404 for already gone).
     pub async fn delete(&self, path: &str) -> Result<HttpReply, ProviderError> {
         let url = self.url(path)?;
         let req = self.client.delete(url.clone());
@@ -184,8 +187,8 @@ impl HttpClient {
             match serde_json::from_slice(&body) {
                 Ok(json) => scrub_json(json, self.token.as_ref()),
                 Err(_) => {
-                    let text: String = String::from_utf8_lossy(&body).chars().take(1000).collect();
-                    serde_json::Value::String(self.scrub(&text))
+                    let text = self.scrub(&String::from_utf8_lossy(&body));
+                    serde_json::Value::String(text.chars().take(1000).collect())
                 }
             }
         };
@@ -283,6 +286,13 @@ impl HttpClient {
 pub struct HttpReply {
     pub status: u16,
     pub body: serde_json::Value,
+}
+
+impl HttpReply {
+    /// 2xx. Callers still check the exact documented code.
+    pub fn is_success(&self) -> bool {
+        (200..300).contains(&self.status)
+    }
 }
 
 /// Scrubs the token from every string in `value`.

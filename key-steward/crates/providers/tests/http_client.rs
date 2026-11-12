@@ -312,3 +312,36 @@ async fn post_and_delete_are_logged_and_scrubbed() {
     // The body is not logged: it holds the key, which the log does not need.
     assert!(!rendered.contains("ssh-ed25519"), "{rendered}");
 }
+
+#[tokio::test]
+async fn long_text_reply_is_scrubbed_before_it_is_cut() {
+    let server = MockServer::start().await;
+    // The token starts at char 995, across the 1000 char cut.
+    let text = format!("{}{TOKEN} tail", "x".repeat(995));
+    Mock::given(method("DELETE"))
+        .respond_with(ResponseTemplate::new(500).set_body_string(text))
+        .mount(&server)
+        .await;
+    let r = client(&server.uri(), AuthStyle::Bearer, &NetLog::new())
+        .delete("/user/keys/1")
+        .await
+        .unwrap();
+    let body = r.body.as_str().unwrap();
+    assert!(!body.contains(&TOKEN[..5]), "token part in reply: {body}");
+    assert!(body.ends_with("[reda"), "{body}");
+    assert!(body.chars().count() <= 1000);
+    assert!(!r.is_success());
+}
+
+#[test]
+fn only_2xx_is_success() {
+    let reply = |status| providers::HttpReply {
+        status,
+        body: serde_json::Value::Null,
+    };
+    assert!(reply(201).is_success());
+    assert!(reply(204).is_success());
+    for s in [199, 301, 302, 304, 404, 422, 500] {
+        assert!(!reply(s).is_success(), "{s}");
+    }
+}

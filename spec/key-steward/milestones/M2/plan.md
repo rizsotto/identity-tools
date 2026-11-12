@@ -315,7 +315,11 @@ Endpoints and scopes: see "Facts". All three share:
   locally from the key text, never the forge's field) and purpose, `DELETE`
   each by its id. 204 is success, 404 means already gone (list again to be
   sure). Remote ids are never stored.
-- Title: the new key's comment, else `key-steward <YYYY-MM-DD>`.
+- Title: `<comment> <YYYY-MM-DD>` (the new key's comment, else
+  `key-steward`), so it differs from the old key's title. Forgejo and
+  Gitea refuse a title the user already has (422 "Key title has been
+  used"). If the title is taken in the list read before the POST, add
+  ` (2)`, ` (3)`, ... until it is free.
 - 401 and 403: fail with advice on the scopes the forge needs.
 - Every request in the `NetLog`; tokens scrubbed (M1 `HttpClient`).
   `HttpClient` gets `post_json` and `delete`.
@@ -543,6 +547,7 @@ fact 1, "Add/remove part".
 | GitLab delete | `DELETE /user/keys/:key_id`; 204; 404 if not found. | same |
 | GitLab write scope | Docs do not name it. Source: the Users API allows `read_user` only for GET and HEAD (`allow_access_with_scope :read_user, if: request.get? \|\| request.head?`), so writes need `api` ("complete read and write access to the API"). Not in docs: human check 2. | [users.rb](https://gitlab.com/gitlab-org/gitlab/-/raw/master/lib/api/users.rb), [scopes](https://docs.gitlab.com/security/tokens/access_token_scopes/) |
 | Forgejo add | `POST /api/v1/user/keys` (`userCurrentPostKey`), body `CreateKeyOption` with `title` and `key` required, `read_only` optional; 201 `PublicKey`; 401, 403, 422. Same in Gitea. | Codeberg swagger (Forgejo 17.0.0), Gitea swagger (29.0.0+dev) |
+| Forgejo title rule | A key title is unique per user: a second key with a used title gives 422 "Key title has been used" (`ErrKeyNameAlreadyUsed`). A used key gives 422 "Key content has been used as non-deploy key" (`ErrKeyAlreadyExist`, checked first). GitHub and GitLab document no title rule (GitLab `Key` model: title presence and length only, [key.rb](https://gitlab.com/gitlab-org/gitlab/-/raw/master/app/models/key.rb)). | [ssh_key.go](https://codeberg.org/forgejo/forgejo/src/branch/forgejo/models/asymkey/ssh_key.go) `AddPublicKey`, [key.go](https://codeberg.org/forgejo/forgejo/src/branch/forgejo/routers/api/v1/repo/key.go) `HandleAddKeyError`; same in [Gitea](https://github.com/go-gitea/gitea/blob/main/models/asymkey/ssh_key.go), checked 2026-11-12 |
 | Forgejo delete | `DELETE /api/v1/user/keys/{id}` (`userCurrentDeleteKey`); 204; 401, 403, 404. | same |
 | Forgejo write scope | `write:user`: "read/write/delete access to user operations", routes `/user/*` and `/users/*`; write covers GET too. Not stated for keys by name: human check 3. | [token scopes](https://forgejo.org/docs/latest/user/token-scope/) |
 | Remote `sh -s` with data after the script | Does not work with dash or BusyBox sh (read-ahead). Bootstrap with `dd bs=1 count=N` works in bash, dash, BusyBox, Alpine. POSIX `cksum` output equal in all. | Spike above (new SPEC 15 item) |

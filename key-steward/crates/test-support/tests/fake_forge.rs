@@ -106,6 +106,12 @@ async fn add_list_delete(forge: FakeForge, list_path: &str, seeded: usize) {
         .await
         .unwrap();
     assert_eq!(bare.status().as_u16(), 401);
+    let wrong = Client {
+        auth: (c.auth.0, c.auth.1.replace(&forge.token(), "wrong-token")),
+        http: reqwest::Client::new(),
+        api: forge.api_url(),
+    };
+    assert_eq!(wrong.get("/user").await.0, 401);
     let (s, _, user) = c.get("/user").await;
     assert_eq!(s, 200);
     let field = if f == Flavour::GitLab {
@@ -248,6 +254,39 @@ async fn fake_forge_add_list_delete_forgejo() {
     let (_, h, _) = c.get("/user/keys").await;
     assert_eq!(h["x-total-count"], "3");
     add_list_delete(forge, "/user/keys", 3).await;
+
+    // limit=0 means the default page size (30), not one item.
+    let forge = FakeForge::start(Flavour::Forgejo).await;
+    let c = Client::new(&forge);
+    let (_, _, all) = c.get("/user/keys?limit=0").await;
+    assert_eq!(all.as_array().unwrap().len(), 3);
+
+    // A title is unique per user: "Key title has been used", 422.
+    let (s, err) = c
+        .post("/user/keys", json!({ "title": "laptop", "key": NEW_KEY }))
+        .await;
+    assert_eq!(s, 422, "{err}");
+    assert_eq!(forge.keys().len(), 3);
+    let (s, _) = c
+        .post(
+            "/user/keys",
+            json!({ "title": "laptop 2026-11-12", "key": NEW_KEY }),
+        )
+        .await;
+    assert_eq!(s, 201);
+}
+
+/// GitHub and GitLab document no title rule: the same title is accepted.
+#[tokio::test]
+async fn fake_forge_title_reuse_github_gitlab() {
+    for (f, title) in [(Flavour::GitHub, "laptop"), (Flavour::GitLab, "auth only")] {
+        let forge = FakeForge::start(f).await;
+        let c = Client::new(&forge);
+        let (s, err) = c
+            .post("/user/keys", json!({ "title": title, "key": NEW_KEY }))
+            .await;
+        assert_eq!(s, 201, "{f:?}: {err}");
+    }
 }
 
 /// The fault applies the write, then answers 502 or closes the

@@ -3,9 +3,10 @@
 //! One responder holds the account's keys in shared state, so `POST` and
 //! `DELETE` change what the next `GET` lists. Paths, pagination, status
 //! codes and body fields follow the official API docs listed in
-//! `spec/key-steward/milestones/M2/plan.md`, "Facts". Error bodies are
-//! the documented shapes; the exact text of a duplicate key error is not
-//! documented (M2 human check 4), so tests must not depend on it.
+//! `spec/key-steward/milestones/M2/plan.md`, "Facts". Status codes are
+//! the documented ones. Error bodies are close to the real ones, but
+//! most of their text is not documented (M2 human check 4): no test may
+//! rely on the text of any error body, only on the status.
 //!
 //! Only SSH keys can be written. GPG keys are seeded from the fixtures
 //! and are read-only here.
@@ -553,6 +554,13 @@ impl State {
         if self.keys.iter().any(|k| k.list == list && k.key == encoded) {
             return self.invalid("key", "has already been taken");
         }
+        // Forgejo and Gitea: a key title is unique per user
+        // (models/asymkey/ssh_key.go AddPublicKey, ErrKeyNameAlreadyUsed;
+        // routers/api/v1/repo/key.go HandleAddKeyError gives 422). GitHub
+        // and GitLab document no such rule.
+        if f == Flavour::Forgejo && self.keys.iter().any(|k| Some(k.title.as_str()) == title) {
+            return Reply::json(422, json!({ "message": "Key title has been used" }));
+        }
         let id = self.next_id;
         self.next_id += 1;
         let k = FakeKey {
@@ -585,6 +593,11 @@ impl State {
                 }
                 Reply::json(400, json!({ "message": fields }))
             }
+            // HandleAddKeyError: ErrKeyAlreadyExist gives this text.
+            Flavour::Forgejo if why.contains("taken") => Reply::json(
+                422,
+                json!({ "message": "Key content has been used as non-deploy key" }),
+            ),
             Flavour::Forgejo => Reply::json(422, json!({ "message": format!("{field} {why}") })),
         }
     }
@@ -627,7 +640,13 @@ impl State {
                 .find(|(k, _)| k == name)
                 .and_then(|(_, v)| v.parse::<usize>().ok())
         };
-        let per_page = query(param).unwrap_or(default).clamp(1, max);
+        // Forgejo: limit=0 (or none) means the default page size.
+        let per_page = match query(param) {
+            Some(0) if self.flavour == Flavour::Forgejo => default,
+            Some(n) => n,
+            None => default,
+        }
+        .clamp(1, max);
         let page = query("page").unwrap_or(1).max(1);
         let total = items.len();
         let pages = total.div_ceil(per_page).max(1);
