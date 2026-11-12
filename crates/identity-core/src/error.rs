@@ -1,21 +1,32 @@
 use thiserror::Error;
 
-/// Errors from reading and parsing keys.
+/// Errors for a whole key input or file.
 ///
-/// Messages never echo the input: it may be hostile, and it may end up in
-/// logs.
+/// Messages are fixed text and never echo the input: it may be hostile
+/// (terminal escapes, fake text) and it may end up in logs.
 #[derive(Debug, Error)]
 pub enum KeyError {
     #[error("key input is larger than {limit} bytes")]
     TooLarge { limit: usize },
     #[error("key input is not UTF-8 text")]
     NotText,
-    #[error("line {line}: {reason}")]
-    Malformed { line: usize, reason: String },
     #[error("unsupported key format: {0}")]
     UnsupportedFormat(&'static str),
-    #[error("no public key found")]
-    Empty,
     #[error("cannot read key file: {0}")]
     Io(#[from] std::io::Error),
+}
+
+/// Why one line of a key list was skipped. Fixed text, never the input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Error)]
+pub enum LineError {
+    #[error("unknown key type")]
+    UnknownType,
+    #[error("SSH certificates are not supported")]
+    Certificate,
+    #[error("authorized_keys options are not supported")]
+    Options,
+    #[error("malformed SSH public key")]
+    Malformed,
+    #[error("malformed age recipient")]
+    BadAgeRecipient,
 }

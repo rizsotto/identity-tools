@@ -1,24 +1,54 @@
 use ssh_key::public::KeyData;
 use ssh_key::{HashAlg, Mpint};
 
-use crate::key::{Fingerprint, KeyAlgo, KeyKind, PublicKey};
+use crate::error::LineError;
+use crate::key::{Fingerprint, KeyAlgo, SshPublicKey};
 
-/// Parse one OpenSSH public key line (`<type> <base64> [comment]`).
-/// Lines with `authorized_keys` options are not accepted here.
-pub(crate) fn parse_line(line: &str) -> Result<PublicKey, String> {
-    let mut key = ssh_key::PublicKey::from_openssh(line).map_err(|e| e.to_string())?;
-    let comment = Some(key.comment().to_string()).filter(|c| !c.is_empty());
-    key.set_comment("");
-    let encoded = key.to_openssh().map_err(|e| e.to_string())?;
-    Ok(PublicKey {
-        kind: KeyKind::Ssh,
+const KNOWN_TYPES: &[&str] = &[
+    "ssh-ed25519",
+    "ssh-rsa",
+    "ssh-dss",
+    "ecdsa-sha2-nistp256",
+    "ecdsa-sha2-nistp384",
+    "ecdsa-sha2-nistp521",
+    "sk-ssh-ed25519@openssh.com",
+    "sk-ecdsa-sha2-nistp256@openssh.com",
+];
+
+/// Parse one OpenSSH public key line (`<type> <base64> [comment]`). Fields
+/// may be split by any run of spaces or tabs. The comment is kept as found.
+pub(crate) fn parse_line(line: &str) -> Result<SshPublicKey, LineError> {
+    let (key_type, rest) = split_field(line);
+    let (blob, comment) = split_field(rest);
+    if !KNOWN_TYPES.contains(&key_type) {
+        return Err(if key_type.ends_with("-cert-v01@openssh.com") {
+            LineError::Certificate
+        } else if line.split_whitespace().any(|f| KNOWN_TYPES.contains(&f)) {
+            LineError::Options
+        } else {
+            LineError::UnknownType
+        });
+    }
+    let key = ssh_key::PublicKey::from_openssh(&format!("{key_type} {blob}"))
+        .map_err(|_| LineError::Malformed)?;
+    if key.algorithm().as_str() != key_type {
+        return Err(LineError::Malformed);
+    }
+    let encoded = key.to_openssh().map_err(|_| LineError::Malformed)?;
+    Ok(SshPublicKey {
         algo: algo(key.key_data()),
         fingerprint: Fingerprint::Ssh(key.fingerprint(HashAlg::Sha256).to_string()),
-        comment,
-        created: None,
-        expiry: None,
+        comment: Some(comment.to_string()).filter(|c| !c.is_empty()),
         encoded,
     })
+}
+
+/// Split off the first field. The rest has its leading whitespace removed.
+fn split_field(s: &str) -> (&str, &str) {
+    match s.find(char::is_whitespace) {
+        Some(i) => (&s[..i], s[i..].trim_start()),
+        None => (s, ""),
+    }
 }
 
 fn algo(data: &KeyData) -> KeyAlgo {
@@ -74,6 +104,5 @@ mod tests {
         let key = parse_line(&line).unwrap();
         assert_eq!(key.algo, KeyAlgo::Dsa(1024));
         assert!(key.encoded.starts_with("ssh-dss "));
-        assert!(!key.is_age_recipient());
     }
 }

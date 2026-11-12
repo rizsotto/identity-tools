@@ -46,11 +46,17 @@ setup. Accepted in decision 0002, now in SPEC 11.
   `Other(String)`.
 - `PublicKey { kind: Ssh | OpenPgp, algo, fingerprint, comment, created:
   Option<Timestamp>, expiry: Option<Timestamp>, subkeys: Vec<SubKey>, source }`.
-- Built in the core lane (T02): `PublicKey` has `kind`, `algo`,
-  `fingerprint`, `comment`, `created`, `expiry` and `encoded` (the key text
-  without comment). `subkeys` and `source` are not there yet; T05 adds
-  subkeys, the caller keeps the source. `KeyAlgo` also has `SkEd25519`,
-  `SkEcdsa(curve)` and `X25519` (age).
+- Built in the core lane (T02), after review: `PublicKey` is an enum,
+  `Ssh(SshPublicKey)`, `Age(AgeRecipient)`, `OpenPgp(OpenPgpKey)`, with
+  `kind()`, `algo()` and `fingerprint()` accessors. Reason: the families
+  have different fields (SSH: comment and encoded line; OpenPGP: dates,
+  user IDs, subkeys; age: only the recipient). A flat struct would carry
+  fields that are always empty for some kinds; the enum makes the compiler
+  check each case. Decision 0001 suggested it. T05 adds user IDs and
+  subkeys to `OpenPgpKey`; the caller keeps the source (file path).
+  `KeyAlgo` also has `SkEd25519`, `SkEcdsa(curve)` and `X25519` (age).
+  `parse_public_keys` gives one result per line; show
+  `SshPublicKey::comment_display()`, not the raw comment.
 - SSH keys have no creation time. Use the file mtime and label it as the file
   date. This is a gap in FR-1; add a note to SPEC when T04 lands.
 - SSH scan takes the SSH dir as a parameter. It never calls `dirs::home_dir()`

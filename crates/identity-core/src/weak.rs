@@ -1,6 +1,6 @@
 //! Weak key rules (Key Steward SPEC 9.4).
 
-use crate::key::{KeyAlgo, KeyKind, PublicKey};
+use crate::key::{KeyAlgo, PublicKey};
 use crate::private_header::PrivateKeyProtection;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -41,7 +41,7 @@ pub fn weak_key_warnings(
 ) -> Vec<KeyWarning> {
     let mut out = Vec::new();
     let mut add = |severity, reason| out.push(KeyWarning { severity, reason });
-    match &key.algo {
+    match &key.algo() {
         KeyAlgo::Rsa(bits) if *bits < MIN_RSA_BITS => {
             add(Severity::Warning, WeakReason::RsaTooShort(*bits))
         }
@@ -54,7 +54,9 @@ pub fn weak_key_warnings(
     if protection == Some(PrivateKeyProtection::Unencrypted) {
         add(Severity::Warning, WeakReason::PrivateKeyUnencrypted);
     }
-    if key.kind == KeyKind::OpenPgp && key.expiry.is_none() {
+    if let PublicKey::OpenPgp(k) = key
+        && k.expiry.is_none()
+    {
         add(Severity::Info, WeakReason::NoExpiry);
     }
     out
@@ -63,18 +65,24 @@ pub fn weak_key_warnings(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::key::Fingerprint;
+    use crate::key::{AgeRecipient, Fingerprint, KeyKind, OpenPgpKey, SshPublicKey};
     use std::time::{Duration, SystemTime};
 
     fn key(kind: KeyKind, algo: KeyAlgo, expiry: Option<SystemTime>) -> PublicKey {
-        PublicKey {
-            kind,
-            algo,
-            fingerprint: Fingerprint::Ssh("SHA256:test".into()),
-            comment: None,
-            created: None,
-            expiry,
-            encoded: String::new(),
+        match kind {
+            KeyKind::Ssh => PublicKey::Ssh(SshPublicKey {
+                algo,
+                fingerprint: Fingerprint::Ssh("SHA256:test".into()),
+                comment: None,
+                encoded: String::new(),
+            }),
+            KeyKind::OpenPgp => PublicKey::OpenPgp(OpenPgpKey {
+                algo,
+                fingerprint: Fingerprint::OpenPgp("00".into()),
+                created: None,
+                expiry,
+            }),
+            KeyKind::Age => PublicKey::Age(AgeRecipient("age1test".into())),
         }
     }
 
@@ -144,7 +152,7 @@ mod tests {
                 .into_iter()
                 .map(|w| (w.severity, w.reason))
                 .collect();
-            assert_eq!(got, want, "{:?} {:?} {protection:?}", k.kind, k.algo);
+            assert_eq!(got, want, "{:?} {protection:?}", k);
         }
     }
 }

@@ -15,11 +15,29 @@ No GTK in any of these. No network.
 
 ## identity-core
 
-Built in the core lane (T05): the shared API is a `PublicKey` struct with
-`kind` (`Ssh`, `OpenPgp`, `Age`), `algo`, `fingerprint`, `comment` and
-`encoded`, from `parse_public_keys`. Unsupported SSH kinds are not an enum
-variant; `PublicKey::is_age_recipient()` is false for them. The sketch below
-is the first draft.
+Built in the core lane (T05), after review. Shared API:
+
+- `PublicKey` is an enum with one variant per key family:
+  `Ssh(SshPublicKey)`, `Age(AgeRecipient)`, `OpenPgp(OpenPgpKey)`. Common
+  accessors: `kind()`, `algo()`, `fingerprint()`, `is_age_recipient()`.
+- Why an enum and not one flat struct: the families have different fields
+  (SSH has a comment and an `authorized_keys` encoding, age has only the
+  recipient, OpenPGP has dates, user IDs and subkeys). A flat struct would
+  carry fields that are always empty for some kinds, and code would have
+  to check `kind` before trusting them. With the enum the compiler makes
+  each caller handle each family. Decision 0001 suggested this too.
+- `parse_public_keys(bytes)` returns one `ParsedLine { line, key:
+  Result<PublicKey, LineError> }` per key line, so bad or unknown lines are
+  skipped with a note (FR-4) and good ones still work. Whole-input errors
+  (over 1,000,000 bytes, not UTF-8, OpenPGP armor, private key) are
+  `KeyError`. Error text is fixed and never echoes the input.
+- `is_age_recipient()`: age X25519, SSH Ed25519, SSH RSA 2048 to 4096 bits.
+- `SshPublicKey::comment_display()` drops control and bidi characters.
+  The raw `comment` is kept.
+- `OpenPgpKey` only has algo, fingerprint, created and expiry so far. T06
+  fills it from gpgme and adds what it needs.
+
+The sketch below is the first draft.
 
 ```rust
 pub enum PublicKey {
