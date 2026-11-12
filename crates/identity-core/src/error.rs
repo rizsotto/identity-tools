@@ -30,3 +30,27 @@ pub enum LineError {
     #[error("malformed age recipient")]
     BadAgeRecipient,
 }
+
+/// Errors from the GnuPG backend. Fixed text, never the key input.
+#[derive(Debug, Error)]
+pub enum GpgError {
+    /// An error reported by gpgme or gpg. The text comes from libgpg-error.
+    #[error("GnuPG error: {0}")]
+    Gpgme(String),
+    #[error("key input is larger than {limit} bytes")]
+    TooLarge { limit: usize },
+    #[error("key input must hold exactly one OpenPGP key")]
+    NotOneKey,
+    #[error("the OpenPGP key has no usable encryption subkey")]
+    CannotEncrypt,
+    #[error("unsafe path for a GnuPG recipient file")]
+    UnsafePath,
+    #[error("cannot write the recipient key file: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+impl From<gpgme::Error> for GpgError {
+    fn from(e: gpgme::Error) -> Self {
+        GpgError::Gpgme(e.to_string())
+    }
+}

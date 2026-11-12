@@ -6,13 +6,18 @@
 mod age;
 mod error;
 mod key;
+mod openpgp;
 mod parse;
 mod private_header;
 mod ssh;
 mod weak;
 
-pub use error::{KeyError, LineError};
-pub use key::{AgeRecipient, Fingerprint, KeyAlgo, KeyKind, OpenPgpKey, PublicKey, SshPublicKey};
+pub use error::{GpgError, KeyError, LineError};
+pub use key::{
+    AgeRecipient, Fingerprint, KeyAlgo, KeyKind, OpenPgpKey, OpenPgpSubkey, PublicKey,
+    SshPublicKey, UserId,
+};
+pub use openpgp::{Gpg, OpenPgpBackend};
 pub use parse::{MAX_KEY_INPUT, ParsedLine, parse_public_keys, read_key_file};
 pub use private_header::{PrivateKeyProtection, private_key_protection};
 pub use weak::{KeyWarning, MIN_RSA_BITS, Severity, WeakReason, weak_key_warnings};

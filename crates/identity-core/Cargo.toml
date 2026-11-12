@@ -8,10 +8,10 @@ publish.workspace = true
 [dependencies]
 base64ct = { version = "1", features = ["alloc"] }
 bech32 = "0.12"
+gpgme = "0.11"
 ssh-key = { version = "0.6", default-features = false, features = ["std", "ecdsa"] }
 thiserror = "2"
 
 [dev-dependencies]
-gpgme = "0.11"
 gpgme-sys = "0.11"
 tempfile = "3"
