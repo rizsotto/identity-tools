@@ -23,11 +23,21 @@ pub trait OpenPgpBackend {
     /// Parse keys from bytes (armored or binary) without importing them.
     /// Input over [`MAX_KEY_INPUT`] is refused.
     fn read_keys(&mut self, bytes: &[u8]) -> Result<Vec<OpenPgpKey>, GpgError>;
-    /// The key gpg signs with by default: the last `default-key` in
-    /// `gpg.conf` that has a secret key, else the first secret key. `None`
-    /// if there is no such key. If `default-key` is set but none of its
-    /// values has a secret key, this is `None` too (gpg would not fall back
-    /// either).
+    /// The key gpg signs with by default, found with gpg 2.4's rules
+    /// (checked against gpg 2.4.9):
+    ///
+    /// - The config file is the first of `gpg.conf-<major.minor.micro>`,
+    ///   `gpg.conf-<major.minor>`, `gpg.conf-<major>` and `gpg.conf` that
+    ///   exists. It is read as lossy UTF-8.
+    /// - `default-key` values are tried last first. A value is skipped if it
+    ///   matches no secret key or only unusable ones (revoked, expired,
+    ///   disabled or invalid). A usable key that cannot sign is still
+    ///   returned (gpg picks it and then fails to sign).
+    /// - If no value gives a key, or there is none, it is the first secret
+    ///   key that is usable and can sign.
+    ///
+    /// `None` if there is no such key. Callers that sign should name this
+    /// key as the signer and not rely on gpg's own choice.
     fn default_secret_key(&mut self) -> Result<Option<OpenPgpKey>, GpgError>;
 }
 
@@ -83,21 +93,55 @@ impl Gpg {
         keys.map(|k| Ok(convert(&k?))).collect()
     }
 
-    fn secret_key_for(&mut self, pattern: &str) -> Result<Option<OpenPgpKey>, GpgError> {
-        let fpr = {
-            let mut keys = self.ctx.find_secret_keys([pattern])?;
-            match keys.next() {
-                Some(k) => k?.fingerprint().ok().map(str::to_string),
-                None => None,
-            }
+    /// The first usable secret key that `pattern` matches. A pattern gpg
+    /// refuses matches nothing, as gpg ignores such a value.
+    fn usable_secret_key_for(&mut self, pattern: &str) -> Result<Option<OpenPgpKey>, GpgError> {
+        let fprs: Vec<String> = match self.ctx.find_secret_keys([pattern]) {
+            Ok(keys) => keys
+                .filter_map(Result::ok)
+                .filter_map(|k| k.fingerprint().ok().map(str::to_string))
+                .collect(),
+            Err(_) => return Ok(None),
         };
-        match fpr {
+        for fpr in fprs {
             // The public listing, so the capabilities are those of the
             // public key others encrypt to.
-            Some(fpr) => Ok(Some(convert(&self.ctx.get_key(fpr)?))),
-            None => Ok(None),
+            let key = convert(&self.ctx.get_key(fpr)?);
+            if usable(&key) {
+                return Ok(Some(key));
+            }
         }
+        Ok(None)
     }
+
+    /// The gpg.conf that gpg reads: a versioned file wins over `gpg.conf`.
+    fn conf_path(&self, home: &Path) -> PathBuf {
+        let version = self.ctx.engine_info().version().unwrap_or("").to_string();
+        conf_candidates(&version)
+            .into_iter()
+            .map(|name| home.join(name))
+            .find(|p| p.exists())
+            .unwrap_or_else(|| home.join("gpg.conf"))
+    }
+}
+
+fn usable(key: &OpenPgpKey) -> bool {
+    !(key.revoked || key.expired || key.disabled || key.invalid)
+}
+
+/// `gpg.conf-2.4.9`, `gpg.conf-2.4`, `gpg.conf-2`, `gpg.conf`.
+fn conf_candidates(version: &str) -> Vec<String> {
+    let parts: Vec<&str> = version
+        .split('.')
+        .take(3)
+        .take_while(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+        .collect();
+    let mut out: Vec<String> = (1..=parts.len())
+        .rev()
+        .map(|n| format!("gpg.conf-{}", parts[..n].join(".")))
+        .collect();
+    out.push("gpg.conf".to_string());
+    out
 }
 
 impl OpenPgpBackend for Gpg {
@@ -127,33 +171,33 @@ impl OpenPgpBackend for Gpg {
 
     fn default_secret_key(&mut self) -> Result<Option<OpenPgpKey>, GpgError> {
         let configured = match self.effective_home() {
-            Some(home) => default_keys_in_conf(&home.join("gpg.conf"))?,
+            Some(home) => default_keys_in_conf(&self.conf_path(&home))?,
             None => Vec::new(),
         };
-        if configured.is_empty() {
-            return Ok(self.secret_keys()?.into_iter().next());
-        }
         for pattern in configured.iter().rev() {
-            if let Some(key) = self.secret_key_for(pattern)? {
+            if let Some(key) = self.usable_secret_key_for(pattern)? {
                 return Ok(Some(key));
             }
         }
-        Ok(None)
+        Ok(self
+            .secret_keys()?
+            .into_iter()
+            .find(|k| usable(k) && k.can_sign))
     }
 }
 
 /// The `default-key` values in a gpg.conf, in file order. A missing file
 /// has none.
 fn default_keys_in_conf(path: &Path) -> Result<Vec<String>, GpgError> {
-    let mut text = String::new();
+    let mut bytes = Vec::new();
     match std::fs::File::open(path) {
         Ok(f) => {
-            f.take(MAX_KEY_INPUT as u64).read_to_string(&mut text)?;
+            f.take(MAX_KEY_INPUT as u64).read_to_end(&mut bytes)?;
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e.into()),
     }
-    Ok(parse_default_keys(&text))
+    Ok(parse_default_keys(&String::from_utf8_lossy(&bytes)))
 }
 
 fn parse_default_keys(conf: &str) -> Vec<String> {
@@ -249,6 +293,19 @@ mod tests {
         let conf = "# comment\n default-key  AAAA \ndefault-keyserver x\n\
                     default-key \"bob@example.org\"\ndefault-key\n";
         assert_eq!(parse_default_keys(conf), ["AAAA", "bob@example.org"]);
+    }
+
+    #[test]
+    fn versioned_conf_names_most_specific_first() {
+        assert_eq!(
+            conf_candidates("2.4.9"),
+            ["gpg.conf-2.4.9", "gpg.conf-2.4", "gpg.conf-2", "gpg.conf"]
+        );
+        assert_eq!(conf_candidates(""), ["gpg.conf"]);
+        assert_eq!(
+            conf_candidates("2.5.1-beta"),
+            ["gpg.conf-2.5", "gpg.conf-2", "gpg.conf"]
+        );
     }
 
     #[test]

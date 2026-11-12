@@ -132,34 +132,159 @@ fn read_keys_refuses_oversized_input() {
     ));
 }
 
+fn default_fpr(home: &GpgHome) -> Option<String> {
+    Gpg::with_home(home.path())
+        .unwrap()
+        .default_secret_key()
+        .unwrap()
+        .map(|k| k.fingerprint.to_string())
+}
+
+fn write_conf(home: &GpgHome, name: &str, text: &str) {
+    std::fs::write(home.path().join(name), text).unwrap();
+}
+
 #[test]
-fn default_secret_key_follows_gpg_conf() {
+fn default_secret_key_is_first_secret_key_without_conf() {
     let home = GpgHome::new();
     let first = home.gen_key("First Example (test fixture) <first@example.org>");
-    let second = home.gen_sign_only("Second Example (test fixture) <second@example.org>");
-
-    let mut gpg = Gpg::with_home(home.path()).unwrap();
-    let key = gpg.default_secret_key().unwrap().unwrap();
+    home.gen_key("Second Example (test fixture) <second@example.org>");
+    let key = Gpg::with_home(home.path())
+        .unwrap()
+        .default_secret_key()
+        .unwrap()
+        .unwrap();
     assert_eq!(key.fingerprint.as_str(), first);
     assert!(key.can_encrypt);
 
-    std::fs::write(
-        home.path().join("gpg.conf"),
-        format!("default-key {first}\ndefault-key {second}\n"),
-    )
-    .unwrap();
-    let key = gpg.default_secret_key().unwrap().unwrap();
+    let empty = GpgHome::new();
+    assert_eq!(default_fpr(&empty), None);
+}
+
+#[test]
+fn default_secret_key_without_conf_skips_unusable_keys() {
+    let home = GpgHome::new();
+    home.gen_expired("Expired Example (test fixture) <expired@example.org>");
+    let revoked = home.gen_key("Revoked Example (test fixture) <revoked@example.org>");
+    home.revoke(&revoked);
+    home.gpg(&[
+        "--quick-gen-key",
+        "Certify Only <certify@example.org>",
+        "ed25519",
+        "cert",
+        "1y",
+    ]);
+    let good = home.gen_key("Good Example (test fixture) <good@example.org>");
+    assert_eq!(default_fpr(&home).as_deref(), Some(good.as_str()));
+}
+
+#[test]
+fn default_key_last_value_wins() {
+    let home = GpgHome::new();
+    let first = home.gen_key("First Example (test fixture) <first@example.org>");
+    let second = home.gen_sign_only("Second Example (test fixture) <second@example.org>");
+    write_conf(
+        &home,
+        "gpg.conf",
+        &format!("default-key {second}\ndefault-key {first}\n"),
+    );
+    assert_eq!(default_fpr(&home).as_deref(), Some(first.as_str()));
+    write_conf(
+        &home,
+        "gpg.conf",
+        &format!("default-key {first}\ndefault-key {second}\n"),
+    );
+    let key = Gpg::with_home(home.path())
+        .unwrap()
+        .default_secret_key()
+        .unwrap()
+        .unwrap();
     assert_eq!(key.fingerprint.as_str(), second);
     assert!(!key.can_encrypt, "sign-only key cannot encrypt");
+}
 
-    std::fs::write(
-        home.path().join("gpg.conf"),
-        "default-key 0000000000000000000000000000000000000000\n",
-    )
-    .unwrap();
-    assert!(gpg.default_secret_key().unwrap().is_none());
+#[test]
+fn default_key_value_forms() {
+    let home = GpgHome::new();
+    home.gen_key("First Example (test fixture) <first@example.org>");
+    let second = home.gen_key("Second Example (test fixture) <second@example.org>");
+    let long_id = &second[second.len() - 16..];
+    for value in [
+        format!("{second}!"),
+        long_id.to_string(),
+        format!("0x{long_id}"),
+        "second@example.org".to_string(),
+        "<second@example.org>".to_string(),
+        "\"second@example.org\"".to_string(),
+    ] {
+        write_conf(&home, "gpg.conf", &format!("  default-key\t{value}  \n"));
+        assert_eq!(
+            default_fpr(&home).as_deref(),
+            Some(second.as_str()),
+            "{value}"
+        );
+    }
+}
 
-    let empty = GpgHome::new();
-    let mut gpg = Gpg::with_home(empty.path()).unwrap();
-    assert!(gpg.default_secret_key().unwrap().is_none());
+#[test]
+fn default_key_skips_expired_and_revoked_values() {
+    let home = GpgHome::new();
+    let first = home.gen_key("First Example (test fixture) <first@example.org>");
+    let expired = home.gen_expired("Expired Example (test fixture) <expired@example.org>");
+    let revoked = home.gen_key("Revoked Example (test fixture) <revoked@example.org>");
+    home.revoke(&revoked);
+    let second = home.gen_key("Second Example (test fixture) <second@example.org>");
+    write_conf(
+        &home,
+        "gpg.conf",
+        &format!("default-key {second}\ndefault-key {expired}\ndefault-key {revoked}\n"),
+    );
+    assert_eq!(default_fpr(&home).as_deref(), Some(second.as_str()));
+    assert_ne!(first, second);
+}
+
+#[test]
+fn default_key_without_usable_value_falls_back_to_first_usable_key() {
+    let home = GpgHome::new();
+    home.gen_expired("Expired Example (test fixture) <expired@example.org>");
+    let first = home.gen_key("First Example (test fixture) <first@example.org>");
+    let other = GpgHome::new();
+    let public_only = other.gen_key("Public Example (test fixture) <public@example.org>");
+    let export = home.path().join("public.asc");
+    std::fs::write(&export, other.export(&[&public_only])).unwrap();
+    home.gpg(&["--import", export.to_str().unwrap()]);
+    for conf in [
+        format!("default-key {public_only}\n"),
+        "default-key 0000000000000000000000000000000000000000\n".to_string(),
+        format!("default-key {first} # comment\n"),
+        "default-key no-such-user@example.org\n".to_string(),
+    ] {
+        write_conf(&home, "gpg.conf", &conf);
+        assert_eq!(
+            default_fpr(&home).as_deref(),
+            Some(first.as_str()),
+            "{conf}"
+        );
+    }
+}
+
+#[test]
+fn default_key_reads_versioned_conf_first() {
+    let home = GpgHome::new();
+    let first = home.gen_key("First Example (test fixture) <first@example.org>");
+    let second = home.gen_key("Second Example (test fixture) <second@example.org>");
+    write_conf(&home, "gpg.conf", &format!("default-key {first}\n"));
+    write_conf(&home, "gpg.conf-2", &format!("default-key {second}\n"));
+    assert_eq!(default_fpr(&home).as_deref(), Some(second.as_str()));
+}
+
+#[test]
+fn default_key_conf_may_be_non_utf8() {
+    let home = GpgHome::new();
+    home.gen_key("First Example (test fixture) <first@example.org>");
+    let second = home.gen_key("Second Example (test fixture) <second@example.org>");
+    let mut conf = b"# caf\xe9\n".to_vec();
+    conf.extend_from_slice(format!("default-key {second}\n").as_bytes());
+    std::fs::write(home.path().join("gpg.conf"), conf).unwrap();
+    assert_eq!(default_fpr(&home).as_deref(), Some(second.as_str()));
 }

@@ -71,6 +71,34 @@ impl GpgHome {
         fpr
     }
 
+    /// A sign-only key that expires one second after it is made. Waits
+    /// until it has expired.
+    pub fn gen_expired(&self, uid: &str) -> String {
+        self.gpg(&["--quick-gen-key", uid, "ed25519", "sign", "seconds=1"]);
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        self.colons(&["--list-keys", uid])
+            .iter()
+            .find(|f| f[0] == "fpr")
+            .map(|f| f[9].clone())
+            .unwrap()
+    }
+
+    /// Revoke a key with the revocation certificate gpg made at key
+    /// generation (`openpgp-revocs.d`).
+    pub fn revoke(&self, fpr: &str) {
+        let path = self
+            .path()
+            .join("openpgp-revocs.d")
+            .join(format!("{fpr}.rev"));
+        let cert = std::fs::read_to_string(&path).unwrap().replace(
+            ":-----BEGIN PGP PUBLIC KEY BLOCK-----",
+            "-----BEGIN PGP PUBLIC KEY BLOCK-----",
+        );
+        let file = self.path().join("revoke.asc");
+        std::fs::write(&file, cert).unwrap();
+        self.gpg(&["--import", file.to_str().unwrap()]);
+    }
+
     pub fn export(&self, fprs: &[&str]) -> Vec<u8> {
         let mut args = vec!["--armor", "--export"];
         args.extend_from_slice(fprs);
