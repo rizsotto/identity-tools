@@ -1,0 +1,9 @@
+# header
+
+command="echo \"hi there\"",no-pty {OTHER} quoted
+cert-authority,principals="a,b" {OLD} ca stays
+ssh-foo AAAA unknown type
+   	
+# {OLD} commented stays
+restrict {NEW} new
+#end

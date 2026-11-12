@@ -1,0 +1,6 @@
+ssh-foo AAAAB3NzaC1yc2E bogus
+this is not a key
+ssh-ed25519 AAAA broken
+command="unclosed {OLD} old
+{OLD} old
+{NEW} new@example.org

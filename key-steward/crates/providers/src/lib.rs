@@ -22,4 +22,5 @@ pub use netlog::{NetLog, NetLogEntry};
 pub use provider::{AddOpts, KeyRef, Provider, PublicKeyRef, VerifyError, VerifyStatus};
 pub use secret_service::SecretServiceTokens;
 pub use ssh_server::SshServer;
+pub use ssh_server::authorized_keys;
 pub use token::{InMemoryTokenSource, Token, TokenError, TokenKey, TokenSource};

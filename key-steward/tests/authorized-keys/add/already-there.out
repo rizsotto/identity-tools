@@ -1,0 +1,3 @@
+restrict {OLD} old
+restrict {NEW} new@example.org
+{OTHER} o
