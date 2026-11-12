@@ -6,10 +6,41 @@
 //! for a last line without newline). An edit only adds or drops whole
 //! lines; all other bytes stay the same.
 //!
-//! Options follow sshd(8), "AUTHORIZED_KEYS FILE FORMAT": they end at the
-//! first space or tab outside double quotes, and `\"` is a literal quote.
-//! Lines with the `cert-authority` option hold a CA, not a login key: they
-//! never match a fingerprint and are never changed.
+//! # How sshd reads a line (OpenSSH portable 10.2p1, same on master)
+//!
+//! A line must be read as sshd reads it, or a line sshd accepts as the
+//! old key could stay behind after `remove`.
+//!
+//! 1. `auth_check_authkeys_file` (auth2-pubkeyfile.c): `getline`, then the
+//!    line is a C string, so it ends at the first NUL byte. `skip_space`
+//!    (misc.c) skips spaces and tabs only. Empty lines, a lone `\n` and
+//!    lines starting with `#` are skipped.
+//! 2. `auth_check_authkey_line` (auth2-pubkeyfile.c): first `sshkey_read`
+//!    on the whole line. If that fails, the options run to the end of
+//!    `sshkey_advance_past_options` (authfile.c): up to the first space or
+//!    tab outside double quotes, `\"` skipped as a pair, an unclosed quote
+//!    is an error. Then spaces and tabs, then `sshkey_read` again.
+//! 3. `sshkey_read` (sshkey.c): the type is the bytes up to the first
+//!    space or tab and must be followed by one; it must equal a key type
+//!    name exactly (`peek_type_nid`). Spaces and tabs, then the base64
+//!    field up to the next space or tab. Everything after is the comment.
+//! 4. The base64 field goes to `b64_pton` (openbsd-compat/base64.c) via
+//!    `sshbuf_b64tod` (sshbuf-misc.c), which skips every C `isspace` byte
+//!    anywhere (`\r`, `\v`, `\f`; space, tab and `\n` cannot be inside).
+//!    Padding must be right and unused bits zero. `sshkey_fromb` refuses
+//!    extra bytes after the key.
+//! 5. `sshauthopt_parse` (auth-options.c) and `opt_flag` (misc.c): options
+//!    match case-insensitively. A line with bad options is ignored by
+//!    sshd; this module still treats it as a key line (removing it is
+//!    harmless; a `keep` line like that is caught by the removal login).
+//! 6. A plain key never matches a `cert-authority` line, but a user
+//!    certificate signed by that key does. Such lines are kept and listed
+//!    by [`AuthorizedKeys::remove`].
+//!
+//! Here: line endings (`\n`, and a `\r` before it) are split off and
+//! kept, each line is cut at its first NUL before parsing, fields split on
+//! spaces and tabs only, and `\r`, `\v`, `\f` are dropped from the base64
+//! field before it is decoded.
 
 use identity_core::{Fingerprint, PublicKey, SshPublicKey, parse_public_keys};
 
@@ -227,6 +258,7 @@ fn matches(line: &Line, fpr: &Fingerprint) -> bool {
 /// Works on bytes: only the key type and the base64 field must be ASCII;
 /// options and comment may hold any bytes.
 fn parse_key_line(text: &[u8], line: usize) -> Option<KeyLine> {
+    let text = until_nul(text);
     if text.starts_with("\u{feff}".as_bytes()) {
         return None;
     }
@@ -261,7 +293,12 @@ fn parse_key(text: &[u8]) -> Option<SshPublicKey> {
     let (key_type, rest) = split_field(text);
     let (blob, comment) = split_field(rest);
     let key_type = std::str::from_utf8(key_type).ok()?;
-    let blob = std::str::from_utf8(blob).ok()?;
+    let blob: Vec<u8> = blob
+        .iter()
+        .copied()
+        .filter(|b| !matches!(b, b'\r' | b'\n' | 0x0b | 0x0c))
+        .collect();
+    let blob = std::str::from_utf8(&blob).ok()?;
     if key_type.is_empty() || blob.is_empty() || !key_type.is_ascii() || !blob.is_ascii() {
         return None;
     }
@@ -283,7 +320,7 @@ fn parse_key(text: &[u8]) -> Option<SshPublicKey> {
 /// Whether a line that is neither a comment nor a parsed key holds a key
 /// with this fingerprint anywhere, as two neighbouring fields.
 fn mentions(text: &[u8], fpr: &Fingerprint) -> bool {
-    let text = trim_ws(text);
+    let text = trim_ws(until_nul(text));
     if text.is_empty() || text[0] == b'#' {
         return false;
     }
@@ -312,6 +349,11 @@ const KEY_TYPES: &[&str] = &[
     "sk-ssh-ed25519@openssh.com",
     "sk-ecdsa-sha2-nistp256@openssh.com",
 ];
+
+/// The line as sshd sees it: a C string ends at the first NUL.
+fn until_nul(b: &[u8]) -> &[u8] {
+    &b[..b.iter().position(|&c| c == 0).unwrap_or(b.len())]
+}
 
 fn trim_ws(b: &[u8]) -> &[u8] {
     let i = b
@@ -408,6 +450,35 @@ mod tests {
         let k = parse_key_line(format!("Cert-Authority,x=\"a b\" {KEY} c").as_bytes(), 1).unwrap();
         assert!(k.cert_authority);
         assert_eq!(k.options.as_deref(), Some(&b"Cert-Authority,x=\"a b\""[..]));
+    }
+
+    #[test]
+    fn sshd_variants_of_a_key_are_seen() {
+        let (t, b) = KEY.split_once(' ').unwrap();
+        let fpr = parse_key(KEY.as_bytes()).unwrap().fingerprint;
+        let (b1, b2) = b.split_at(10);
+        let variants: Vec<Vec<u8>> = vec![
+            format!("{t} {b1}\r{b2}").into_bytes(),
+            format!("{t} {b1}\x0b{b2}").into_bytes(),
+            format!("{t} {b1}\x0c{b2} c").into_bytes(),
+            format!("restrict {t} {b1}\x0b{b2}").into_bytes(),
+            format!("{KEY}\0junk").into_bytes(),
+            format!("{KEY}\0").into_bytes(),
+        ];
+        for v in &variants {
+            let k = parse_key_line(v, 1).unwrap_or_else(|| panic!("{v:?}"));
+            assert_eq!(k.key.fingerprint, fpr, "{v:?}");
+            // The guard sees the same key inside a line it cannot parse.
+            let unknown = [&b"command=\"unclosed "[..], v].concat();
+            assert!(parse_key_line(&unknown, 1).is_none(), "{unknown:?}");
+            assert!(mentions(&unknown, &fpr), "{unknown:?}");
+        }
+        // sshd stops at NUL, so a key after it is not there.
+        let hidden = format!("\0{KEY}").into_bytes();
+        assert!(parse_key_line(&hidden, 1).is_none());
+        assert!(!mentions(&hidden, &fpr));
+        // A space inside the base64 field ends it, as in sshd.
+        assert!(parse_key_line(format!("{t} {b1} {b2}").as_bytes(), 1).is_none());
     }
 
     #[test]

@@ -5,7 +5,10 @@
 //! `remove(OLD, keep NEW)`. `<case>.in` is the file before, `<case>.out`
 //! the file after. A `.in` without `.out` must be refused. `{OLD}`,
 //! `{NEW}`, `{OTHER}` and `{CA}` stand for `<type> <base64>` of a key, so
-//! the same files can run with keys made for a test server.
+//! the same files can run with keys made for a test server. `{OLD_TYPE}`
+//! is the old key's type, `{OLD_B1}` the first 10 base64 characters and
+//! `{OLD_B2}` the rest. Files may hold any bytes valid in UTF-8 (NUL, CR,
+//! vertical tab, form feed).
 
 use std::fs;
 use std::path::PathBuf;
@@ -34,6 +37,13 @@ fn fill(template: &[u8]) -> Vec<u8> {
     for (name, line) in [("OLD", OLD), ("NEW", NEW), ("OTHER", OTHER), ("CA", CA)] {
         s = s.replace(&format!("{{{name}}}"), &key(line).encoded);
     }
+    let old = key(OLD).encoded;
+    let (key_type, blob) = old.split_once(' ').unwrap();
+    let (b1, b2) = blob.split_at(10);
+    s = s
+        .replace("{OLD_TYPE}", key_type)
+        .replace("{OLD_B1}", b1)
+        .replace("{OLD_B2}", b2);
     s.into_bytes()
 }
 

@@ -552,6 +552,14 @@ test sshd (byte compare of the server file).
   in. T06 passes the line numbers up; T12 shows "the old key is still
   trusted as a certificate authority on this server" in the summary and
   keeps the location flagged (not plain `Removed`).
+- Negative check after removal (defense in depth, T06 and T12): after
+  `remove_old(L)` on an SSH server, the engine logs in with the OLD key
+  (still on disk until retire) through the same pinned generated config
+  and expects the login to fail. If it still logs in (a line the editor
+  missed, another `AuthorizedKeysFile`, a CA line with a certificate),
+  the location is flagged "old key still accepted" and retire is
+  blocked. CA lines from `ca_lines_with_old_key` get the same flag and
+  block retire until the user decides.
 - `remove` refuses with `OldKeyInUnknownLine` if a line it cannot parse
   still holds the old key (sshd might accept it). Show the user the
   reason; do not retry.
