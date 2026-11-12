@@ -2750,6 +2750,7 @@ dependencies = [
  "inventory",
  "libc",
  "providers",
+ "serde_json",
  "test-support",
  "thiserror 2.0.21",
  "tokio",

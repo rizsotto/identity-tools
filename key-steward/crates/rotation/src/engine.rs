@@ -746,8 +746,8 @@ impl<'a> Engine<'a> {
     }
 
     fn retire_skip_reason(&self) -> Result<Option<String>, EngineError> {
-        let held: Vec<String> = self
-            .locations()?
+        let locations = self.locations()?;
+        let mut held: Vec<String> = locations
             .iter()
             .filter(|l| l.phase != Phase::OldRemoved || l.reason.is_some())
             .map(|l| {
@@ -758,6 +758,15 @@ impl<'a> Engine<'a> {
                 format!("{} ({why})", l.target.label())
             })
             .collect();
+        // Locations of the old key left out of this rotation (skipped or
+        // refused in the dry-run) still hold it.
+        held.extend(
+            self.store
+                .list_for_key(&self.rot.old_fingerprint)?
+                .iter()
+                .filter(|r| !locations.iter().any(|l| l.location_id == r.id))
+                .map(|r| format!("{} (not in this rotation)", r.target.label())),
+        );
         if held.is_empty() {
             return Ok(None);
         }
