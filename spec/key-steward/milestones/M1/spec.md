@@ -168,8 +168,10 @@ Tick each box with evidence: a test name or command output.
       are refused before any request
       (`gitlab_refuses_plain_http_and_ssh_targets`,
       `github_errors_hold_no_token`); the D-Bus test uses a private peer.
-- [ ] `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings`
+- [x] `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings`
       and `cargo test --workspace` pass in the devcontainer and in CI.
+      GitHub CI: passed on b530f9f, run 43169187357
+      (https://github.com/rizsotto/identity-tools/actions/runs/43169187357).
       Devcontainer: passed 2026-11-12 on 2aa1d1d (full CI sequence: selftest,
       fmt, clippy `--locked -D warnings`, `cargo test --locked --workspace`, 304
       tests, 0 failed, 0 ignored, `check-tests-ran.sh` ok). Gap: GitHub CI has
