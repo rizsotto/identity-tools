@@ -4,14 +4,16 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use identity_core::{Fingerprint, PublicKey};
+use identity_core::{Fingerprint, PublicKey, SshPublicKey};
 use inventory::{LocationKind, Purpose, Target};
+use serde_json::{Value, json};
 
+use super::write::{self, ForgeWrites, Op};
 use super::{
     ForgeCore, Listing, OpenPgpReader, base_url, check_objects, check_owner, text_bytes, title,
 };
 use crate::error::ProviderError;
-use crate::http::AuthStyle;
+use crate::http::{AuthStyle, HttpClient};
 use crate::netlog::NetLog;
 use crate::provider::{AddOpts, KeyRef, Provider, PublicKeyRef, RemoveOpts, VerifyStatus};
 use crate::token::TokenSource;
@@ -35,22 +37,8 @@ impl GitLab {
     }
 
     async fn listing(&self, target: &Target) -> Result<Listing, ProviderError> {
-        let api = format!("{}/api/v4", base_url(KIND, target)?);
-        let client = self
-            .core
-            .client(KIND, target, &api, AuthStyle::PrivateToken, &[])
-            .await?;
-        check_owner(KIND, &client, target, "username").await?;
-        let mut out = Listing::default();
-        let items = client.get_all_pages("/user/keys?per_page=100").await?;
-        check_objects(KIND, &items)?;
-        for item in &items {
-            out.add_ssh(
-                item,
-                purposes(item["usage_type"].as_str()),
-                title(item, "title"),
-            );
-        }
+        let client = self.session(target).await?;
+        let mut out = self.ssh_keys(&client).await?;
         let items = client.get_all_pages("/user/gpg_keys?per_page=100").await?;
         check_objects(KIND, &items)?;
         for item in &items {
@@ -72,6 +60,82 @@ fn purposes(usage: Option<&str>) -> &'static [Purpose] {
     }
 }
 
+/// The new key's `usage_type`: what the old key (`like`) serves, plus
+/// `purpose`. Without an old key in the list, `purpose` alone.
+fn usage_type(listing: &Listing, like: Option<&KeyRef>, purpose: Purpose) -> &'static str {
+    let serves = |p: Purpose| {
+        purpose == p
+            || like.is_some_and(|l| {
+                listing
+                    .keys
+                    .iter()
+                    .any(|k| k.fingerprint == l.fingerprint && k.purpose == p)
+            })
+    };
+    match (serves(Purpose::SshAuth), serves(Purpose::SshSigning)) {
+        (true, true) => "auth_and_signing",
+        (true, false) => "auth",
+        _ => "signing",
+    }
+}
+
+#[async_trait]
+impl ForgeWrites for GitLab {
+    fn kind(&self) -> LocationKind {
+        KIND
+    }
+
+    async fn session(&self, target: &Target) -> Result<HttpClient, ProviderError> {
+        let api = format!("{}/api/v4", base_url(KIND, target)?);
+        let client = self
+            .core
+            .client(KIND, target, &api, AuthStyle::PrivateToken, &[])
+            .await?;
+        check_owner(KIND, &client, target, "username").await?;
+        Ok(client)
+    }
+
+    async fn ssh_keys(&self, client: &HttpClient) -> Result<Listing, ProviderError> {
+        let mut out = Listing::default();
+        let items = client.get_all_pages("/user/keys?per_page=100").await?;
+        check_objects(KIND, &items)?;
+        for item in &items {
+            out.add_ssh(
+                item,
+                purposes(item["usage_type"].as_str()),
+                title(item, "title"),
+            );
+        }
+        Ok(out)
+    }
+
+    fn add_request(
+        &self,
+        key: &SshPublicKey,
+        title: &str,
+        purpose: Purpose,
+        like: Option<&KeyRef>,
+        listing: &Listing,
+    ) -> (String, Value) {
+        (
+            "/user/keys".into(),
+            json!({
+                "title": title,
+                "key": key.encoded,
+                "usage_type": usage_type(listing, like, purpose),
+            }),
+        )
+    }
+
+    fn delete_path(&self, _purpose: Purpose, id: &str) -> String {
+        format!("/user/keys/{id}")
+    }
+
+    fn scopes(&self, _op: Op, _purpose: Purpose) -> String {
+        "the api scope (read_user cannot write)".into()
+    }
+}
+
 #[async_trait]
 impl Provider for GitLab {
     fn kind(&self) -> LocationKind {
@@ -84,20 +148,20 @@ impl Provider for GitLab {
 
     async fn add(
         &self,
-        _target: &Target,
-        _key: &PublicKey,
-        _opts: &AddOpts,
+        target: &Target,
+        key: &PublicKey,
+        opts: &AddOpts,
     ) -> Result<(), ProviderError> {
-        Err(ProviderError::NotYet("adding a key to GitLab"))
+        write::add(self, target, key, opts).await
     }
 
     async fn remove(
         &self,
-        _target: &Target,
-        _key: &Fingerprint,
-        _opts: &RemoveOpts,
+        target: &Target,
+        key: &Fingerprint,
+        opts: &RemoveOpts,
     ) -> Result<(), ProviderError> {
-        Err(ProviderError::NotYet("removing a key from GitLab"))
+        write::remove(self, target, key, opts).await
     }
 
     async fn verify(&self, target: &Target, key: &KeyRef) -> Result<VerifyStatus, ProviderError> {

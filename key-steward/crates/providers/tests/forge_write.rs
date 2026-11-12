@@ -5,8 +5,8 @@ mod common;
 use common::*;
 use identity_core::{PublicKey, SshPublicKey, parse_public_keys};
 use providers::{
-    AddOpts, GitHub, LocationKind, NetLog, OpenPgpReader, Provider, ProviderError, Purpose,
-    RemoveOpts, Target, VerifyStatus,
+    AddOpts, Forgejo, GitHub, GitLab, KeyRef, LocationKind, NetLog, OpenPgpReader, Provider,
+    ProviderError, Purpose, RemoveOpts, Target, VerifyStatus,
 };
 use test_support::{FakeForge, Fault, FaultOn, Flavour, KeyList, TempGnupgHome};
 use wiremock::matchers::{method, path};
@@ -391,4 +391,276 @@ async fn github_write_errors_hold_no_token() {
         texts.push(format!("{err:?}"));
     }
     assert_no_token(&log, &texts);
+}
+
+fn gitlab(forge: &FakeForge, gnupg: &TempGnupgHome, log: &NetLog) -> (GitLab, Target) {
+    let target = account(forge.base_url());
+    let p = GitLab::new(
+        tokens(LocationKind::GitLab, &target),
+        OpenPgpReader::with_home(gnupg.path()),
+        log.clone(),
+    );
+    (p, target)
+}
+
+fn forgejo(forge: &FakeForge, gnupg: &TempGnupgHome, log: &NetLog) -> (Forgejo, Target) {
+    let target = account(forge.base_url());
+    let p = Forgejo::new(
+        tokens(LocationKind::Forgejo, &target),
+        OpenPgpReader::with_home(gnupg.path()),
+        log.clone(),
+    );
+    (p, target)
+}
+
+fn like(file: &str, i: usize, purpose: Purpose) -> Option<KeyRef> {
+    Some(common::key(ssh_fprs(file)[i].clone(), purpose))
+}
+
+/// The body of the last `POST`.
+fn last_post(f: &FakeForge) -> serde_json::Value {
+    f.requests()
+        .into_iter()
+        .rev()
+        .find(|r| r.method == "POST")
+        .and_then(|r| r.body)
+        .unwrap()
+}
+
+#[tokio::test]
+async fn gitlab_add_remove_against_fake() {
+    // Self-hosted under a path.
+    let forge = FakeForge::builder(Flavour::GitLab)
+        .token(TOKEN)
+        .prefix("/gitlab")
+        .start()
+        .await;
+    let gnupg = TempGnupgHome::new();
+    let log = NetLog::new();
+    let (p, target) = gitlab(&forge, &gnupg, &log);
+    let key = new_key();
+    let fpr = ssh(&key).fingerprint.clone();
+    let verify = async |purpose| {
+        p.verify(&target, &common::key(fpr.clone(), purpose))
+            .await
+            .unwrap()
+    };
+
+    // usage_type comes from the old key: here auth_and_signing.
+    let opts = AddOpts {
+        like: like("gitlab/user_keys_page2.json", 0, Purpose::SshAuth),
+        ..add_opts(Purpose::SshAuth)
+    };
+    p.add(&target, &key, &opts).await.unwrap();
+    assert_eq!(
+        writes(&forge),
+        [("POST".into(), "/gitlab/api/v4/user/keys".into())]
+    );
+    assert_eq!(forge.requests()[0].path, "/gitlab/api/v4/user");
+    let body = last_post(&forge);
+    assert_eq!(body["usage_type"], "auth_and_signing");
+    assert_eq!(body["key"], NEW_BLOB);
+    assert_default_title(body["title"].as_str().unwrap(), "new@test");
+    assert_eq!(verify(Purpose::SshAuth).await, VerifyStatus::Verified);
+    assert_eq!(verify(Purpose::SshSigning).await, VerifyStatus::Verified);
+
+    // The same object serves signing: nothing to add.
+    p.add(&target, &key, &add_opts(Purpose::SshSigning))
+        .await
+        .unwrap();
+    assert_eq!(writes(&forge).len(), 1);
+
+    // One object, one DELETE, gone for both purposes.
+    let id = forge.keys().iter().find(|k| k.key == NEW_BLOB).unwrap().id;
+    p.remove(&target, &fpr, &remove_opts(Purpose::SshAuth))
+        .await
+        .unwrap();
+    assert_eq!(
+        writes(&forge)[1],
+        ("DELETE".into(), format!("/gitlab/api/v4/user/keys/{id}"))
+    );
+    assert_eq!(writes(&forge).len(), 2);
+    assert_eq!(count(&forge, KeyList::Auth, NEW_BLOB), 0);
+
+    // Old key auth only: the new key too.
+    let opts = AddOpts {
+        like: like("gitlab/user_keys.json", 0, Purpose::SshAuth),
+        ..add_opts(Purpose::SshAuth)
+    };
+    p.add(&target, &key, &opts).await.unwrap();
+    assert_eq!(last_post(&forge)["usage_type"], "auth");
+    assert_eq!(verify(Purpose::SshSigning).await, VerifyStatus::Missing);
+    // A signing removal does not touch an auth-only object.
+    let before = writes(&forge).len();
+    p.remove(&target, &fpr, &remove_opts(Purpose::SshSigning))
+        .await
+        .unwrap();
+    assert_eq!(writes(&forge).len(), before);
+    p.remove(&target, &fpr, &remove_opts(Purpose::SshAuth))
+        .await
+        .unwrap();
+
+    // No old key: the purpose alone.
+    p.add(&target, &key, &add_opts(Purpose::SshSigning))
+        .await
+        .unwrap();
+    assert_eq!(last_post(&forge)["usage_type"], "signing");
+    assert_eq!(verify(Purpose::SshAuth).await, VerifyStatus::Missing);
+    assert_eq!(verify(Purpose::SshSigning).await, VerifyStatus::Verified);
+
+    // 403: advice names the api scope; nothing removed.
+    forge.fail_next(FaultOn::Write, Fault::Status(403));
+    let err = p
+        .remove(&target, &fpr, &remove_opts(Purpose::SshSigning))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, ProviderError::Denied { advice, .. } if advice.contains("api")),
+        "{err:?}"
+    );
+    assert_eq!(count(&forge, KeyList::Auth, NEW_BLOB), 1);
+    p.remove(&target, &fpr, &remove_opts(Purpose::SshSigning))
+        .await
+        .unwrap();
+    assert_eq!(count(&forge, KeyList::Auth, NEW_BLOB), 0);
+    assert_no_token(&log, &[err.to_string(), format!("{err:?}")]);
+}
+
+#[tokio::test]
+async fn gitlab_lost_response_no_duplicate() {
+    let forge = fake(Flavour::GitLab).await;
+    let gnupg = TempGnupgHome::new();
+    let log = NetLog::new();
+    let (p, target) = gitlab(&forge, &gnupg, &log);
+    let key = new_key();
+    let fpr = ssh(&key).fingerprint.clone();
+
+    forge.fail_next(FaultOn::Write, Fault::LoseResponse);
+    p.add(&target, &key, &add_opts(Purpose::SshAuth))
+        .await
+        .unwrap();
+    assert_eq!(writes(&forge).len(), 1);
+    assert_eq!(count(&forge, KeyList::Auth, NEW_BLOB), 1);
+
+    forge.fail_next(FaultOn::Write, Fault::LoseResponse);
+    p.remove(&target, &fpr, &remove_opts(Purpose::SshAuth))
+        .await
+        .unwrap();
+    assert_eq!(writes(&forge).len(), 2);
+    assert_eq!(count(&forge, KeyList::Auth, NEW_BLOB), 0);
+
+    forge.fail_next(FaultOn::Write, Fault::Status(500));
+    let err = p
+        .add(&target, &key, &add_opts(Purpose::SshAuth))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, ProviderError::WriteFailed { status: 500, .. }),
+        "{err:?}"
+    );
+    assert_eq!(writes(&forge).len(), 3);
+    assert_eq!(count(&forge, KeyList::Auth, NEW_BLOB), 0);
+    assert_no_token(&log, &[err.to_string()]);
+}
+
+#[tokio::test]
+async fn forgejo_add_remove_against_fake() {
+    let forge = fake(Flavour::Forgejo).await;
+    let gnupg = TempGnupgHome::new();
+    let log = NetLog::new();
+    let (p, target) = forgejo(&forge, &gnupg, &log);
+    let key = new_key();
+    let fpr = ssh(&key).fingerprint.clone();
+    let verify = async |purpose| {
+        p.verify(&target, &common::key(fpr.clone(), purpose))
+            .await
+            .unwrap()
+    };
+
+    // Forgejo refuses a used title: "laptop" and "laptop (2)" are taken.
+    let other = forge.keys()[1].key.clone();
+    forge.insert_key(KeyList::Auth, &other, "laptop (2)", None);
+    let opts = AddOpts {
+        title: Some("laptop".into()),
+        ..add_opts(Purpose::SshAuth)
+    };
+    p.add(&target, &key, &opts).await.unwrap();
+    assert_eq!(
+        writes(&forge),
+        [("POST".into(), "/api/v1/user/keys".into())]
+    );
+    assert_eq!(forge.requests()[0].path, "/api/v1/user");
+    let body = last_post(&forge);
+    assert_eq!(body["title"], "laptop (3)");
+    assert_eq!(body["key"], NEW_BLOB);
+    // One key serves auth and signing.
+    assert_eq!(verify(Purpose::SshAuth).await, VerifyStatus::Verified);
+    assert_eq!(verify(Purpose::SshSigning).await, VerifyStatus::Verified);
+    p.add(&target, &key, &add_opts(Purpose::SshSigning))
+        .await
+        .unwrap();
+    assert_eq!(writes(&forge).len(), 1);
+
+    forge.fail_next(FaultOn::Write, Fault::Status(403));
+    let err = p
+        .remove(&target, &fpr, &remove_opts(Purpose::SshSigning))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, ProviderError::Denied { advice, .. } if advice.contains("write:user")),
+        "{err:?}"
+    );
+
+    let id = forge.keys().iter().find(|k| k.key == NEW_BLOB).unwrap().id;
+    p.remove(&target, &fpr, &remove_opts(Purpose::SshSigning))
+        .await
+        .unwrap();
+    assert_eq!(
+        writes(&forge).last().unwrap(),
+        &("DELETE".to_string(), format!("/api/v1/user/keys/{id}"))
+    );
+    assert_eq!(count(&forge, KeyList::Auth, NEW_BLOB), 0);
+
+    // Default title from the comment and the date.
+    p.add(&target, &key, &add_opts(Purpose::SshAuth))
+        .await
+        .unwrap();
+    assert_default_title(last_post(&forge)["title"].as_str().unwrap(), "new@test");
+    assert_no_token(&log, &[err.to_string(), format!("{err:?}")]);
+}
+
+#[tokio::test]
+async fn forgejo_lost_response_no_duplicate() {
+    let forge = fake(Flavour::Forgejo).await;
+    let gnupg = TempGnupgHome::new();
+    let log = NetLog::new();
+    let (p, target) = forgejo(&forge, &gnupg, &log);
+    let key = new_key();
+    let fpr = ssh(&key).fingerprint.clone();
+
+    forge.fail_next(FaultOn::Write, Fault::LoseResponse);
+    p.add(&target, &key, &add_opts(Purpose::SshAuth))
+        .await
+        .unwrap();
+    assert_eq!(writes(&forge).len(), 1);
+    assert_eq!(count(&forge, KeyList::Auth, NEW_BLOB), 1);
+
+    forge.fail_next(FaultOn::Write, Fault::CloseConnection { apply: true });
+    p.remove(&target, &fpr, &remove_opts(Purpose::SshAuth))
+        .await
+        .unwrap();
+    assert_eq!(writes(&forge).len(), 2);
+    assert_eq!(count(&forge, KeyList::Auth, NEW_BLOB), 0);
+
+    forge.fail_next(FaultOn::Write, Fault::Status(500));
+    let err = p
+        .add(&target, &key, &add_opts(Purpose::SshAuth))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, ProviderError::WriteFailed { status: 500, .. }),
+        "{err:?}"
+    );
+    assert_eq!(writes(&forge).len(), 3);
+    assert_no_token(&log, &[err.to_string()]);
 }
