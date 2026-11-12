@@ -9,6 +9,7 @@ mod key;
 mod openpgp;
 mod parse;
 mod private_header;
+mod recipient;
 mod ssh;
 mod weak;
 
@@ -20,4 +21,5 @@ pub use key::{
 pub use openpgp::{Gpg, OpenPgpBackend};
 pub use parse::{MAX_KEY_INPUT, ParsedLine, parse_public_keys, read_key_file};
 pub use private_header::{PrivateKeyProtection, private_key_protection};
+pub use recipient::RecipientFile;
 pub use weak::{KeyWarning, MIN_RSA_BITS, Severity, WeakReason, weak_key_warnings};
