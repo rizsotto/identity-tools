@@ -195,6 +195,31 @@ impl UserId {
     pub fn display(&self) -> String {
         display_safe(&self.uid)
     }
+
+    /// Whether this user ID is valid (not revoked, not invalid) and its
+    /// address is `email`. The whole address must match; only ASCII letters
+    /// match case-insensitively, other characters must be equal. Angle
+    /// brackets around either address are ignored. A user ID with no email
+    /// field matches if the whole user ID is the address.
+    pub fn has_email(&self, email: &str) -> bool {
+        if self.revoked || self.invalid {
+            return false;
+        }
+        let address = match self.email.as_deref() {
+            Some(e) if !e.is_empty() => e,
+            _ => &self.uid,
+        };
+        let address = strip_angle(address);
+        let email = strip_angle(email);
+        !email.is_empty() && email.contains('@') && address.eq_ignore_ascii_case(email)
+    }
+}
+
+fn strip_angle(s: &str) -> &str {
+    let s = s.trim();
+    s.strip_prefix('<')
+        .and_then(|s| s.strip_suffix('>'))
+        .unwrap_or(s)
 }
 
 fn display_safe(s: &str) -> String {

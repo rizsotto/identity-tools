@@ -46,8 +46,15 @@ pub enum GpgError {
     /// A home dir path with a NUL byte.
     #[error("unsafe GnuPG home dir path")]
     UnsafePath,
-    #[error("cannot read the GnuPG config: {0}")]
+    /// Reading gpg.conf, or the throwaway home of [`crate::Gpg::split_keys`].
+    #[error("GnuPG file error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("not a full OpenPGP fingerprint")]
+    BadFingerprint,
+    #[error("no such key in the keyring")]
+    KeyNotFound,
+    #[error("more than {limit} keys")]
+    TooManyKeys { limit: usize },
 }
 
 impl From<gpgme::Error> for GpgError {

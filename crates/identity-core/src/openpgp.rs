@@ -7,11 +7,16 @@ use std::io::Read;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use gpgme::{Context, KeyAlgorithm, Protocol};
+use std::os::unix::fs::PermissionsExt;
+
+use gpgme::{Context, ExportMode, KeyAlgorithm, Protocol};
 
 use crate::error::GpgError;
 use crate::key::{Fingerprint, KeyAlgo, OpenPgpKey, OpenPgpSubkey, UserId};
 use crate::parse::MAX_KEY_INPUT;
+
+/// The most keys [`Gpg::split_keys`] takes from one blob.
+pub const MAX_SPLIT_KEYS: usize = 32;
 
 /// Read access to OpenPGP keys. Never exports or returns secret key
 /// material.
@@ -95,6 +100,81 @@ impl Gpg {
         self.effective_home().map(|home| self.conf_path(&home))
     }
 
+    /// Export one key (public parts only, binary) by the full fingerprint
+    /// of its primary key (40 or 64 hex digits). Output over
+    /// [`MAX_KEY_INPUT`] is refused.
+    pub fn export_key(&mut self, fingerprint: &str) -> Result<Vec<u8>, GpgError> {
+        let fpr = fingerprint.to_ascii_uppercase();
+        if !matches!(fpr.len(), 40 | 64) || !fpr.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(GpgError::BadFingerprint);
+        }
+        match self.ctx.get_key(fpr.as_str()) {
+            Ok(k) if k.fingerprint().is_ok_and(|f| f.eq_ignore_ascii_case(&fpr)) => {}
+            Ok(_) => return Err(GpgError::KeyNotFound),
+            Err(e) if e.code() == gpgme::Error::EOF.code() => return Err(GpgError::KeyNotFound),
+            Err(e) => return Err(e.into()),
+        }
+        let mut out = Vec::new();
+        self.ctx
+            .export([fpr.as_str()], ExportMode::empty(), &mut out)?;
+        if out.len() > MAX_KEY_INPUT {
+            return Err(GpgError::TooLarge {
+                limit: MAX_KEY_INPUT,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Split a blob of OpenPGP keys (armored or binary, maybe several
+    /// concatenated) into one binary export per key, with its summary.
+    ///
+    /// The blob is imported into a throwaway home (mode 0700 in
+    /// `$XDG_RUNTIME_DIR` or the temp dir, gpg.conf `no-autostart`, deleted
+    /// before this returns), never into the user's keyring. Input over
+    /// [`MAX_KEY_INPUT`] or with more than [`MAX_SPLIT_KEYS`] keys is
+    /// refused. A blob with no key gives an empty list.
+    pub fn split_keys(bytes: &[u8]) -> Result<Vec<(OpenPgpKey, Vec<u8>)>, GpgError> {
+        if bytes.len() > MAX_KEY_INPUT {
+            return Err(GpgError::TooLarge {
+                limit: MAX_KEY_INPUT,
+            });
+        }
+        let dir = tempfile::Builder::new()
+            .prefix("ic-split")
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir_in(runtime_dir())?;
+        std::fs::write(dir.path().join("gpg.conf"), "no-autostart\n")?;
+        let result = Self::split_in(dir.path(), bytes);
+        dir.close()?;
+        result
+    }
+
+    fn split_in(home: &Path, bytes: &[u8]) -> Result<Vec<(OpenPgpKey, Vec<u8>)>, GpgError> {
+        let mut gpg = Gpg::with_home(home)?;
+        let count = gpg.read_keys(bytes)?.len();
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        if count > MAX_SPLIT_KEYS {
+            return Err(GpgError::TooManyKeys {
+                limit: MAX_SPLIT_KEYS,
+            });
+        }
+        gpg.ctx.import(bytes)?;
+        let keys = gpg.public_keys()?;
+        if keys.len() > MAX_SPLIT_KEYS {
+            return Err(GpgError::TooManyKeys {
+                limit: MAX_SPLIT_KEYS,
+            });
+        }
+        keys.into_iter()
+            .map(|key| {
+                let bytes = gpg.export_key(key.fingerprint.as_str())?;
+                Ok((key, bytes))
+            })
+            .collect()
+    }
+
     fn collect(
         keys: impl Iterator<Item = gpgme::Result<gpgme::Key>>,
     ) -> Result<Vec<OpenPgpKey>, GpgError> {
@@ -131,6 +211,14 @@ impl Gpg {
             .find(|p| p.exists())
             .unwrap_or_else(|| home.join("gpg.conf"))
     }
+}
+
+/// `$XDG_RUNTIME_DIR` if set and absolute, else the system temp dir.
+fn runtime_dir() -> PathBuf {
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute() && p.is_dir())
+        .unwrap_or_else(std::env::temp_dir)
 }
 
 fn usable(key: &OpenPgpKey) -> bool {
