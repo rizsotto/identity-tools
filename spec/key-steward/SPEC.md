@@ -185,16 +185,21 @@ request.
 
 ### 7.2 SSH rotation state machine
 ```
-Planned → NewKeyGenerated → Installing(i/n) → Installed → Verifying(i/n)
-        → Verified → ConfigUpdated → RemovingOld(i/n) → OldRemoved → Done
-Any step → Failed(step, error) → (user: Retry | Skip location | Abort)
-Abort after Installed: offer to remove the new key from where it was added.
-```
-- The journal is stored in SQLite (`rotation_steps` table). The app resumes from the last finished step on restart.
-- **Invariant:** the old key is never removed from a location until the new key is verified at **that** location.
-- **Invariant:** the old private key is never deleted automatically.
-- `ConfigUpdated` runs before any removal, and only if every location verified the new key. Otherwise the config is left alone (the old key still works where it was not replaced).
+Planned → NewKeyGenerated → Installing(i/n) → Verifying(i/n) → ConfigUpdated
+        → RemovingOld(i/n) → Retired → Done
+Any step → Failed(step, location, error) → (user: Retry | Skip location | Abort)
+Abort after install: offer to remove the new key from where it was added.
 
+Per location:  Pending → Installed → Verified → OldRemoved
+               Pending | Installed | Verified → Skipped     (user skipped; old key kept)
+               Installed | Verified → RolledBack           (abort; new key removed, old kept)
+```
+- The rotation state is derived from the location phases. `Installing(i/n)`, `Verifying(i/n)` and `RemovingOld(i/n)` count locations. All installs run before any verify, and all verifies before any removal. A failed step stops its location, not the others.
+- Each step writes a `start` entry before its action and a `done` or `failed` entry after it, in SQLite (`rotation_steps`), together with the phase and location row changes it makes. On restart the app replays the journal; a `start` with no end is settled by looking at the location, never trusted.
+- **Invariant:** the old key is never removed from a location until the new key is verified at **that** location. The removal step runs a fresh verify of the new key there, in the same process, right before it removes; a verify from the journal or from before a restart does not count. If the old key's remote object serves more than one purpose (GitLab `auth_and_signing`, Forgejo), the new key must be verified for each.
+- **Invariant:** the old private key is never deleted automatically.
+- **Invariant:** the ssh config always names a key that each host accepts. `ConfigUpdated` (opt in) runs before any removal and adds an `IdentityFile` line with the new key directly above each line with the old key, so ssh offers the new key first and the old key second. `Retired` drops those paired old lines. Abort with rollback restores the config from its backup only if the old key is still at every location; otherwise both lines stay.
+- `Retired` drops the paired old `IdentityFile` lines and moves the old key files to `~/.ssh/retired/`, after the user confirms, and only if the old key is gone from every location, no `authorized_keys` still trusts it as a certificate authority, and every SSH host refuses it after its removal.
 ### 7.3 Shared with Send Secret
 Send Secret lives in the same repository. Both apps use `crates/identity-core/` at the repo root, see `spec/decisions/0001-identity-core-sharing.md`.
 

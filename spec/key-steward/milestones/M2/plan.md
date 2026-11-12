@@ -60,7 +60,7 @@ rotation: Planned → NewKeyGenerated → Installing → Verifying → ConfigUpd
           → RemovingOld → Retired → Done
           any → Failed(step, location, error) → Retry | Skip | Abort
 location: Pending → Installed → Verified → OldRemoved
-          Pending|Installed → Skipped        (user skipped; old key kept)
+          Pending|Installed|Verified → Skipped (user skipped; old key kept)
           Installed|Verified → RolledBack    (abort; new key removed, old kept)
 ```
 
@@ -68,7 +68,7 @@ location: Pending → Installed → Verified → OldRemoved
 counts over the location phases. All installs run before any verify, and
 all verifies before any removal, as in SPEC 7.2. A location that failed
 verify stays `Installed` and is flagged; the others go on to removal.
-`ConfigUpdated` runs once, after the last verify and before any removal. `Retired` runs once, after the last removal. SPEC 7.2
+`ConfigUpdated` runs once, after the last verify and before any removal (see "Config update": it adds lines, it does not replace them). `Retired` runs once, after the last removal. SPEC 7.2
 has no `Retired` state; T12 adds it to SPEC 7.2 (SPEC 6 step 5 already
 names the archive step).
 
@@ -82,10 +82,11 @@ Each step writes `start` (commit), runs, then writes `done` or `failed`
 | `generate` | `ssh-keygen` into a temp dir in the ssh dir, then hard link `id` and `id.pub` to `new_path` (fails if the name exists), then remove the temp names. | Both final files exist: read `.pub`, record `new_fpr`, done. Only the private file: move it to `~/.ssh/retired/`, run again. Neither: move temp leftovers to `retired/`, run again. Never overwrite, never delete (S-2). |
 | `install(L)` | Add the new key at L. SSH: log in with the old key. | List L. New key there: done. Not there: run again. |
 | `verify(L)` | The M1 verify with the new key. Read-only. | Run again. |
-| `remove_old(L)` | Fresh verify of the new key at L, then remove the old key. SSH: log in with the new key. | List L. Old key gone: done. Still there: run again (with a fresh verify first). |
+| `remove_old(L)` | Fresh verify of the new key at L, then remove the old key. SSH: log in with the new key. | List L. Old key gone: done. Still there: run again (with a fresh verify first). SSH, old key gone: run the gated removal again (it changes nothing) to learn the `cert-authority` lines; during an abort: done, flagged "cert-authority lines not checked". |
 | `rollback(L)` | Remove the new key at L. SSH: log in with the old key. | List L. New key gone: done. Else run again. |
-| `config` | Rewrite matching `IdentityFile` lines (opt in). | Compare files with the planned result; done if equal, else run again from the backup. |
-| `retire` | Move old key files to `~/.ssh/retired/` (0700). | Files at the target: done. Else move again. |
+| `config` | Add a new `IdentityFile` line above each matching one (opt in). | Run again: the apply skips files that already hold the planned result and checks the others against the backup. |
+| `rollback` (no location) | Abort: put the config backups back (`restore_config`). | Run again (files already restored are left alone). |
+| `retire` | Move old key files to `~/.ssh/retired/` (0700). | Move again (files already moved are skipped). No new question: the `start` entry means the user said yes. |
 
 For SSH, "list L" logs in with the key the step logs in with: the old key
 while settling `install` and `rollback`, the new key while settling
@@ -130,8 +131,19 @@ location in phase `OldRemoved`.
 - Abort before any install: mark the rotation aborted. The new key files
   stay where they are; nothing was installed with them.
 - Abort after install: offer `rollback(L)` for every location in `Installed`
-  or `Verified`. Locations in `OldRemoved` keep the new key. The default
+  or `Verified` (or skipped after an install began). Locations in
+  `OldRemoved` keep the new key. The default
   answer is "keep the new key where it works".
+- Abort with rollback sets the rotation state `aborting`. A resume then
+  goes on with the abort, never forward. Abort without rollback ends an
+  `aborting` rotation too (the new key stays where a rollback failed).
+- Skip writes a `skip` `done` entry with the phase change. It is refused
+  while the location's last step has a `start` and no end.
+- Without `--update-config`, the summary warns when the ssh config still
+  names the old key.
+- A failure is "the last journal entry of that location (or of the
+  rotation itself) is `failed`". A settle that cannot list the location
+  writes nothing and flags it for this run only.
 - A rotation that is not `Done` or aborted stays open. Start refuses a new
   rotation while one is open.
 
@@ -179,36 +191,61 @@ writes the `rotations` row.
 Opt in (`--update-config`). For the user's ssh config and the files it
 includes (the list M1 `scan_config` already builds), find `IdentityFile`
 lines whose value, after the same `~` and `%d` expansion as the M1 import,
-equals `old_path`. Replace the value with `new_path`, keep the rest of the
-line byte-for-byte. Show a diff in the plan. Write each file through a temp
-file and `rename`, keep a backup `<file>.keysteward-<timestamp>`, keep the
-mode. Lines with other `%` tokens are listed, not changed.
+equals `old_path`. Lines with other `%` tokens are listed, not changed.
+Each file is written through a temp file and `rename`, with a backup
+`<file>.keysteward-<stamp>` and the mode kept. Show a diff in the plan.
 
-Order: `ConfigUpdated` runs after every verify and before any removal.
-If config were updated after removal, `ssh <host>` would use the old key
-while it is already gone from that host, and a crash or a paused rotation
-would leave that state open. Rule: config is updated only if every
-location of the old key is `Verified`. If any location failed verify or
-was skipped, the config step is skipped and the dry-run and summary say
-why: the old key still works there and the old config keeps working
-everywhere. Changed from the first draft of SPEC 7.2 (orchestrator, 2026-11-12).
-Abort with rollback after `ConfigUpdated`: restore the config files from the
-backups before any `rollback(L)` removes the new key, so the config never
-points at a key that no location accepts.
+Two phases, so the config works at every moment (orchestrator decision,
+2026-11-12, replacing "rewrite only if every location verified"):
+
+1. **Config step**, after the last verify and before any removal, whatever
+   the verify results: insert a line `IdentityFile <new_path>` directly
+   above each matching line (same indentation, rest of the line
+   byte-for-byte; `ConfigMode::InsertAbove`, stamp `rotation-<id>`). ssh
+   offers the new key first and the old key second, so a host works
+   whether it holds the new key, the old key or both.
+2. **Retire step** (below): first drop each old line that directly follows
+   a line with `new_path` (`ConfigMode::RemovePaired`, stamp
+   `rotation-<id>-retire`), then move the key files. If retire is skipped,
+   both lines stay and everything keeps working; the summary says why.
+
+Abort with rollback: first every location where a removal began and is
+not marked done (crash, lost answer) is listed again; if the old key is
+gone there, the removal is marked done. If then no location is
+`OldRemoved` and every such location could be listed, the config files go
+back to their backups (`restore_config_change`, journaled as `rollback`
+with no location) before any `rollback(L)` removes the new key. If any
+location is `OldRemoved`, both lines stay: those hosts need the new key.
 
 ### Retire
 
-After the last removal, if every location of the old key is `OldRemoved` (none
-skipped or failed): ask, then move `old_path` and `old_path.pub` to
-`~/.ssh/retired/<name>` (dir 0700, no overwrite; add `-1`, `-2` on a
-clash). Never delete (S-2). If any location still holds the old key, skip
-this step and say why.
+After the last removal, if every location of the old key is `OldRemoved`
+and none is flagged (no `cert-authority` line with the old key; for SSH,
+`check_old_key` after the removal said `Refused`): ask, then drop the
+paired old `IdentityFile` lines (phase 2 above), then move `old_path` and
+`old_path.pub` to `~/.ssh/retired/<name>` (dir 0700, no overwrite; add
+`-1`, `-2` on a clash). Never delete (S-2). If any location still holds
+or still accepts the old key, skip this step and say why.
+
+### Provider seam
+
+The engine calls providers only through the `rotation::Providers` trait:
+`provider(kind)` plus `list_as(kind, target, login)` (SSH logs in with
+`login`: the old key while settling `install` and in the rollback gate,
+the new key while settling `remove_old` and in the S-3 gate),
+`remove_key(...) -> Removed { ca_lines_with_old_key }` and
+`check_old_key(...) -> Refused | StillAccepted | Unknown`. Defaults use
+the plain `Provider` calls (`list`, `remove`, `Unknown`). The production
+implementation overrides them for `SshServer` with its inherent
+`list_as`, `remove_key` and `check_old_key`; no downcast. After each SSH
+`remove_old` the engine calls `check_old_key`; only `Refused` clears,
+anything else flags the location and blocks retire.
 
 ### Locking
 
 One open rotation per database (checked in the same transaction that
 creates the `rotations` row). Plus an advisory `flock` on
-`<data dir>/rotation.lock` for the whole run, so two processes cannot drive
+`rotation.lock` next to the database file (`RotationLock::for_database`) for the whole run, so two processes cannot drive
 the same rotation. The lock is released by the kernel when a process dies,
 so a crash never leaves a stale lock.
 
@@ -405,7 +442,7 @@ CREATE TABLE rotation_steps (
     id INTEGER PRIMARY KEY,
     rotation_id INTEGER NOT NULL REFERENCES rotations(id),
     location_id INTEGER,
-    step TEXT NOT NULL,              -- generate, install, verify, remove_old, rollback, config, retire
+    step TEXT NOT NULL,              -- generate, install, verify, remove_old, rollback, config, retire, skip
     event TEXT NOT NULL,             -- start, done, failed
     detail TEXT,                     -- short text, never key material or tokens
     at INTEGER NOT NULL

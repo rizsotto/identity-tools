@@ -313,7 +313,7 @@ fn clean_leftovers(req: &KeygenRequest, keep: &[fs::Metadata]) -> Result<Vec<Mov
     Ok(moved)
 }
 
-fn read_public(private_path: &Path, pub_path: &Path) -> Result<Generated, KeygenError> {
+pub(crate) fn read_public(private_path: &Path, pub_path: &Path) -> Result<Generated, KeygenError> {
     let bad = |reason: String| KeygenError::BadPublicKey {
         path: pub_path.to_path_buf(),
         reason,

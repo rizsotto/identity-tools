@@ -8,6 +8,11 @@
 //! the same dir and `rename`, mode kept. [`restore_config`] puts the
 //! backups back (abort with rollback after the config step).
 //!
+//! Rotation uses two phases ([`ConfigMode`]): the config step inserts a
+//! line with the new key above each matching line, so ssh offers the new
+//! key first and the old key second and every host keeps working; retire
+//! removes the paired old lines.
+//!
 //! Backups are named `<file>.keysteward-<stamp>`. The caller picks one
 //! stamp per rotation, so a resumed run finds the same backups.
 
@@ -98,15 +103,51 @@ pub struct TextUpdate {
     pub listed: Vec<usize>,
 }
 
+/// How the `IdentityFile` lines that name the old key change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigMode {
+    /// Replace the value with the new key path.
+    Replace,
+    /// Insert a line with the new key path directly above, same
+    /// indentation and rest of the line.
+    InsertAbove,
+    /// Drop each old line that directly follows a line with the new key
+    /// path (the pair [`ConfigMode::InsertAbove`] made).
+    RemovePaired,
+}
+
 /// Rewrites the `IdentityFile` lines of `text` that name `old_path`.
 /// Every other byte stays as it is, line endings included.
 pub fn update_text(text: &str, old_path: &Path, new_path: &Path, home: &Path) -> TextUpdate {
+    change_text(text, old_path, new_path, home, ConfigMode::Replace)
+}
+
+/// The value of an `IdentityFile` line expanded, if it has one we expand.
+fn identity_path(line: &str, home: &Path) -> Option<PathBuf> {
+    let (start, end, _) = identity_value(line)?;
+    let value = &line[start..end];
+    if value.contains("${") {
+        return None;
+    }
+    expand_identity(value, home, &Resolved::default())
+}
+
+/// [`update_text`] in any [`ConfigMode`].
+pub fn change_text(
+    text: &str,
+    old_path: &Path,
+    new_path: &Path,
+    home: &Path,
+    mode: ConfigMode,
+) -> TextUpdate {
     let mut out = TextUpdate {
         updated: String::with_capacity(text.len()),
         changes: Vec::new(),
         listed: Vec::new(),
     };
+    let mut prev: Option<&str> = None;
     for (i, line) in text.split_inclusive('\n').enumerate() {
+        let before = prev.replace(line);
         let Some((start, end, quoted)) = identity_value(line) else {
             out.updated.push_str(line);
             continue;
@@ -120,13 +161,49 @@ pub fn update_text(text: &str, old_path: &Path, new_path: &Path, home: &Path) ->
         match expand_identity(value, home, &Resolved::default()) {
             Some(p) if p == old_path => {
                 let new_value = render_path(new_path, home, value.starts_with("~/"), quoted);
-                let new_line = format!("{}{}{}", &line[..start], new_value, &line[end..]);
-                out.changes.push(LineChange {
-                    line: i + 1,
-                    before: trim_eol(line).to_string(),
-                    after: trim_eol(&new_line).to_string(),
-                });
-                out.updated.push_str(&new_line);
+                let mut new_line = format!("{}{}{}", &line[..start], new_value, &line[end..]);
+                match mode {
+                    ConfigMode::Replace => {
+                        out.changes.push(LineChange {
+                            line: i + 1,
+                            before: trim_eol(line).to_string(),
+                            after: trim_eol(&new_line).to_string(),
+                        });
+                        out.updated.push_str(&new_line);
+                    }
+                    ConfigMode::InsertAbove => {
+                        if !new_line.ends_with('\n') {
+                            new_line.push('\n');
+                        }
+                        out.changes.push(LineChange {
+                            line: i + 1,
+                            before: trim_eol(line).to_string(),
+                            after: format!("{}\n{}", trim_eol(&new_line), trim_eol(line)),
+                        });
+                        out.updated.push_str(&new_line);
+                        out.updated.push_str(line);
+                    }
+                    ConfigMode::RemovePaired => {
+                        let paired = before
+                            .and_then(|b| identity_path(b, home))
+                            .is_some_and(|b| b == new_path);
+                        if !paired {
+                            out.updated.push_str(line);
+                            continue;
+                        }
+                        out.changes.push(LineChange {
+                            line: i + 1,
+                            before: trim_eol(line).to_string(),
+                            after: String::new(),
+                        });
+                        // A last line with no newline: the line before
+                        // becomes the last one, also with no newline.
+                        if !line.ends_with('\n') {
+                            let kept = trim_eol(&out.updated).len();
+                            out.updated.truncate(kept);
+                        }
+                    }
+                }
             }
             None if value.contains('%') => {
                 out.listed.push(i + 1);
@@ -226,10 +303,10 @@ impl ConfigPlan {
                 f.path.display()
             ));
             for c in &f.changes {
-                s.push_str(&format!(
-                    "@@ line {} @@\n-{}\n+{}\n",
-                    c.line, c.before, c.after
-                ));
+                s.push_str(&format!("@@ line {} @@\n-{}\n", c.line, c.before));
+                for a in c.after.lines() {
+                    s.push_str(&format!("+{a}\n"));
+                }
             }
         }
         s
@@ -254,7 +331,19 @@ pub fn plan_config_update(
     home: &Path,
     stamp: &str,
 ) -> Result<ConfigPlan, ConfigError> {
-    plan_as(files, old_path, new_path, home, stamp, euid())
+    plan_config_change(files, old_path, new_path, home, stamp, ConfigMode::Replace)
+}
+
+/// [`plan_config_update`] in any [`ConfigMode`].
+pub fn plan_config_change(
+    files: &[PathBuf],
+    old_path: &Path,
+    new_path: &Path,
+    home: &Path,
+    stamp: &str,
+    mode: ConfigMode,
+) -> Result<ConfigPlan, ConfigError> {
+    plan_as(files, old_path, new_path, home, stamp, mode, euid())
 }
 
 fn plan_as(
@@ -263,6 +352,7 @@ fn plan_as(
     new_path: &Path,
     home: &Path,
     stamp: &str,
+    mode: ConfigMode,
     euid: u32,
 ) -> Result<ConfigPlan, ConfigError> {
     check_stamp(stamp)?;
@@ -286,7 +376,7 @@ fn plan_as(
             }
             Err(e) => return Err(io_err(&backup)(e)),
         };
-        let u = update_text(&original, old_path, new_path, home);
+        let u = change_text(&original, old_path, new_path, home, mode);
         let lines: Vec<&str> = original.split_inclusive('\n').collect();
         for n in u.listed {
             plan.listed.push(ListedLine {
@@ -361,7 +451,19 @@ pub fn restore_config(
     home: &Path,
     stamp: &str,
 ) -> Result<Vec<PathBuf>, ConfigError> {
-    let plan = plan_config_update(files, old_path, new_path, home, stamp)?;
+    restore_config_change(files, old_path, new_path, home, stamp, ConfigMode::Replace)
+}
+
+/// [`restore_config`] for a change made in `mode`.
+pub fn restore_config_change(
+    files: &[PathBuf],
+    old_path: &Path,
+    new_path: &Path,
+    home: &Path,
+    stamp: &str,
+    mode: ConfigMode,
+) -> Result<Vec<PathBuf>, ConfigError> {
+    let plan = plan_config_change(files, old_path, new_path, home, stamp, mode)?;
     let mut restored = Vec::new();
     let mut failed = Vec::new();
     for f in &plan.files {
@@ -459,6 +561,7 @@ mod tests {
             Path::new("/k/new"),
             Path::new("/h"),
             "s",
+            ConfigMode::Replace,
             other,
         )
         .unwrap_err();
@@ -473,6 +576,7 @@ mod tests {
             Path::new("/k/new"),
             Path::new("/h"),
             "s",
+            ConfigMode::Replace,
             other,
         )
         .unwrap();

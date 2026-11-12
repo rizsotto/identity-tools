@@ -2745,11 +2745,14 @@ dependencies = [
 name = "rotation"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "identity-core",
  "inventory",
  "libc",
+ "providers",
  "test-support",
  "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]
