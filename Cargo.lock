@@ -350,6 +350,7 @@ dependencies = [
 name = "identity-core"
 version = "0.1.0"
 dependencies = [
+ "base64ct",
  "bech32",
  "gpgme",
  "gpgme-sys",

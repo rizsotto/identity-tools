@@ -6,6 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+base64ct = { version = "1", features = ["alloc"] }
 bech32 = "0.12"
 ssh-key = { version = "0.6", default-features = false, features = ["std", "ecdsa"] }
 thiserror = "2"
