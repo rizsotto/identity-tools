@@ -109,6 +109,15 @@ Use the `ssh-key` crate for public keys (`.pub` files) and fingerprints only.
 - For each alias, run `ssh -G -F <config> <alias>` to get the effective
   `hostname`, `user`, `port`, `identityfile`. This reuses OpenSSH's own logic
   for `Match`, `Include` and defaults.
+- Done in T09. Each alias gives one `unverified` location per local key
+  that ssh would offer to it. The importer does not open key files: the
+  caller passes the scanned keys (private path and fingerprint) and the
+  `identityfile` paths are matched by path. `~`, `%d`, `%h`, `%r` and `%%`
+  are expanded with the home dir the caller passes; a path with another
+  token matches no key. Hosts with no matching key and aliases `ssh -G`
+  rejects are listed in the import report, not stored. Gap: `Include`
+  globs support `*` and `?` in the last path component only (no `[...]`,
+  no globs in directory names). Facts: SPEC 15, `ssh -G` item.
 
 ## Provider trait (providers)
 
@@ -227,6 +236,7 @@ New facts to add to SPEC 15 (proposed, not added yet):
 - The `gpgme` Rust crate builds and works against Fedora 45's gpgme 2.0.x.
   (T01a) Verified and added to SPEC 15: it works with gpgme 2.0.1.
 - `ssh -G` output fields and how `Include` and `Match` behave with `-F`. (T09)
+  Verified and added to SPEC 15.
 - The exact stderr text from OpenSSH 10.x for denied auth and unknown host
   keys. (T12)
 
