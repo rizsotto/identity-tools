@@ -170,9 +170,14 @@ SPEC in the same PR.
   point it at wiremock.
 - GitHub: `/user/keys`, `/user/ssh_signing_keys`, `/user/gpg_keys`.
 - GitLab: `/api/v4/user/keys`, `/api/v4/user/gpg_keys`. GitLab key `usage_type`
-  tells auth from signing (to verify, fact 1).
-- Forgejo: `/api/v1/user/keys`, `/api/v1/user/gpg_keys`.
-- Handle pagination.
+  (`auth`, `signing`, `auth_and_signing`) tells auth from signing (verified,
+  fact 1).
+- Forgejo: `/api/v1/user/keys`, `/api/v1/user/gpg_keys`. Forgejo has no
+  separate SSH signing key list; one SSH key list serves both.
+- Handle pagination: follow the `link` header `rel="next"` on all three.
+- GPG keys: GitHub gives only the 16 hex `key_id` plus the armored `raw_key`,
+  GitLab only the armored `key`. Get the full fingerprint by parsing the
+  armored key. Details and sources: SPEC 15, fact 1.
 - `verify` = `list`, then compare fingerprints. For SSH keys, compute the
   fingerprint from the returned key text. Do not trust a server fingerprint
   field.

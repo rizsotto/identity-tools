@@ -1,0 +1,38 @@
+[
+  {
+    "id": 11,
+    "key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIO5bXY41LvoCiCD0H19lUQqIq51ohiyDFop6f9uWE2SE",
+    "url": "https://forgejo.example.invalid/api/v1/user/keys/11",
+    "title": "laptop",
+    "fingerprint": "SHA256:763JIcOpkKAvQ9s9+VAhRzITy+8pWxunATagLvmYUZw",
+    "created_at": "2025-05-06T07:08:09Z",
+    "updated_at": "2026-10-01T12:00:00Z",
+    "read_only": false,
+    "key_type": "user",
+    "verified": true,
+    "user": {
+      "id": 7,
+      "login": "testuser",
+      "full_name": "Test User",
+      "email": "test@example.invalid"
+    }
+  },
+  {
+    "id": 12,
+    "key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIM/5yo488Xvac7gsQixfbI7jRDvi1y2ErQIINbB8G3oU",
+    "url": "https://forgejo.example.invalid/api/v1/user/keys/12",
+    "title": "desktop",
+    "fingerprint": "SHA256:KgtBslWWXpr8DNkOS56gAPoPSBd34kQSoj4NF01Kkos",
+    "created_at": "2025-05-06T07:08:09Z",
+    "updated_at": "2026-10-01T12:00:00Z",
+    "read_only": false,
+    "key_type": "user",
+    "verified": false,
+    "user": {
+      "id": 7,
+      "login": "testuser",
+      "full_name": "Test User",
+      "email": "test@example.invalid"
+    }
+  }
+]
