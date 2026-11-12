@@ -54,6 +54,17 @@ pub enum ProviderError {
         status: u16,
         advice: String,
     },
+    /// A forge write gave no clear answer and the list after it failed,
+    /// so it is not known whether the change was made.
+    #[error(
+        "{forge}: not known whether the change was made. The write gave: {write}. \
+         The list after it gave: {list}"
+    )]
+    Unsettled {
+        forge: LocationKind,
+        write: String,
+        list: String,
+    },
     /// The provider cannot do this (for example a GPG key on a forge in M2).
     #[error("{0}")]
     Unsupported(String),

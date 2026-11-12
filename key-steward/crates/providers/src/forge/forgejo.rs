@@ -114,6 +114,12 @@ impl ForgeWrites for Forgejo {
     fn scopes(&self, _op: Op, _purpose: Purpose) -> String {
         "the write:user scope".into()
     }
+
+    /// The API sets no limit (`CreateKeyOption`: `binding:"Required"`),
+    /// but the web form does (`AddKeyForm`: `MaxSize(50)`). Keep to it.
+    fn max_title(&self) -> Option<usize> {
+        Some(50)
+    }
 }
 
 #[async_trait]

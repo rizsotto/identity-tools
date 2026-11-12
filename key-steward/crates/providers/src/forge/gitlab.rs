@@ -10,7 +10,8 @@ use serde_json::{Value, json};
 
 use super::write::{self, ForgeWrites, Op};
 use super::{
-    ForgeCore, Listing, OpenPgpReader, base_url, check_objects, check_owner, text_bytes, title,
+    ForgeCore, Listing, OpenPgpReader, base_url, check_objects, check_owner, ssh_fingerprint,
+    text_bytes, title,
 };
 use crate::error::ProviderError;
 use crate::http::{AuthStyle, HttpClient};
@@ -100,11 +101,23 @@ impl ForgeWrites for GitLab {
         let items = client.get_all_pages("/user/keys?per_page=100").await?;
         check_objects(KIND, &items)?;
         for item in &items {
-            out.add_ssh(
-                item,
-                purposes(item["usage_type"].as_str()),
-                title(item, "title"),
-            );
+            let usage = item["usage_type"].as_str();
+            let serves = purposes(usage);
+            if serves.is_empty()
+                && let Some(fpr) = item["key"].as_str().and_then(ssh_fingerprint)
+            {
+                let usage: String = usage
+                    .unwrap_or_default()
+                    .chars()
+                    .filter(|c| !c.is_control())
+                    .take(40)
+                    .collect();
+                out.unusable_ssh.push((
+                    fpr,
+                    format!("a usage type Key Steward does not know ({usage})"),
+                ));
+            }
+            out.add_ssh(item, serves, title(item, "title"));
         }
         Ok(out)
     }
@@ -133,6 +146,37 @@ impl ForgeWrites for GitLab {
 
     fn scopes(&self, _op: Op, _purpose: Purpose) -> String {
         "the api scope (read_user cannot write)".into()
+    }
+
+    /// `Key` model: `validates :title, length: { maximum: 255 }`.
+    fn max_title(&self) -> Option<usize> {
+        Some(255)
+    }
+
+    /// One object per key: GitLab refuses the same key twice, and the
+    /// API cannot change the usage type of a key it has.
+    fn check_add(
+        &self,
+        listing: &Listing,
+        key: &SshPublicKey,
+        purpose: Purpose,
+    ) -> Result<(), ProviderError> {
+        if listing
+            .keys
+            .iter()
+            .any(|k| k.fingerprint == key.fingerprint)
+        {
+            let want = match purpose {
+                Purpose::SshSigning => "signing",
+                _ => "authentication",
+            };
+            return Err(ProviderError::Unsupported(format!(
+                "the key is already on GitLab, but not for {want}, and GitLab cannot \
+                 change the usage type of a key it has. In GitLab, delete the key and add \
+                 it again with usage type \"Authentication & Signing\", then check again."
+            )));
+        }
+        Ok(())
     }
 }
 

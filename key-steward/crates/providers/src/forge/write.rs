@@ -17,9 +17,10 @@ use crate::error::ProviderError;
 use crate::http::{HttpClient, HttpReply};
 use crate::provider::{AddOpts, KeyRef, RemoveOpts};
 
-/// Longest key comment put in a generated title, so that the title with
-/// its date and a ` (NN)` suffix stays within 50 characters.
-const MAX_COMMENT: usize = 34;
+/// Title length used for generated titles on a forge with no known limit.
+const DEFAULT_TITLE_LIMIT: usize = 50;
+/// Room kept in a generated title for ` YYYY-MM-DD` and a ` (NN)` suffix.
+const TITLE_TAIL: usize = 16;
 /// Longest forge message kept in an error.
 const MAX_MESSAGE: usize = 300;
 
@@ -55,6 +56,20 @@ pub(super) trait ForgeWrites: Send + Sync {
 
     /// The token scopes the write needs, as advice for the user.
     fn scopes(&self, op: Op, purpose: Purpose) -> String;
+
+    /// Longest title in characters, if the forge has a known limit.
+    fn max_title(&self) -> Option<usize>;
+
+    /// Refuses an add the forge cannot do, before the `POST`. The key is
+    /// not listed for `purpose`.
+    fn check_add(
+        &self,
+        _listing: &Listing,
+        _key: &SshPublicKey,
+        _purpose: Purpose,
+    ) -> Result<(), ProviderError> {
+        Ok(())
+    }
 }
 
 pub(super) async fn add<F: ForgeWrites>(
@@ -67,16 +82,27 @@ pub(super) async fn add<F: ForgeWrites>(
         PublicKey::Ssh(k) if is_ssh(opts.purpose) => k,
         _ => return Err(unsupported(f.kind())),
     };
+    let limit = f.max_title();
+    if let (Some(t), Some(max)) = (&opts.title, limit)
+        && t.chars().count() > max
+    {
+        return Err(ProviderError::Unsupported(format!(
+            "the title is longer than {max} characters, the limit on {}",
+            f.kind()
+        )));
+    }
     let client = f.session(target).await?;
     let listing = f.ssh_keys(&client).await?;
+    check_usable(f.kind(), &listing, &key.fingerprint)?;
     if has(&listing, &key.fingerprint, opts.purpose) {
         return Ok(());
     }
+    f.check_add(&listing, key, opts.purpose)?;
     let base = match &opts.title {
         Some(t) => t.clone(),
-        None => default_title(key, &today_utc()),
+        None => default_title(key, &today_utc(), limit.unwrap_or(DEFAULT_TITLE_LIMIT)),
     };
-    let title = free_title(&base, &listing);
+    let title = free_title(&base, &listing, limit);
     let (path, body) = f.add_request(key, &title, opts.purpose, opts.like.as_ref(), &listing);
     let failure = match client.post_json(&path, &body).await {
         Ok(r) if r.status == 201 => return Ok(()),
@@ -87,7 +113,7 @@ pub(super) async fn add<F: ForgeWrites>(
         Err(e) => e,
     };
     // The answer may be lost, or the key was added meanwhile.
-    let again = f.ssh_keys(&client).await?;
+    let again = relist(f, &client, &failure).await?;
     if has(&again, &key.fingerprint, opts.purpose) {
         Ok(())
     } else {
@@ -107,7 +133,7 @@ pub(super) async fn remove<F: ForgeWrites>(
     let client = f.session(target).await?;
     let listing = f.ssh_keys(&client).await?;
     let mut failure = None;
-    for id in objects(&listing, key, opts.purpose) {
+    for id in objects(f.kind(), &listing, key, opts.purpose)? {
         match client.delete(&f.delete_path(opts.purpose, &id)).await {
             Ok(r) if r.status == 204 => {}
             Ok(r) if r.status == 401 || r.status == 403 => {
@@ -125,8 +151,8 @@ pub(super) async fn remove<F: ForgeWrites>(
     let Some(failure) = failure else {
         return Ok(());
     };
-    let again = f.ssh_keys(&client).await?;
-    if objects(&again, key, opts.purpose).is_empty() {
+    let again = relist(f, &client, &failure).await?;
+    if objects(f.kind(), &again, key, opts.purpose)?.is_empty() {
         Ok(())
     } else {
         Err(failure)
@@ -150,19 +176,67 @@ fn has(listing: &Listing, fpr: &Fingerprint, purpose: Purpose) -> bool {
         .any(|k| k.purpose == purpose && &k.fingerprint == fpr)
 }
 
-/// Remote ids of the objects with this key and purpose, each once.
-fn objects(listing: &Listing, fpr: &Fingerprint, purpose: Purpose) -> Vec<String> {
+/// The list after a write that gave no clear answer. If it fails too,
+/// the error names both.
+async fn relist<F: ForgeWrites>(
+    f: &F,
+    client: &HttpClient,
+    failure: &ProviderError,
+) -> Result<Listing, ProviderError> {
+    f.ssh_keys(client)
+        .await
+        .map_err(|e| ProviderError::Unsettled {
+            forge: f.kind(),
+            write: failure.to_string(),
+            list: e.to_string(),
+        })
+}
+
+/// A listed key with this fingerprint that we cannot place (for example an
+/// unknown GitLab usage type) stops any write: we cannot tell what it
+/// serves.
+fn check_usable(
+    kind: LocationKind,
+    listing: &Listing,
+    fpr: &Fingerprint,
+) -> Result<(), ProviderError> {
+    match listing.unusable_ssh.iter().find(|(f, _)| f == fpr) {
+        Some((_, why)) => Err(ProviderError::BadResponse {
+            forge: kind,
+            what: format!("the key is listed with {why}; change or remove it on the web"),
+        }),
+        None => Ok(()),
+    }
+}
+
+/// Remote ids of the objects with this key and purpose, each once. A
+/// matching object without a plain number id is an error, so a key is
+/// never reported removed while it stays.
+fn objects(
+    kind: LocationKind,
+    listing: &Listing,
+    fpr: &Fingerprint,
+    purpose: Purpose,
+) -> Result<Vec<String>, ProviderError> {
+    check_usable(kind, listing, fpr)?;
     let mut ids: Vec<String> = Vec::new();
     for k in &listing.keys {
-        if k.purpose == purpose
-            && &k.fingerprint == fpr
-            && let Some(id) = &k.remote_id
-            && !ids.contains(id)
-        {
+        if k.purpose != purpose || &k.fingerprint != fpr {
+            continue;
+        }
+        let id = k
+            .remote_id
+            .as_ref()
+            .filter(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
+            .ok_or_else(|| ProviderError::BadResponse {
+                forge: kind,
+                what: "a listed key with this fingerprint has no usable id".into(),
+            })?;
+        if !ids.contains(id) {
             ids.push(id.clone());
         }
     }
-    ids
+    Ok(ids)
 }
 
 fn denied<F: ForgeWrites>(f: &F, status: u16, op: Op, purpose: Purpose) -> ProviderError {
@@ -206,11 +280,12 @@ fn message(body: &Value) -> String {
 }
 
 /// `<comment> <YYYY-MM-DD>`, or `key-steward <YYYY-MM-DD>` without a
-/// comment.
-fn default_title(key: &SshPublicKey, today: &str) -> String {
+/// comment. The comment is cut so a ` (NN)` suffix still fits in `limit`.
+fn default_title(key: &SshPublicKey, today: &str, limit: usize) -> String {
+    let max_comment = limit.saturating_sub(TITLE_TAIL).max(1);
     let comment: String = key
         .comment_display()
-        .map(|c| c.trim().chars().take(MAX_COMMENT).collect::<String>())
+        .map(|c| c.trim().chars().take(max_comment).collect::<String>())
         .map(|c| c.trim().to_string())
         .filter(|c| !c.is_empty())
         .unwrap_or_else(|| "key-steward".into());
@@ -218,14 +293,20 @@ fn default_title(key: &SshPublicKey, today: &str) -> String {
 }
 
 /// `base`, or `base (2)`, `base (3)`, ... if a listed key has that title.
-/// Forgejo and Gitea refuse a title the user already has.
-fn free_title(base: &str, listing: &Listing) -> String {
+/// Forgejo and Gitea refuse a title the user already has. With a suffix,
+/// `base` is cut so the title stays within `limit` characters.
+fn free_title(base: &str, listing: &Listing, limit: Option<usize>) -> String {
     let taken = |t: &str| listing.keys.iter().any(|k| k.title.as_deref() == Some(t));
     if !taken(base) {
         return base.to_string();
     }
     (2..)
-        .map(|n| format!("{base} ({n})"))
+        .map(|n| {
+            let suffix = format!(" ({n})");
+            let keep = limit.map_or(usize::MAX, |l| l.saturating_sub(suffix.chars().count()));
+            let cut: String = base.chars().take(keep).collect();
+            cut + &suffix
+        })
         .find(|t| !taken(t))
         .unwrap_or_else(|| base.to_string())
 }
@@ -282,15 +363,19 @@ mod tests {
     #[test]
     fn titles() {
         let k = ssh_key(&format!("{BLOB} me@laptop"));
-        assert_eq!(default_title(&k, "2026-11-12"), "me@laptop 2026-11-12");
+        assert_eq!(default_title(&k, "2026-11-12", 50), "me@laptop 2026-11-12");
         let k = ssh_key(BLOB);
-        assert_eq!(default_title(&k, "2026-11-12"), "key-steward 2026-11-12");
-        let long = "x".repeat(80);
-        let t = default_title(&ssh_key(&format!("{BLOB} {long}")), "2026-11-12");
-        assert!(t.len() + " (99)".len() <= 50, "{t}");
+        assert_eq!(
+            default_title(&k, "2026-11-12", 50),
+            "key-steward 2026-11-12"
+        );
+        let long = "ж".repeat(80);
+        let t = default_title(&ssh_key(&format!("{BLOB} {long}")), "2026-11-12", 50);
+        assert!(t.chars().count() + " (99)".len() <= 50, "{t}");
+        assert!(t.starts_with("жжж"), "{t}");
 
         let mut l = Listing::default();
-        assert_eq!(free_title("a", &l), "a");
+        assert_eq!(free_title("a", &l, None), "a");
         for t in ["a", "a (2)"] {
             l.keys.push(PublicKeyRef {
                 fingerprint: Fingerprint::Ssh("SHA256:x".into()),
@@ -299,8 +384,11 @@ mod tests {
                 remote_id: None,
             });
         }
-        assert_eq!(free_title("a", &l), "a (3)");
-        assert_eq!(free_title("b", &l), "b");
+        assert_eq!(free_title("a", &l, None), "a (3)");
+        assert_eq!(free_title("a", &l, Some(5)), "a (3)");
+        assert_eq!(free_title("b", &l, None), "b");
+        l.keys[0].title = Some("ééé".into());
+        assert_eq!(free_title("ééé", &l, Some(5)), "é (2)");
     }
 
     #[test]

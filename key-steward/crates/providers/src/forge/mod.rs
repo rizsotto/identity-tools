@@ -178,6 +178,9 @@ struct UnreadGpgKey {
 struct Listing {
     keys: Vec<PublicKeyRef>,
     unread_gpg: Vec<UnreadGpgKey>,
+    /// SSH keys we read but cannot place, with the reason (for example
+    /// an unknown GitLab usage type). Writes refuse to touch them.
+    unusable_ssh: Vec<(Fingerprint, String)>,
 }
 
 impl Listing {
@@ -397,6 +400,7 @@ mod tests {
                 remote_id: None,
             }],
             unread_gpg: vec![],
+            unusable_ssh: vec![],
         };
         assert_eq!(
             l.verify(&key(fpr.clone(), Purpose::SshSigning)),

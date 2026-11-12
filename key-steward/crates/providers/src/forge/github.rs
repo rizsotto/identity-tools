@@ -154,6 +154,11 @@ impl ForgeWrites for GitHub {
             "the classic scope {classic}, or for a fine-grained token \"{fine}\" with write access"
         )
     }
+
+    /// The docs state no limit.
+    fn max_title(&self) -> Option<usize> {
+        None
+    }
 }
 
 #[async_trait]

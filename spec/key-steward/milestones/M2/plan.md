@@ -357,8 +357,12 @@ async fn add(&self, target: &Target, key: &PublicKey, opts: &AddOpts) -> Result<
 async fn remove(&self, target: &Target, key: &Fingerprint, opts: &RemoveOpts) -> Result<(), ProviderError>;
 ```
 
-`KeyRef` already carries `identity_file`. A forge ignores `like` and
-`keep` beyond the purpose. `ssh_server.list` returns one `PublicKeyRef` per
+`KeyRef` already carries `identity_file`. A forge ignores `keep` beyond
+the purpose. GitHub and Forgejo ignore `like`; GitLab reads it on add to
+copy the old key's `usage_type` (plus the purpose). Note for T12: the
+engine passes the old key as `like` to every add, forges included. GitLab
+refuses (no `POST`) to add a key it already has for another purpose: the
+API cannot change a key's usage type. `ssh_server.list` returns one `PublicKeyRef` per
 key line (purpose `SshAuth`, `remote_id` = line number, display only).
 
 ## What SQLite stores (S-8)

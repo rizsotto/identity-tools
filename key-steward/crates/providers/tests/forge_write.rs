@@ -664,3 +664,226 @@ async fn forgejo_lost_response_no_duplicate() {
     assert_eq!(writes(&forge).len(), 3);
     assert_no_token(&log, &[err.to_string()]);
 }
+
+/// A GitHub whose auth list holds the new key as `item` (with its `key`
+/// set), and that counts writes.
+async fn github_listing(item: serde_json::Value) -> MockServer {
+    let server = MockServer::start().await;
+    let mut item = item;
+    item["key"] = serde_json::json!(NEW_BLOB);
+    Mock::given(method("GET"))
+        .and(path("/user"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({ "login": "testuser" })),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/user/keys"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([item])))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(0)
+        .mount(&server)
+        .await;
+    server
+}
+
+/// A matching key that cannot be removed safely is an error, never Ok.
+#[tokio::test]
+async fn remove_fails_closed_on_unusable_key() {
+    let gnupg = TempGnupgHome::new();
+    let log = NetLog::new();
+    let key = new_key();
+    let fpr = ssh(&key).fingerprint.clone();
+    for item in [
+        serde_json::json!({ "title": "no id" }),
+        serde_json::json!({ "id": "1/../2", "title": "odd id" }),
+        serde_json::json!({ "id": "", "title": "empty id" }),
+        serde_json::json!({ "id": -3, "title": "negative id" }),
+    ] {
+        let server = github_listing(item.clone()).await;
+        let (p, target) = github(&server.uri(), &gnupg, &log);
+        let err = p
+            .remove(&target, &fpr, &remove_opts(Purpose::SshAuth))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ProviderError::BadResponse { .. }),
+            "{item}: {err:?}"
+        );
+        server.verify().await;
+    }
+
+    // GitLab: a usage_type we do not know.
+    let forge = fake(Flavour::GitLab).await;
+    forge.insert_key(KeyList::Auth, NEW_KEY, "future", Some("future_use"));
+    let (p, target) = gitlab(&forge, &gnupg, &log);
+    for purpose in [Purpose::SshAuth, Purpose::SshSigning] {
+        let err = p
+            .remove(&target, &fpr, &remove_opts(purpose))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ProviderError::BadResponse { .. }), "{err:?}");
+        let err = p.add(&target, &key, &add_opts(purpose)).await.unwrap_err();
+        assert!(matches!(err, ProviderError::BadResponse { .. }), "{err:?}");
+    }
+    assert!(writes(&forge).is_empty());
+    assert_eq!(count(&forge, KeyList::Auth, NEW_BLOB), 1);
+}
+
+/// GitLab has one object per key: a key there for auth cannot be added
+/// for signing too.
+#[tokio::test]
+async fn gitlab_usage_type_cannot_change() {
+    let forge = fake(Flavour::GitLab).await;
+    forge.insert_key(KeyList::Auth, NEW_KEY, "auth", Some("auth"));
+    let gnupg = TempGnupgHome::new();
+    let log = NetLog::new();
+    let (p, target) = gitlab(&forge, &gnupg, &log);
+    let key = new_key();
+    let err = p
+        .add(&target, &key, &add_opts(Purpose::SshSigning))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, ProviderError::Unsupported(t) if t.contains("usage type")),
+        "{err:?}"
+    );
+    assert!(writes(&forge).is_empty());
+    // Asking for what it has is fine.
+    p.add(&target, &key, &add_opts(Purpose::SshAuth))
+        .await
+        .unwrap();
+    assert!(writes(&forge).is_empty());
+}
+
+/// The key is on the last page: add finds it, remove deletes it.
+#[tokio::test]
+async fn forge_writes_find_key_on_later_page() {
+    let gnupg = TempGnupgHome::new();
+    let log = NetLog::new();
+    let key = new_key();
+    let fpr = ssh(&key).fingerprint.clone();
+    for flavour in [Flavour::GitHub, Flavour::GitLab, Flavour::Forgejo] {
+        let forge = FakeForge::builder(flavour)
+            .token(TOKEN)
+            .max_per_page(1)
+            .start()
+            .await;
+        let id = forge.insert_key(KeyList::Auth, NEW_KEY, "on page 4", Some("auth"));
+        let p: Box<dyn Provider> = match flavour {
+            Flavour::GitHub => Box::new(github(&forge.api_url(), &gnupg, &log).0),
+            Flavour::GitLab => Box::new(gitlab(&forge, &gnupg, &log).0),
+            Flavour::Forgejo => Box::new(forgejo(&forge, &gnupg, &log).0),
+        };
+        let target = match flavour {
+            Flavour::GitHub => account("https://github.com"),
+            _ => account(forge.base_url()),
+        };
+        p.add(&target, &key, &add_opts(Purpose::SshAuth))
+            .await
+            .unwrap();
+        assert!(writes(&forge).is_empty(), "{flavour:?}");
+        p.remove(&target, &fpr, &remove_opts(Purpose::SshAuth))
+            .await
+            .unwrap();
+        let w = writes(&forge);
+        assert_eq!(w.len(), 1, "{flavour:?} {w:?}");
+        assert!(w[0].1.ends_with(&format!("/user/keys/{id}")), "{w:?}");
+        assert_eq!(count(&forge, KeyList::Auth, NEW_BLOB), 0);
+    }
+}
+
+/// The write's answer is lost and the list after it fails: the error
+/// names both, and nothing is written again.
+#[tokio::test]
+async fn lost_answer_and_failed_list_name_both() {
+    let forge = fake(Flavour::Forgejo).await;
+    let gnupg = TempGnupgHome::new();
+    let log = NetLog::new();
+    let (p, target) = forgejo(&forge, &gnupg, &log);
+    let key = new_key();
+    forge.fail_next(FaultOn::Write, Fault::LoseResponse);
+    forge.fail_next(FaultOn::Any, Fault::Status(500));
+    let err = p
+        .add(&target, &key, &add_opts(Purpose::SshAuth))
+        .await
+        .unwrap_err();
+    let text = err.to_string();
+    assert!(matches!(err, ProviderError::Unsettled { .. }), "{err:?}");
+    assert!(text.contains("502") && text.contains("500"), "{text}");
+    assert_eq!(writes(&forge).len(), 1);
+    assert_no_token(&log, &[text]);
+}
+
+/// Titles keep non-ASCII text and respect each forge's length limit.
+#[tokio::test]
+async fn titles_non_ascii_and_limits() {
+    let gnupg = TempGnupgHome::new();
+    let log = NetLog::new();
+    let key = new_key();
+    let forge = fake(Flavour::Forgejo).await;
+    let (p, target) = forgejo(&forge, &gnupg, &log);
+
+    // Forgejo: 50 characters (not bytes).
+    let long = "é".repeat(51);
+    let opts = AddOpts {
+        title: Some(long),
+        ..add_opts(Purpose::SshAuth)
+    };
+    let before = forge.requests().len();
+    let err = p.add(&target, &key, &opts).await.unwrap_err();
+    assert!(
+        matches!(&err, ProviderError::Unsupported(t) if t.contains("50")),
+        "{err:?}"
+    );
+    assert_eq!(forge.requests().len(), before);
+
+    let title = "ключ 🔑 ".to_string() + &"é".repeat(43);
+    assert_eq!(title.chars().count(), 50);
+    let opts = AddOpts {
+        title: Some(title.clone()),
+        ..add_opts(Purpose::SshAuth)
+    };
+    p.add(&target, &key, &opts).await.unwrap();
+    assert_eq!(last_post(&forge)["title"], title.as_str());
+
+    // A taken title at the limit: the suffix still fits.
+    let fpr = ssh(&key).fingerprint.clone();
+    p.remove(&target, &fpr, &remove_opts(Purpose::SshAuth))
+        .await
+        .unwrap();
+    let other = forge.keys()[0].key.clone();
+    forge.insert_key(KeyList::Auth, &other, &title, None);
+    p.add(&target, &key, &opts).await.unwrap();
+    let sent = last_post(&forge)["title"].as_str().unwrap().to_string();
+    assert!(
+        sent.ends_with(" (2)") && sent.chars().count() == 50,
+        "{sent}"
+    );
+
+    // GitLab allows 255.
+    let forge = fake(Flavour::GitLab).await;
+    let (p, target) = gitlab(&forge, &gnupg, &log);
+    let opts = AddOpts {
+        title: Some("ü".repeat(255)),
+        ..add_opts(Purpose::SshAuth)
+    };
+    p.add(&target, &key, &opts).await.unwrap();
+    let opts = AddOpts {
+        title: Some("ü".repeat(256)),
+        ..add_opts(Purpose::SshSigning)
+    };
+    let err = p.add(&target, &key, &opts).await.unwrap_err();
+    assert!(
+        matches!(&err, ProviderError::Unsupported(t) if t.contains("255")),
+        "{err:?}"
+    );
+}
