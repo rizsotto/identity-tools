@@ -1,7 +1,9 @@
 //! Forgejo, Gitea and Codeberg: `/api/v1/user/keys` and
 //! `/api/v1/user/gpg_keys` (SPEC 15, fact 1). There is no separate SSH
 //! signing key list: these forges check SSH commit signatures with the
-//! same keys, so each SSH key counts for auth and for signing.
+//! same keys, so each SSH key counts for auth and for signing. A GPG key's
+//! `public_key` is standard base64 of the bare binary public key packet
+//! (no armor, no user ID); GnuPG reads it for the fingerprint.
 
 use std::sync::Arc;
 
@@ -9,7 +11,7 @@ use async_trait::async_trait;
 use identity_core::{Fingerprint, PublicKey};
 use inventory::{LocationKind, Purpose, Target};
 
-use super::{ForgeCore, Listing, OpenPgpReader, base_url, check_objects, title};
+use super::{ForgeCore, Listing, OpenPgpReader, base_url, base64_bytes, check_objects, title};
 use crate::error::ProviderError;
 use crate::http::AuthStyle;
 use crate::netlog::NetLog;
@@ -58,8 +60,13 @@ impl Forgejo {
             .await?;
         check_objects(KIND, &items)?;
         for item in &items {
-            out.add_gpg(&self.core.openpgp, item, "public_key", None)
-                .await;
+            out.add_gpg(
+                &self.core.openpgp,
+                item,
+                base64_bytes(item, "public_key"),
+                None,
+            )
+            .await;
         }
         Ok(out)
     }

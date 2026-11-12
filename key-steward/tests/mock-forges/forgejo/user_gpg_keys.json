@@ -3,7 +3,7 @@
     "id": 21,
     "primary_key_id": "",
     "key_id": "B5F9441847F263E7",
-    "public_key": "-----BEGIN PGP PUBLIC KEY BLOCK-----\n\nmDMEavU/KxYJKwYBBAHaRw8BAQdAtkYx06FJQUsFKCli6Crk5C/mnRfIIVfnqS9c\n/UDnq4e0IFRlc3QgVXNlciA8dGVzdEBleGFtcGxlLmludmFsaWQ+iJkEExYKAEEW\nIQQdE5eOJ0WTj/GPbOi1+UQYR/Jj5wUCavU/KwIbAwUJBeanZQULCQgHAgIiAgYV\nCgkICwIEFgIDAQIeBwIXgAAKCRC1+UQYR/Jj5xhUAQD+Y7RTMtUGVQfxNOuaBIYm\nIZr3O4Bd5X9yuPPX9mOR7wD+KtwNCEyK8rXDbgFlQNoxf16vt3itVakrd9o3sB98\nEgu4OARq9T8rEgorBgEEAZdVAQUBAQdAi/w04jDHDC+zIlLj1QWHFR2xF+oGXo3l\nJOT0U7cKeS8DAQgHiH4EGBYKACYWIQQdE5eOJ0WTj/GPbOi1+UQYR/Jj5wUCavU/\nKwIbDAUJBeanZQAKCRC1+UQYR/Jj5ynLAQD/e08yjGG483zI5TRrqbIH4y0T5RvI\nc5fGV5ZlrTMFUgEAiR+us3b8EnT0SVXEeUyo7ZFF9wQfQQootOMoF/OXfQg=\n=YOwG\n-----END PGP PUBLIC KEY BLOCK-----\n",
+    "public_key": "xjMEavU/KxYJKwYBBAHaRw8BAQdAtkYx06FJQUsFKCli6Crk5C/mnRfIIVfnqS9c/UDnq4c=",
     "emails": [
       {
         "email": "test@example.invalid",
@@ -15,7 +15,7 @@
         "id": 22,
         "primary_key_id": "B5F9441847F263E7",
         "key_id": "F8E39F2E3888B67F",
-        "public_key": "ZmFrZS1zdWJrZXktcGFja2V0",
+        "public_key": "zjgEavU/KxIKKwYBBAGXVQEFAQEHQIv8NOIwxwwvsyJS49UFhxUdsRfqBl6N5STk9FO3CnkvAwEIBw==",
         "emails": [],
         "subkeys": [],
         "can_sign": false,

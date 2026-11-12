@@ -205,3 +205,32 @@ async fn github_errors_hold_no_token() {
         .unwrap_err();
     assert!(matches!(err, ProviderError::WrongTarget { .. }), "{err:?}");
 }
+
+/// A local GnuPG failure is not reported as the forge's fault.
+#[tokio::test]
+async fn github_local_gpg_failure_is_not_blamed_on_forge() {
+    use std::os::unix::ffi::OsStringExt;
+    let server = mock_github(None).await;
+    let log = NetLog::new();
+    let target = account("https://github.com");
+    // A home path with a NUL byte: GnuPG cannot be set up.
+    let bad_home =
+        std::path::PathBuf::from(std::ffi::OsString::from_vec(b"/tmp/no\0home".to_vec()));
+    let p = GitHub::new(
+        tokens(LocationKind::GitHub, &target),
+        OpenPgpReader::with_home(bad_home),
+        log.clone(),
+    )
+    .with_api_url(server.uri());
+    let gpg = openpgp_fpr("github/user_gpg_keys.json");
+    let got = p
+        .verify(&target, &key(gpg, Purpose::OpenPgp))
+        .await
+        .unwrap();
+    let text = match got {
+        VerifyStatus::Error(providers::VerifyError::Other(t)) => t,
+        other => panic!("{other:?}"),
+    };
+    assert!(text.contains("GnuPG failed"), "{text}");
+    assert!(!text.contains("did not send"), "{text}");
+}

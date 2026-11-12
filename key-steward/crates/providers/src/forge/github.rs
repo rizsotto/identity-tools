@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use identity_core::{Fingerprint, PublicKey};
 use inventory::{LocationKind, Purpose, Target};
 
-use super::{ForgeCore, Listing, OpenPgpReader, base_url, check_objects, title};
+use super::{ForgeCore, Listing, OpenPgpReader, base_url, check_objects, text_bytes, title};
 use crate::error::ProviderError;
 use crate::http::AuthStyle;
 use crate::netlog::NetLog;
@@ -80,8 +80,13 @@ impl GitHub {
         let items = client.get_all_pages("/user/gpg_keys?per_page=100").await?;
         check_objects(KIND, &items)?;
         for item in &items {
-            out.add_gpg(&self.core.openpgp, item, "raw_key", title(item, "name"))
-                .await;
+            out.add_gpg(
+                &self.core.openpgp,
+                item,
+                text_bytes(item, "raw_key"),
+                title(item, "name"),
+            )
+            .await;
         }
         Ok(out)
     }

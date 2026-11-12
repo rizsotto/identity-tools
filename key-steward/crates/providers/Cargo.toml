@@ -7,6 +7,7 @@ publish.workspace = true
 
 [dependencies]
 async-trait = "0.1"
+base64ct = { version = "1", features = ["alloc"] }
 identity-core = { path = "../../../crates/identity-core" }
 inventory = { path = "../inventory" }
 oo7 = "0.7.1"
