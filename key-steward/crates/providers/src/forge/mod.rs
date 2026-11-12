@@ -8,6 +8,7 @@
 mod forgejo;
 mod github;
 mod gitlab;
+mod write;
 
 use std::path::PathBuf;
 use std::sync::Arc;
