@@ -5,8 +5,10 @@ use std::time::Duration;
 mod model;
 mod net;
 mod netlog;
+mod openpgp;
 mod query;
 mod resolve;
+mod wkd;
 
 pub use model::{
     Found, FoundKey, KeyBytes, KeySource, RejectReason, Rejected, Source, SourceError, SourceKind,
@@ -16,6 +18,7 @@ pub use net::{Fetched, Net, NetError, OriginMap};
 pub use netlog::{NetLog, NetLogEntry};
 pub use query::{Email, Host, Query, QueryError, parse_query};
 pub use resolve::{Candidate, Mode, Resolution, Resolver};
+pub use wkd::WkdSource;
 
 /// Limits for one resolver. Tests use short timeouts.
 #[derive(Debug, Clone, PartialEq, Eq)]
