@@ -19,6 +19,7 @@ that needs it starts.
 |---|---|---|
 | 1 | Final name and app ID | pending, blocks M2 (first GTK window needs an app ID) and M4 (Flathub) |
 | 2 | Flatpak or host package first | pending, blocks M4 (also affects how M2 reaches the agent sockets) |
+| 2 | Inside Flatpak, oo7 keeps tokens in its file backend (an encrypted file in the sandbox, key from the Secret portal), not in the Secret Service itself. Does that meet S-4? (SPEC 15, `oo7` item) | pending, blocks M4 |
 | 3 | Offer to move to SSH signing for git during rotation | pending, blocks M2 |
 | 4 | Default new subkey algorithm, post-quantum options | pending, blocks M3 |
 | 5 | Talk to GNOME maintainers about Seahorse | pending, blocks nothing (before M4 release) |
