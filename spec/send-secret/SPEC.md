@@ -202,6 +202,7 @@ Streams from source to output, no temp files (S-4). Full sketch in `milestones/M
 | age | [`age` crate](https://docs.rs/age) (from rage) with the `ssh` and `armor` features | Compatible with Go age. SSH recipient support. |
 | OpenPGP | GnuPG via `gpgme` | Uses the user's existing keys and gpg-agent for signing. Sequoia is a later option behind the same facade. |
 | HTTP | `reqwest` + rustls | Key lookups. |
+| Async | `tokio` | Only for key lookups (resolver). Encrypt and decrypt stay sync. Same as Key Steward. |
 | WKD | Own implementation (small: z-base32 of SHA-1 of the lowercased local part, two URL forms) | Few dependencies. Easy to test. |
 | Storage | SQLite (`rusqlite`) in `$XDG_DATA_HOME/send-secret/` | Pins and history. |
 | Secrets in memory | `secrecy`, `zeroize` | NFR-3. |
@@ -212,7 +213,7 @@ Streams from source to output, no temp files (S-4). Full sketch in `milestones/M
 
 ## 9. Implementation notes
 
-- **WKD:** advanced URL `https://openpgpkey.<domain>/.well-known/openpgpkey/<domain>/hu/<hash>?l=<local>`, direct URL `https://<domain>/.well-known/openpgpkey/hu/<hash>?l=<local>`. Try advanced first, then direct. Check that the returned key actually has a user ID with that email.
+- **WKD:** advanced URL `https://openpgpkey.<domain>/.well-known/openpgpkey/<domain>/hu/<hash>?l=<local>`, direct URL `https://<domain>/.well-known/openpgpkey/hu/<hash>?l=<local>`. `<domain>` in lower case; `<hash>` is z-base-32 of SHA-1 of the local part with only ASCII letters lowered; `l=` is the local part unchanged, percent-escaped. Try advanced first. Use direct only if `openpgpkey.<domain>` has no DNS address; a 404, timeout or TLS error at the advanced host is not a reason to fall back (draft section 3.1). The answer is binary (armor possible) and may hold several keys. Follow redirects only while every hop is https. Check that the returned key actually has a user ID with that email.
 - **keys.openpgp.org:** `GET /vks/v1/by-email/<email>`. Results only include verified identities.
 - **GitHub:** `https://github.com/<user>.keys` returns `authorized_keys` lines. `https://github.com/<user>.gpg` returns armored keys (may be empty). No token needed. Handle rate limits politely.
 - **SSH key caveats** (show as info text when an SSH recipient is used): people may treat SSH keys as short-lived login keys and may rotate them, and keys on hardware tokens cannot decrypt age files ([age README](https://github.com/FiloSottile/age)).
@@ -320,8 +321,12 @@ send-secret/
   - Header size (M1 T08a review): `Decryptor` parses the header again after every read, so a hostile 128 KiB header took 74 s. We cap the header at 16 KiB and use `Decryptor::new_buffered` (worst case about 0.26 s; eight SSH RSA keys give about 5 KiB).
   - Trailing text: `ArmoredReader` rejects anything but whitespace after the END line (`TrailingGarbage`). Our age backend stops reading after the END line, so closing backticks work (M1 T08a).
   - Sources: https://docs.rs/age/0.12.1/age/ , https://docs.rs/age/0.12.1/age/ssh/enum.ParseRecipientKeyError.html , crate source `src/ssh/recipient.rs`, `src/protocol.rs`, `src/primitives/armor.rs` (https://docs.rs/crate/age/0.12.1/source/), `rsa` crate `RsaPublicKey::MAX_SIZE = 4096`.
-- [ ] Whether `https://github.com/<user>.gpg` and `https://gitlab.com/<user>.keys` are still served and what their rate limits are.
-- [ ] The WKD spec details (current draft) and the keys.openpgp.org `by-email` endpoint.
+- [ ] Whether `https://github.com/<user>.gpg` and `https://gitlab.com/<user>.keys` are still served and what their rate limits are. Checked 2026-11-12 (M2 planning) from docs and source only, no live request:
+  - [x] GitLab: route `get ':username.keys' => 'users#ssh_keys'` (and `':username.gpg' => 'users#gpg_keys'`, verified keys only) in `config/routes/user.rb`; `UsersController#ssh_keys` renders all SSH keys as plain text, needs no login, and has no rate limit of its own. GitLab.com limits unauthenticated traffic to 500 requests per minute per IP; 60 per hour is announced with no date; a limited request gets 429 and `Retry-After`. Sources: https://gitlab.com/gitlab-org/gitlab/-/raw/master/config/routes/user.rb , https://gitlab.com/gitlab-org/gitlab/-/raw/master/app/controllers/users_controller.rb , https://docs.gitlab.com/user/gitlab_com/rate_limits/
+  - [ ] GitHub: `github.com/<user>.keys` and `.gpg` are not in GitHub's docs. The age README uses `.keys` (`curl https://github.com/<user>.keys | age -R -`, https://github.com/FiloSottile/age). No rate limit is published for these paths; GitHub tightened unauthenticated limits for API, git and raw on 2025-05-08 without numbers (https://github.blog/changelog/2025-05-08-updated-rate-limits-for-unauthenticated-requests/). Still open: the exact answer of `.gpg` for a user with no key. Needs one live request, which the planner did not make. M2 does not depend on numbers: no retries, 429 handled, zero keys means "no key".
+- [x] The WKD spec details (current draft) and the keys.openpgp.org `by-email` endpoint. Checked 2026-11-12 (M2 planning):
+  - WKD: draft-koch-openpgp-webkey-service-22 (2026-07-22). URL forms as in section 9. Fallback to direct only "if an address for the required sub-domain does not exist"; "a non-responding server does not mean that the fall back should be carried out". Hash: only ASCII upper case is lowered, SHA-1, z-base-32 (RFC 6189 5.1.6); example `Joe.Doe@Example.ORG` gives `iy9q119eutrkn8s1mk4r39qejnbu3n5q`. `l=` is the unchanged local part. Answer: binary key, armor discouraged, keys may be concatenated, any Content-Type should be accepted. The client must check the key has the requested user ID and drop the others. Redirects only while every target is https; no answering 401. `gpg-wks-client --print-wkd-hash` (GnuPG 2.4.9) gives the same hashes, including non-ASCII local parts (only ASCII lowered); it prints `l=` lowered, unlike the draft. Sources: https://datatracker.ietf.org/doc/draft-koch-openpgp-webkey-service/ , local `gpg-wks-client`. Vectors in `milestones/M2/plan.md`.
+  - keys.openpgp.org: `GET /vks/v1/by-email/<URI-encoded address>`, exact match only, armored answer as `application/pgp-keys`, 404 if not found. By-email requests are limited to one per minute (burst 50), 429 above. Only addresses the owner verified are published; keys without a verified address carry no user ID and gpg refuses to import them. Sources: https://keys.openpgp.org/about/api , https://keys.openpgp.org/about/faq
 - [ ] How to ship the optional Nautilus "Encrypt for…" entry (Nautilus extensions can't live inside a Flatpak).
 - [ ] Whether a Wayland app can clear the clipboard after it has lost focus, on GNOME and on Niri.
 - [ ] How to reach the host gpg-agent from Flatpak for signing.
@@ -341,6 +346,8 @@ send-secret/
 5. Is a web decryptor for recipients without the app worth doing early? It helps adoption a lot.
 6. gpg.conf `comment` / `emit-version` armor headers: answered, keep what gpg writes. See [decision 0003](decisions/0003-openpgp-armor-headers.md).
 7. ~~S-5 and buffers inside `age`, gpgme and gpg.~~ Answered 2026-11-12: accepted for v1. S-5 zeroing covers our own buffers. Known gap: the `age` crate's encrypting `StreamWriter` keeps its last plaintext chunk (up to 64 KiB) unzeroed when it drops (SPEC 15 item 1), and OpenPGP plaintext passes through gpgme's and gpg's own buffers. We do not write our own stream code (section 14). Reporting the `age` gap upstream is a later task.
+8. GitLab also serves `/<user>.gpg` (verified OpenPGP keys only, SPEC 15). Add it to section 4 next to GitLab `.keys`? M2 does not use it.
+9. Should the app look up pinned contacts again in the background, to notice key changes sooner? M2 default: a pinned contact uses its pinned keys with no network; `lookup` and `encrypt --refresh` check again. Blocks M3. See `decisions/README.md`.
 
 ---
 
