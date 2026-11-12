@@ -155,6 +155,8 @@ impl Sshd {
 
     /// `ssh -F <ssh_config>` with a temp `HOME`, no `SSH_AUTH_SOCK` and
     /// stdin from /dev/null. Add `-i <key>`, the alias and the command.
+    /// The config has `IdentityFile none`, so without `-i` ssh offers no key
+    /// (and never reads the real `~/.ssh/id_*`).
     pub fn ssh(&self) -> Command {
         let mut cmd = Command::new("ssh");
         cmd.arg("-F")
@@ -254,6 +256,7 @@ impl Sshd {
              PasswordAuthentication no\n\
              KbdInteractiveAuthentication no\n\
              PerSourcePenalties no\n\
+             PermitUserRC no\n\
              LogLevel VERBOSE\n",
             ak = self.authorized_keys().display(),
             home = self.server_home().display(),
@@ -278,6 +281,7 @@ impl Sshd {
              Port {port}\n  \
              User {user}\n  \
              IdentitiesOnly yes\n  \
+             IdentityFile none\n  \
              IdentityAgent none\n  \
              UserKnownHostsFile {kh}\n  \
              GlobalKnownHostsFile /dev/null\n  \
@@ -334,6 +338,11 @@ impl Sshd {
                 });
             }
             if let Ok(Some(status)) = child.try_wait() {
+                let log = fs::read(&log_path).unwrap_or_default();
+                let new = String::from_utf8_lossy(log.get(offset as usize..).unwrap_or_default());
+                if new.contains("Address already in use") {
+                    return Err(StartError::AddrInUse);
+                }
                 return Err(StartError::Other(format!("sshd exited early: {status}")));
             }
             std::thread::sleep(Duration::from_millis(10));

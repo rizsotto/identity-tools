@@ -170,3 +170,51 @@ fn no_sshd_left_after_drop() {
         }
     }
 }
+
+#[test]
+fn harness_user_rc_does_not_run() {
+    let sshd = Sshd::start(BASE);
+    // sshd runs `.ssh/rc` relative to the session's start dir, the passwd
+    // home. Tests must not write there, so plant the rc in the server home
+    // and check the effective config for the real home case.
+    let marker = sshd.dir().join("rc-ran");
+    let rc = sshd.server_home().join(".ssh/rc");
+    fs::write(&rc, format!("touch {}\n", marker.display())).unwrap();
+    let out = sshd.run(&sshd.client_key(), "cd \"$HOME\" && true");
+    assert!(out.status.success(), "ssh failed: {}", stderr(&out));
+    assert!(!marker.exists(), "~/.ssh/rc ran");
+
+    let out = std::process::Command::new("/usr/sbin/sshd")
+        .arg("-T")
+        .arg("-f")
+        .arg(sshd.dir().join("sshd_config"))
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "sshd -T failed: {}", stderr(&out));
+    let effective = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        effective
+            .lines()
+            .any(|l| l.eq_ignore_ascii_case("permituserrc no")),
+        "{effective}"
+    );
+}
+
+#[test]
+fn harness_without_key_offers_none() {
+    let sshd = Sshd::start(BASE);
+    let out = sshd
+        .ssh()
+        .arg("-v")
+        .arg(sshd.alias())
+        .arg("true")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(255), "{}", stderr(&out));
+    let err = stderr(&out);
+    assert!(!err.contains("Offering public key"), "{err}");
+    assert!(!err.contains("/.ssh/id_"), "{err}");
+
+    let out = sshd.run(&sshd.client_key(), "true");
+    assert!(out.status.success(), "ssh -i failed: {}", stderr(&out));
+}
