@@ -103,7 +103,10 @@ fn enc_keyid(file: &str) -> String {
 }
 
 fn colons(file: &str, record: &str) -> String {
+    let home = Home::with(&[]);
     let out = Command::new("gpg")
+        .arg("--homedir")
+        .arg(home.path())
         .args(["--batch", "--with-colons", "--show-keys"])
         .arg(fixture(&format!("openpgp/{file}")))
         .output()

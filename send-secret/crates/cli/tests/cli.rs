@@ -57,8 +57,9 @@ fn open(env: &TestEnv, file: &Path, extra: &[&str]) -> Output {
 }
 
 fn fpr(file: &str) -> String {
-    let out = Command::new("gpg")
-        .args(["--batch", "--with-colons", "--show-keys"])
+    let out = TestEnv::new()
+        .gpg()
+        .args(["--with-colons", "--show-keys"])
         .arg(fixture(&format!("openpgp/{file}")))
         .output()
         .unwrap();
