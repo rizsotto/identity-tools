@@ -986,6 +986,28 @@ impl<'a> Engine<'a> {
                 loc.phase.as_str()
             )));
         }
+        // A failed removal may have taken effect (a lost answer). Then
+        // the old key is gone and "skipped" would be wrong.
+        if j.has(Step::RemoveOld, Some(location), Event::Start) {
+            match self.list(&loc, true).await {
+                Err(e) => {
+                    return Err(EngineError::Refused(format!(
+                        "location {location} cannot be skipped: {e}"
+                    )));
+                }
+                Ok(keys) if listed(&keys, &self.rot.old_fingerprint, loc.purpose) => {}
+                Ok(_) => {
+                    let end = End {
+                        detail: Some("settled before a skip: the old key is gone".into()),
+                        ..gone_end(&loc)
+                    };
+                    self.write_end(Step::RemoveOld, Some(location), end)?;
+                    return Err(EngineError::Refused(format!(
+                        "location {location} cannot be skipped: the old key is already gone there"
+                    )));
+                }
+            }
+        }
         let mut tx = self.store.journal_tx()?;
         let why = "skipped by the user";
         tx.step(
@@ -1042,10 +1064,7 @@ impl<'a> Engine<'a> {
                 Ok(_) => {
                     let end = End {
                         detail: Some("settled during abort: the old key is gone".into()),
-                        reason: (loc.kind == LocationKind::SshServer)
-                            .then(|| "old key removed; cert-authority lines not checked".into()),
-                        remove_row: Some(loc.location_id),
-                        ..End::done().phase(Phase::OldRemoved)
+                        ..gone_end(&loc)
                     };
                     self.write_end(Step::RemoveOld, l, end)?;
                 }
@@ -1298,6 +1317,17 @@ enum ConfigGate {
     Hold,
     /// Not wanted, done, or skipped.
     Pass,
+}
+
+/// The end entry of a removal found to have taken effect without its own
+/// answer. SSH: the `cert-authority` lines were not checked.
+fn gone_end(loc: &RotationLocation) -> End {
+    End {
+        reason: (loc.kind == LocationKind::SshServer)
+            .then(|| "old key removed; cert-authority lines not checked".into()),
+        remove_row: Some(loc.location_id),
+        ..End::done().phase(Phase::OldRemoved)
+    }
 }
 
 fn register(store: &mut Store, key: &PublicKey) {
