@@ -35,9 +35,15 @@ pub enum Error {
     /// The OpenPGP backend failed. The text comes from gpgme.
     #[error("OpenPGP: {0}")]
     OpenPgp(String),
-    /// This format is not built yet (OpenPGP waits for M1 T08b).
-    #[error("{0} is not supported yet")]
-    NotYet(Format),
+    /// A recipient's key can not be used. The reason is fixed text.
+    #[error("key for {label}: {reason}")]
+    BadKey { label: String, reason: String },
+    /// Signing is on, but there is no OpenPGP secret key that can sign.
+    #[error("no OpenPGP secret key that can sign")]
+    NoSigner,
+    /// The message decrypted, but its signature is bad.
+    #[error("the signature is bad: the message was changed or forged")]
+    BadSignature,
     /// A key file is over the size limit (S-7).
     #[error("key is larger than {limit} bytes")]
     KeyTooLarge { limit: usize },

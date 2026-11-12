@@ -6,9 +6,9 @@
 //! so a newline in the path adds recipients or `--hidden`. [`RecipientFile`]
 //! takes key bytes, never a path, and builds the string itself.
 //!
-//! The OpenPGP backend makes the one `unsafe` call into `gpgme-sys` with
-//! [`RecipientFile::gpgme_recipients`], because the safe `gpgme` crate does
-//! not wrap the `_ext` functions. `tests/recipient_file.rs` shows the call.
+//! The OpenPGP backend (`openpgp_backend.rs`) makes the one `unsafe` call
+//! into `gpgme-sys` with [`RecipientFile::gpgme_recipients`], because the
+//! safe `gpgme` crate does not wrap the `_ext` functions.
 
 use std::ffi::{CStr, CString};
 use std::io::Write;
