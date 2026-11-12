@@ -3,6 +3,7 @@
 //! One provider per location kind. Every provider logs each network call
 //! in a [`NetLog`] (NFR-2) and never writes a token anywhere (S-4).
 
+mod check;
 mod error;
 mod forge;
 mod http;
@@ -11,6 +12,7 @@ mod provider;
 mod ssh_server;
 mod token;
 
+pub use check::{CheckOutcome, CheckResult, CheckRunner};
 pub use error::ProviderError;
 pub use forge::{Forgejo, GitHub, GitLab, OpenPgpReader};
 pub use http::{AuthStyle, HttpClient};
