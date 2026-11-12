@@ -237,8 +237,9 @@ so a crash never leaves a stale lock.
      connection would install a truncated file.
    - Copies the current file to
      `.ssh/authorized_keys.keysteward-<UTC timestamp>-$$` (FR-6 backup).
-   - `mv -f` the temp file over `.ssh/authorized_keys` (rename in one dir,
-     atomic).
+   - `sync`, then `mv -f` the temp file over `.ssh/authorized_keys`
+     (rename in one dir, atomic; without the `sync` XFS can leave an
+     empty file after a power loss right after the rename).
    - Prints `done <cksum> <size>` of the new file.
 4. **Confirm.** The app compares that checksum with its own POSIX `cksum`
    of the content it sent. Then the normal verify or list confirms the
@@ -276,7 +277,10 @@ all four images. SPEC 9.1 is updated in this planning commit.
 - Options parser: comma separated, double quotes with `\"` inside, as in
   sshd(8) "AUTHORIZED_KEYS FILE FORMAT". A line whose key part does not
   parse is `unknown` and kept as is.
-- Fingerprint the key part with `identity_core::parse_public_keys`.
+- Fingerprint the key part with `identity_core::parse_public_keys`,
+  given only `<type> <base64>`: work on bytes, so options and comments
+  may hold any bytes (non-UTF-8, `PRIVATE KEY-----`) and still match,
+  as in sshd.
 - Lines with the `cert-authority` option hold a CA, not a login key. Never
   match, never change.
 - `add_like(old_fpr, new_key)`: after each line holding `old_fpr`, insert a
@@ -532,6 +536,20 @@ test sshd (byte compare of the server file).
   that `<N>` equals the script length.
 - Through the test sshd: forced command (`command="echo hi"` on the login
   key) gives "refused" before any change.
+
+### Notes for T06 (from the T01/T02 review)
+
+- `remove(old, keep)` only checks that some login key line (any options,
+  CA lines not counted) holds the new key. The real guard is that the
+  removal logs in with the new key. T06 must test that a new-key line
+  with a forced `command=` makes that login fail the marker check, so
+  the removal is refused and the old key stays.
+- After `parse_apply` gives `Done(sum)`, compare `sum` with
+  `cksum(content sent)`; a mismatch is an error, not success.
+- `remove` refuses with `OldKeyInUnknownLine` if a line it cannot parse
+  still holds the old key (sshd might accept it). Show the user the
+  reason; do not retry.
+
 
 ## Facts (SPEC 15) M2 relies on
 

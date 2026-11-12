@@ -352,3 +352,22 @@ fn cksum_matches_posix_tool() {
         }
     }
 }
+
+#[test]
+fn apply_header_is_not_globbed() {
+    for sh in shells() {
+        let h = home(Some(OLD));
+        for name in ["1", "2", "3", "4"] {
+            fs::write(h.path().join(name), "").unwrap();
+        }
+        let stdin = [APPLY.body.as_bytes(), b"*\n", NEW].concat();
+        let (code, out) = sh.run(h.path(), APPLY, stdin);
+        assert_eq!(
+            (code, parse_apply(&out)),
+            (2, Ok(ApplyReply::BadInput)),
+            "{}",
+            sh.name
+        );
+        assert_eq!(fs::read(ak(&h)).unwrap(), OLD, "{}", sh.name);
+    }
+}

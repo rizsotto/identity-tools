@@ -17,6 +17,7 @@ main() {
 	IFS=' 	
 '
 	umask 077
+	set -f
 	printf '%s\n' 'key-steward-apply v1'
 	cd || { printf 'error cd\n'; return 2; }
 	f=.ssh/authorized_keys
@@ -47,6 +48,7 @@ main() {
 	if [ "$1 $2" != "$old" ]; then
 		rm -f "$tmp" "$backup"; printf 'changed\n'; return 3
 	fi
+	sync
 	mv -f "$tmp" "$f" || { rm -f "$tmp"; printf 'error mv\n'; return 5; }
 	set -- $(cksum < "$f")
 	printf 'done %s %s\n' "$1" "$2"

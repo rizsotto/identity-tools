@@ -226,9 +226,10 @@ Send Secret lives in the same repository. Both apps use `crates/identity-core/` 
 Send a small static POSIX `sh` script on stdin, with the data after it. Do not build a remote command string with user data in it. Not `ssh host 'sh -s'`: `dash` and BusyBox `sh` read ahead from a pipe, so the data after the script is eaten by the shell (spike, SPEC 15). The remote command is the fixed string `sh -c 'eval "$(dd bs=1 count=<N> 2>/dev/null)"'`, where `<N>` is the script's byte length, known at build time; `dd bs=1` reads exactly the script and leaves the data in the pipe. Each script is a function `main` plus the line `main; exit $?`. Two scripts: `authorized_keys_read.sh` prints a marker line, the file's `cksum` and the file; `authorized_keys_apply.sh` gets a header line with the expected `cksum` of the current file and the `cksum` of the new content, then the new content. The apply script must:
 1. `cd "$HOME"`, `umask 077`. Refuse a symlinked or non-regular `authorized_keys`.
 2. Refuse (write nothing) if the file's `cksum` differs from the expected one: someone changed it since the read.
-3. Copy `authorized_keys` to a timestamped backup.
-4. Write the new content to a temp file in `~/.ssh/` (no clobber). Refuse (remove the temp file) if its `cksum` differs from the header: the upload was cut. Then `mv` it over the old file (atomic).
-5. Print the new file's `cksum` so the app can confirm the result.
+3. Write the new content to a temp file in `~/.ssh/` (no clobber). Refuse (remove the temp file) if its `cksum` differs from the header: the upload was cut.
+4. Copy `authorized_keys` to a timestamped backup.
+5. `sync`, then `mv` the temp file over the old file (atomic).
+6. Print the new file's `cksum` so the app can confirm the result.
 
 Compute the new content **locally**: download the current file (read script), parse it, add or remove lines, keep options and comments, then upload. This keeps all logic in tested Rust code. Details: `spec/key-steward/milestones/M2/plan.md`, "`authorized_keys` over SSH".
 

@@ -9,6 +9,7 @@
 main() {
 	IFS=' 	
 '
+	set -f
 	printf '%s\n' 'key-steward-read v1'
 	cd || { printf 'error cd\n'; return 2; }
 	f=.ssh/authorized_keys

@@ -28,6 +28,8 @@ pub enum EditError {
     SameKey,
     #[error("the new key's comment has a control character")]
     BadComment,
+    #[error("a line the editor does not understand holds the old key; edit the file by hand")]
+    OldKeyInUnknownLine,
 }
 
 /// One login key line.
@@ -35,8 +37,8 @@ pub enum EditError {
 pub struct KeyLine {
     /// Line number, from 1.
     pub line: usize,
-    /// The options exactly as written, if any.
-    pub options: Option<String>,
+    /// The options exactly as written, if any (raw bytes).
+    pub options: Option<Vec<u8>>,
     pub key: SshPublicKey,
     /// A CA line (`cert-authority`): never matched, never changed.
     pub cert_authority: bool,
@@ -122,7 +124,7 @@ impl AuthorizedKeys {
             .map(|l| l.ending)
             .find(|e| !e.is_empty())
             .unwrap_or(b"\n");
-        let mut present: Vec<Option<String>> = self
+        let mut present: Vec<Option<Vec<u8>>> = self
             .lines
             .iter()
             .filter(|l| matches(l, &new.fingerprint))
@@ -144,7 +146,7 @@ impl AuthorizedKeys {
                 l.ending
             });
             if let Some(o) = &options {
-                out.extend_from_slice(o.as_bytes());
+                out.extend_from_slice(o);
                 out.push(b' ');
             }
             out.extend_from_slice(new.encoded.as_bytes());
@@ -158,14 +160,24 @@ impl AuthorizedKeys {
         cap(out)
     }
 
-    /// Drops every line with `old`. Refuses if no line with `keep` stays.
-    /// If `old` is not there, the file stays as it is.
+    /// Drops every login key line with `old`. Refuses if no login key line
+    /// (any options, CA lines not counted) has `keep`; whether that line
+    /// really lets the new key log in is not checked here. Refuses if a
+    /// line it does not understand still holds `old`, since sshd might
+    /// accept that line. If `old` is not there, the file stays as it is.
     pub fn remove(&self, old: &Fingerprint, keep: &Fingerprint) -> Result<Vec<u8>, EditError> {
         if old == keep {
             return Err(EditError::SameKey);
         }
         if !self.lines.iter().any(|l| matches(l, keep)) {
             return Err(EditError::NewKeyMissing);
+        }
+        if self
+            .lines
+            .iter()
+            .any(|l| l.key.is_none() && mentions(&l.text, old))
+        {
+            return Err(EditError::OldKeyInUnknownLine);
         }
         let mut out = Vec::new();
         for l in self.lines.iter().filter(|l| !matches(l, old)) {
@@ -192,13 +204,14 @@ fn matches(line: &Line, fpr: &Fingerprint) -> bool {
 }
 
 /// Like sshd: first try the line as a bare key, then as options and a key.
+/// Works on bytes: only the key type and the base64 field must be ASCII;
+/// options and comment may hold any bytes.
 fn parse_key_line(text: &[u8], line: usize) -> Option<KeyLine> {
-    let text = std::str::from_utf8(text).ok()?;
-    if text.starts_with('\u{feff}') {
+    if text.starts_with("\u{feff}".as_bytes()) {
         return None;
     }
-    let text = text.trim_start_matches([' ', '\t']);
-    if text.is_empty() || text.starts_with('#') {
+    let text = trim_ws(text);
+    if text.is_empty() || text[0] == b'#' {
         return None;
     }
     if let Some(key) = parse_key(text) {
@@ -211,31 +224,94 @@ fn parse_key_line(text: &[u8], line: usize) -> Option<KeyLine> {
     }
     let end = options_end(text)?;
     let (options, rest) = text.split_at(end);
-    let key = parse_key(rest.trim_start_matches([' ', '\t']))?;
+    let key = parse_key(trim_ws(rest))?;
     Some(KeyLine {
         line,
         cert_authority: split_options(options)
             .iter()
-            .any(|o| option_name(o).eq_ignore_ascii_case("cert-authority")),
-        options: Some(options.to_string()),
+            .any(|o| option_name(o).eq_ignore_ascii_case(b"cert-authority")),
+        options: Some(options.to_vec()),
         key,
     })
 }
 
-fn parse_key(text: &str) -> Option<SshPublicKey> {
-    match parse_public_keys(text.as_bytes()).ok()?.as_slice() {
+/// `<type> <base64> [comment]`, fields split by spaces or tabs as sshd
+/// does. The comment is kept as text with bad UTF-8 replaced.
+fn parse_key(text: &[u8]) -> Option<SshPublicKey> {
+    let (key_type, rest) = split_field(text);
+    let (blob, comment) = split_field(rest);
+    let key_type = std::str::from_utf8(key_type).ok()?;
+    let blob = std::str::from_utf8(blob).ok()?;
+    if key_type.is_empty() || blob.is_empty() || !key_type.is_ascii() || !blob.is_ascii() {
+        return None;
+    }
+    let mut key = match parse_public_keys(format!("{key_type} {blob}").as_bytes())
+        .ok()?
+        .as_slice()
+    {
         [one] => match &one.key {
-            Ok(PublicKey::Ssh(k)) => Some(k.clone()),
-            _ => None,
+            Ok(PublicKey::Ssh(k)) => k.clone(),
+            _ => return None,
         },
-        _ => None,
+        _ => return None,
+    };
+    let comment = String::from_utf8_lossy(comment);
+    key.comment = Some(comment.trim_end().to_string()).filter(|c| !c.is_empty());
+    Some(key)
+}
+
+/// Whether a line that is neither a comment nor a parsed key holds a key
+/// with this fingerprint anywhere, as two neighbouring fields.
+fn mentions(text: &[u8], fpr: &Fingerprint) -> bool {
+    let text = trim_ws(text);
+    if text.is_empty() || text[0] == b'#' {
+        return false;
+    }
+    let fields: Vec<&[u8]> = text
+        .split(|&b| b == b' ' || b == b'\t')
+        .filter(|f| !f.is_empty())
+        .collect();
+    // The type may be glued to options or a BOM, so look at field ends.
+    fields.windows(2).any(|w| {
+        KEY_TYPES.iter().any(|t| {
+            w[0].ends_with(t.as_bytes())
+                && parse_key(&[t.as_bytes(), b" ", w[1]].concat())
+                    .is_some_and(|k| &k.fingerprint == fpr)
+        })
+    })
+}
+
+/// Key types `identity_core` parses.
+const KEY_TYPES: &[&str] = &[
+    "ssh-ed25519",
+    "ssh-rsa",
+    "ssh-dss",
+    "ecdsa-sha2-nistp256",
+    "ecdsa-sha2-nistp384",
+    "ecdsa-sha2-nistp521",
+    "sk-ssh-ed25519@openssh.com",
+    "sk-ecdsa-sha2-nistp256@openssh.com",
+];
+
+fn trim_ws(b: &[u8]) -> &[u8] {
+    let i = b
+        .iter()
+        .position(|&c| c != b' ' && c != b'\t')
+        .unwrap_or(b.len());
+    &b[i..]
+}
+
+/// The first field, and the rest without its leading spaces and tabs.
+fn split_field(b: &[u8]) -> (&[u8], &[u8]) {
+    match b.iter().position(|&c| c == b' ' || c == b'\t') {
+        Some(i) => (&b[..i], trim_ws(&b[i..])),
+        None => (b, &[]),
     }
 }
 
 /// Byte index where the options end (first space or tab outside quotes).
 /// `None` for an unclosed quote or a line with nothing after the options.
-fn options_end(text: &str) -> Option<usize> {
-    let b = text.as_bytes();
+fn options_end(b: &[u8]) -> Option<usize> {
     let mut quoted = false;
     let mut i = 0;
     while i < b.len() {
@@ -251,8 +327,7 @@ fn options_end(text: &str) -> Option<usize> {
 }
 
 /// Splits options at commas outside quotes.
-fn split_options(options: &str) -> Vec<&str> {
-    let b = options.as_bytes();
+fn split_options(b: &[u8]) -> Vec<&[u8]> {
     let mut out = Vec::new();
     let mut quoted = false;
     let mut start = 0;
@@ -262,19 +337,19 @@ fn split_options(options: &str) -> Vec<&str> {
             b'\\' if b.get(i + 1) == Some(&b'"') => i += 1,
             b'"' => quoted = !quoted,
             b',' if !quoted => {
-                out.push(&options[start..i]);
+                out.push(&b[start..i]);
                 start = i + 1;
             }
             _ => {}
         }
         i += 1;
     }
-    out.push(&options[start..]);
+    out.push(&b[start..]);
     out
 }
 
-fn option_name(option: &str) -> &str {
-    option.split('=').next().unwrap_or(option)
+fn option_name(option: &[u8]) -> &[u8] {
+    option.split(|&b| b == b'=').next().unwrap_or(option)
 }
 
 #[cfg(test)]
@@ -286,17 +361,17 @@ mod tests {
 
     #[test]
     fn options_end_at_unquoted_space() {
-        assert_eq!(options_end(r#"a="x y",b z"#), Some(9));
-        assert_eq!(options_end(r#"a="x \" y" z"#), Some(10));
-        assert_eq!(options_end(r#"a="x y"#), None);
-        assert_eq!(options_end("restrict"), None);
+        assert_eq!(options_end(br#"a="x y",b z"#), Some(9));
+        assert_eq!(options_end(br#"a="x \" y" z"#), Some(10));
+        assert_eq!(options_end(br#"a="x y"#), None);
+        assert_eq!(options_end(b"restrict"), None);
     }
 
     #[test]
     fn split_options_keeps_quoted_commas() {
         assert_eq!(
-            split_options(r#"from="a,b",cert-authority,x="\",""#),
-            vec![r#"from="a,b""#, "cert-authority", r#"x="\",""#]
+            split_options(br#"from="a,b",cert-authority,x="\",""#),
+            vec![&br#"from="a,b""#[..], b"cert-authority", br#"x="\",""#]
         );
     }
 
@@ -312,7 +387,7 @@ mod tests {
         }
         let k = parse_key_line(format!("Cert-Authority,x=\"a b\" {KEY} c").as_bytes(), 1).unwrap();
         assert!(k.cert_authority);
-        assert_eq!(k.options.as_deref(), Some("Cert-Authority,x=\"a b\""));
+        assert_eq!(k.options.as_deref(), Some(&b"Cert-Authority,x=\"a b\""[..]));
     }
 
     #[test]

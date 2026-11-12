@@ -154,7 +154,12 @@ fn remove_refuses_without_new_key() {
     // Removing the old key from the add results always leaves the new key.
     for c in cases("add") {
         if let Some(added) = &c.expected {
-            assert!(remove(added).is_ok(), "add/{}", c.name);
+            assert_ne!(
+                remove(added),
+                Err(EditError::NewKeyMissing),
+                "add/{}",
+                c.name
+            );
         }
     }
 }
@@ -178,9 +183,85 @@ fn keys_lists_login_and_ca_lines() {
     let keys: Vec<_> = file.keys().collect();
     assert_eq!(keys.len(), 2);
     assert_eq!(keys[0].line, 2);
-    assert_eq!(keys[0].options.as_deref(), Some("restrict"));
+    assert_eq!(keys[0].options.as_deref(), Some(&b"restrict"[..]));
     assert_eq!(keys[0].key.fingerprint, fpr(OLD));
     assert!(!keys[0].cert_authority);
     assert!(keys[1].cert_authority);
     assert_eq!(keys[1].key.fingerprint, fpr(CA));
+}
+
+/// `{OLD}` etc. filled into raw bytes, which may not be UTF-8.
+fn fill_bytes(template: &[u8]) -> Vec<u8> {
+    let mut out = template.to_vec();
+    for (name, line) in [("OLD", OLD), ("NEW", NEW), ("OTHER", OTHER)] {
+        let pat = format!("{{{name}}}").into_bytes();
+        let enc = key(line).encoded.into_bytes();
+        while let Some(i) = out.windows(pat.len()).position(|w| w == pat.as_slice()) {
+            out.splice(i..i + pat.len(), enc.iter().copied());
+        }
+    }
+    out
+}
+
+#[test]
+fn old_key_with_any_comment_bytes_is_removed() {
+    for comment in [
+        &b"Jos\xe9"[..],
+        b"-----BEGIN OPENSSH PRIVATE KEY-----",
+        b"-----BEGIN PGP PUBLIC KEY BLOCK-----",
+        b"AGE-SECRET-KEY-1XYZ",
+        b"\xff\xfe\x00",
+    ] {
+        let input = fill_bytes(&[b"{OTHER} o\n{OLD} ", comment, b"\r\n{NEW} new\n"].concat());
+        let got = remove(&input).unwrap();
+        assert_eq!(
+            show(&got),
+            show(&fill_bytes(b"{OTHER} o\n{NEW} new\n")),
+            "{comment:?}"
+        );
+        // The new key is already there without options: nothing added.
+        assert_eq!(show(&add(&input).unwrap()), show(&input), "{comment:?}");
+    }
+}
+
+#[test]
+fn old_key_with_non_utf8_options_is_matched() {
+    let input = fill_bytes(b"from=\"caf\xe9.example.org\",no-pty {OLD} old\n{OTHER} o\n");
+    let added = add(&input).unwrap();
+    assert_eq!(
+        show(&added),
+        show(&fill_bytes(
+            b"from=\"caf\xe9.example.org\",no-pty {OLD} old\nfrom=\"caf\xe9.example.org\",no-pty {NEW} new@example.org\n{OTHER} o\n"
+        ))
+    );
+    assert_eq!(
+        show(&remove(&added).unwrap()),
+        show(&fill_bytes(
+            b"from=\"caf\xe9.example.org\",no-pty {NEW} new@example.org\n{OTHER} o\n"
+        ))
+    );
+}
+
+#[test]
+fn remove_refuses_if_an_unknown_line_holds_the_old_key() {
+    for line in [
+        &b"command=\"unclosed {OLD} old"[..],
+        b"\xef\xbb\xbf{OLD} bom",
+    ] {
+        let input = fill_bytes(&[line, b"\n{OLD} old\n{NEW} new\n"].concat());
+        assert_eq!(
+            remove(&input),
+            Err(EditError::OldKeyInUnknownLine),
+            "{}",
+            show(line)
+        );
+    }
+    // Comments and CA lines with the old key are fine.
+    let input = fill_bytes(b"# {OLD} off\ncert-authority {OLD} ca\n{OLD} old\n{NEW} new\n");
+    assert_eq!(
+        show(&remove(&input).unwrap()),
+        show(&fill_bytes(
+            b"# {OLD} off\ncert-authority {OLD} ca\n{NEW} new\n"
+        ))
+    );
 }
