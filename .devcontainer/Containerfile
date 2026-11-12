@@ -4,7 +4,7 @@ FROM registry.fedoraproject.org/fedora:45
 # (see spec/milestones/*/plan.md).
 RUN dnf -y install gcc git sudo \
         gpgme-devel libgpg-error-devel gnupg2 pkgconf-pkg-config \
-        openssh-server openssh-clients age \
+        openssh-server openssh-clients age sqlite-devel \
     && dnf clean all
 
 ARG USERNAME=dev
