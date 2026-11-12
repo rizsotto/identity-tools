@@ -46,6 +46,12 @@ pub enum VerifyError {
     /// The location accepts the key, but it could not be used to log in
     /// (for example it needs a passphrase and no agent holds it).
     KeyNotUsable,
+    /// The login used a certificate made from the key (`<key>-cert.pub`).
+    /// That does not show the key itself is installed.
+    CertificateUsed,
+    /// The server needs more than one key ("partial success"). Removing any
+    /// of them could lock the user out.
+    MoreThanOneKey,
     Other(String),
 }
 
@@ -73,6 +79,12 @@ impl VerifyStatus {
                 VerifyError::Unreachable(why) => format!("Cannot reach the host: {why}"),
                 VerifyError::KeyNotUsable => "The server accepts the key, but ssh could not \
                     use it. Add it to the ssh agent or check its passphrase."
+                    .into(),
+                VerifyError::CertificateUsed => "The login worked with a certificate for \
+                    this key, not with the key itself. The key may not be in authorized_keys."
+                    .into(),
+                VerifyError::MoreThanOneKey => "The server needs more than one key to log \
+                    in. Key Steward does not handle this yet."
                     .into(),
                 VerifyError::Other(why) => why.clone(),
             }),

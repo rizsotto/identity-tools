@@ -4,8 +4,11 @@
 //! string. Exit code 0 alone does not prove the key under test logged in:
 //! `-i` adds to the `IdentityFile` list of the user's config, so an old key
 //! from the config can log in instead (M1 plan, "Open item for T12"). So we
-//! run `ssh -v` and require that the last key the server accepted before
-//! authentication is the key under test, by SHA256 fingerprint.
+//! run `ssh -v -E <log>` and require that the main client authenticated
+//! with `publickey` and that the last key the server accepted is the key
+//! under test (by path and SHA256 fingerprint). Only the `-E` file is
+//! parsed: a `ProxyJump` ssh, a server banner and the remote command write
+//! to stderr, so they cannot fake these lines.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -24,25 +27,37 @@ use crate::provider::{AddOpts, KeyRef, Provider, PublicKeyRef, VerifyError, Veri
 /// Hard limit for one check, on top of `ConnectTimeout`.
 const RUN_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Options that make the check safe whatever the user's config says.
-/// Command line options win over the config file.
+/// Options that make the check safe and free of side effects whatever the
+/// user's config says. Command line options win over the config file.
+/// All checked against OpenSSH 10.5p1.
 const FIXED_OPTIONS: &[&str] = &[
     // FR-3, S-5: never prompt, never accept an unknown host key.
     "BatchMode=yes",
     "IdentitiesOnly=yes",
     "ConnectTimeout=10",
     "StrictHostKeyChecking=yes",
-    // Read-only check: do not add host keys to known_hosts.
+    "VerifyHostKeyDNS=no",
+    // Only key logins count.
+    "PreferredAuthentications=publickey",
+    "GSSAPIAuthentication=no",
+    "HostbasedAuthentication=no",
+    // Read-only check: no new host keys in known_hosts, no key added to the
+    // user's agent.
     "UpdateHostKeys=no",
+    "AddKeysToAgent=no",
     // The fingerprint we compare with is SHA256 (`ssh-keygen -l` default).
     "FingerprintHash=sha256",
     // Never reuse a multiplexed connection: it skips authentication.
     "ControlMaster=no",
     "ControlPath=none",
-    // Nothing else may run or listen because of the check.
+    // Nothing else may run, listen or be forwarded because of the check.
     "ClearAllForwardings=yes",
+    "ForwardAgent=no",
+    "ForwardX11=no",
     "PermitLocalCommand=no",
     "RemoteCommand=none",
+    "SessionType=default",
+    "ForkAfterAuthentication=no",
     "ServerAliveInterval=5",
     "ServerAliveCountMax=3",
 ];
@@ -103,7 +118,8 @@ impl SshServer {
     }
 
     /// The arguments for checking `identity` at `alias` (after `ssh`).
-    pub fn verify_args(&self, alias: &str, identity: &Path) -> Vec<OsString> {
+    /// `log` is the private file for `-E`.
+    pub fn verify_args(&self, alias: &str, identity: &Path, log: &Path) -> Vec<OsString> {
         let mut args: Vec<OsString> = Vec::new();
         if let Some(cfg) = &self.config {
             args.push("-F".into());
@@ -117,8 +133,11 @@ impl SshServer {
             args.push(opt);
         }
         // -v prints "Server accepts key: ... SHA256:..." and
-        // "Authenticated to ...". It wins over LogLevel in the config.
+        // "Authenticated to ...". It wins over LogLevel in the config. -E
+        // sends the main client's log, and only that, to our file.
         args.push("-v".into());
+        args.push("-E".into());
+        args.push(log.into());
         args.push("-T".into());
         for opt in FIXED_OPTIONS {
             args.push("-o".into());
@@ -138,7 +157,16 @@ impl SshServer {
                 "No private key file is known for this key.".into(),
             ));
         };
-        let args = self.verify_args(alias, identity);
+        let (_dir, log_path) = match private_log_file() {
+            Ok(v) => v,
+            Err(e) => {
+                let s = VerifyStatus::Error(VerifyError::Other(format!(
+                    "Cannot make a temp file for the ssh log: {e}"
+                )));
+                return s;
+            }
+        };
+        let args = self.verify_args(alias, identity, &log_path);
         let action = render_command(&self.program, &args);
         let mut cmd = Command::new(&self.program);
         cmd.args(&args)
@@ -169,7 +197,8 @@ impl SshServer {
             }
             Ok(Ok(out)) => {
                 let stderr = String::from_utf8_lossy(&out.stderr);
-                let s = classify(out.status.code(), &stderr, &key.fingerprint);
+                let log = read_capped(&log_path);
+                let s = classify(out.status.code(), &log, &stderr, identity, &key.fingerprint);
                 let code = match out.status.code() {
                     Some(c) => format!("exit {c}"),
                     None => "killed".to_string(),
@@ -200,18 +229,79 @@ fn describe(s: &VerifyStatus) -> String {
     }
 }
 
-/// Maps ssh's exit code and `-v` stderr to a result. All OpenSSH text
+/// A private dir (0700) with an empty log file (0600) for `ssh -E`. The
+/// dir is removed when the returned guard drops.
+fn private_log_file() -> std::io::Result<(tempfile::TempDir, PathBuf)> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let dir = tempfile::Builder::new()
+        .prefix("key-steward-ssh-")
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()?;
+    let path = dir.path().join("ssh.log");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)?;
+    Ok((dir, path))
+}
+
+/// Reads at most 1 MB of the ssh log.
+fn read_capped(path: &Path) -> String {
+    use std::io::Read;
+    let mut buf = Vec::new();
+    if let Ok(f) = std::fs::File::open(path) {
+        let _ = f.take(1_000_000).read_to_end(&mut buf);
+    }
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
+/// Maps ssh's exit code and its `-v -E` log to a result. All OpenSSH text
 /// patterns live here (checked against OpenSSH 10.5p1, SPEC 15).
 ///
-/// `Verified` needs both: ssh authenticated, and the last key the server
-/// accepted is `key`. The exit code is not used for that: it is the remote
-/// command's, and an old key from the config can log in instead (S-3).
-pub fn classify(exit: Option<i32>, stderr: &str, key: &Fingerprint) -> VerifyStatus {
-    let accepted = accepted_keys(stderr);
-    let ours_accepted = accepted.contains(&key.as_str());
-    if stderr.lines().any(|l| l.starts_with("Authenticated to ")) {
+/// `log` is the main client's own log file; only it decides the result.
+/// `stderr` (jump hosts, banner, remote command) is used only for an error
+/// message when the log has none.
+///
+/// `Verified` needs all of: exit 0 (the command is `true`), a line
+/// `Authenticated to ... using "publickey".`, no partial success, and the
+/// last key the server accepted is `identity` with fingerprint `key`, not
+/// a certificate.
+pub fn classify(
+    exit: Option<i32>,
+    log: &str,
+    stderr: &str,
+    identity: &Path,
+    key: &Fingerprint,
+) -> VerifyStatus {
+    let accepted: Vec<Accepted> = log
+        .lines()
+        .filter_map(|l| l.strip_prefix("debug1: Server accepts key: "))
+        .map(|rest| parse_accepted(rest, identity, key))
+        .collect();
+    let ours_accepted = accepted
+        .iter()
+        .any(|a| matches!(a, Accepted::Ours | Accepted::OursCert));
+    if log
+        .lines()
+        .any(|l| l.starts_with("Authenticated using ") && l.contains("with partial success"))
+    {
+        return VerifyStatus::Error(VerifyError::MoreThanOneKey);
+    }
+    let authenticated = log.lines().find(|l| l.starts_with("Authenticated to "));
+    if let Some(line) = authenticated {
+        if !line.ends_with(" using \"publickey\".") {
+            return VerifyStatus::Error(VerifyError::Other("ssh logged in without a key.".into()));
+        }
+        if exit != Some(0) {
+            return VerifyStatus::Error(VerifyError::Other(format!(
+                "ssh logged in, but the test command failed ({}).",
+                exit.map_or("killed".to_string(), |c| format!("exit {c}"))
+            )));
+        }
         return match accepted.last() {
-            Some(last) if *last == key.as_str() => VerifyStatus::Verified,
+            Some(Accepted::Ours) => VerifyStatus::Verified,
+            Some(Accepted::OursCert) => VerifyStatus::Error(VerifyError::CertificateUsed),
             _ if ours_accepted => VerifyStatus::Error(VerifyError::KeyNotUsable),
             _ => VerifyStatus::Missing,
         };
@@ -221,13 +311,13 @@ pub fn classify(exit: Option<i32>, stderr: &str, key: &Fingerprint) -> VerifySta
             "ssh logged in, but did not say which key it used.".into(),
         ));
     }
-    if stderr.contains("REMOTE HOST IDENTIFICATION HAS CHANGED") {
+    if log.contains("REMOTE HOST IDENTIFICATION HAS CHANGED") {
         return VerifyStatus::Error(VerifyError::HostKeyChanged);
     }
-    if stderr.contains("Host key verification failed.") {
+    if log.contains("Host key verification failed.") {
         return VerifyStatus::Error(VerifyError::UnknownHostKey);
     }
-    if stderr.contains("Permission denied (") {
+    if log.contains("Permission denied (") {
         return if ours_accepted {
             VerifyStatus::Error(VerifyError::KeyNotUsable)
         } else {
@@ -243,37 +333,54 @@ pub fn classify(exit: Option<i32>, stderr: &str, key: &Fingerprint) -> VerifySta
         "Connection closed by",
         "Connection reset by",
     ];
-    let message = last_message(stderr);
-    if UNREACHABLE.iter().any(|p| stderr.contains(p)) {
+    let message = last_message(log)
+        .or_else(|| last_message(stderr))
+        .unwrap_or_else(|| "ssh failed with no message".to_string());
+    if UNREACHABLE.iter().any(|p| log.contains(p)) {
         return VerifyStatus::Error(VerifyError::Unreachable(message));
     }
     VerifyStatus::Error(VerifyError::Other(message))
 }
 
-/// SHA256 fingerprints from `debug1: Server accepts key: <path> <type>
-/// SHA256:<fp> [explicit|agent]` lines, in order. The path may hold spaces,
-/// so the fingerprint is the last word that starts with `SHA256:`.
-fn accepted_keys(stderr: &str) -> Vec<&str> {
-    stderr
-        .lines()
-        .filter_map(|l| l.strip_prefix("debug1: Server accepts key: "))
-        .filter_map(|rest| {
-            rest.split_whitespace()
-                .rev()
-                .find(|w| w.starts_with("SHA256:"))
-        })
-        .collect()
+enum Accepted {
+    Ours,
+    OursCert,
+    Other,
+}
+
+/// Reads the rest of `debug1: Server accepts key: <path> <TYPE> SHA256:<fp>
+/// [explicit] [token] [agent]`. It is ours only if the path is exactly the
+/// `-i` path, the fingerprint is ours and nothing else follows, so an agent
+/// key whose comment imitates our line does not match.
+fn parse_accepted(rest: &str, identity: &Path, key: &Fingerprint) -> Accepted {
+    let Some(after) = identity
+        .to_str()
+        .and_then(|id| rest.strip_prefix(id))
+        .and_then(|r| r.strip_prefix(' '))
+    else {
+        return Accepted::Other;
+    };
+    let mut words = after.split(' ');
+    let (Some(kind), Some(fp)) = (words.next(), words.next()) else {
+        return Accepted::Other;
+    };
+    if fp != key.as_str() || !words.all(|w| matches!(w, "explicit" | "token" | "agent")) {
+        return Accepted::Other;
+    }
+    if kind.ends_with("-CERT") {
+        Accepted::OursCert
+    } else {
+        Accepted::Ours
+    }
 }
 
 /// The last line that is not debug output.
-fn last_message(stderr: &str) -> String {
-    stderr
-        .lines()
+fn last_message(text: &str) -> Option<String> {
+    text.lines()
         .rev()
-        .find(|l| !l.starts_with("debug") && !l.trim().is_empty())
-        .unwrap_or("ssh failed with no message")
-        .trim()
-        .to_string()
+        .map(str::trim)
+        .find(|l| !l.starts_with("debug") && !l.is_empty())
+        .map(str::to_string)
 }
 
 #[async_trait]
@@ -317,90 +424,132 @@ mod tests {
 
     const NEW: &str = "SHA256:i+Q6tU5ofv97ruxRVjNOiScwa467+cfaBreYtWhdMZE";
     const OLD: &str = "SHA256:lTiAAGWHw8nN4UiFBfg1s7GMPp3o5XmvBsS/HxNB4nE";
+    const AUTH: &str = "Authenticated to 127.0.0.1 ([127.0.0.1]:22022) using \"publickey\".\n";
 
-    fn new_key() -> Fingerprint {
-        Fingerprint::Ssh(NEW.into())
-    }
-
-    // Captured from OpenSSH 10.5p1 (`ssh -v`), trimmed.
-    fn old_key_logged_in() -> String {
-        format!(
-            "debug1: Offering public key: /k/new key ED25519 {NEW} explicit\n\
-             debug1: Offering public key: /k/old ED25519 {OLD} explicit\n\
-             debug1: Server accepts key: /k/old ED25519 {OLD} explicit\n\
-             Authenticated to 127.0.0.1 ([127.0.0.1]:22022) using \"publickey\".\n"
+    fn c(exit: i32, log: &str) -> VerifyStatus {
+        classify(
+            Some(exit),
+            log,
+            "",
+            Path::new("/k/new key"),
+            &Fingerprint::Ssh(NEW.into()),
         )
     }
 
+    fn accepts(path: &str, kind: &str, fp: &str) -> String {
+        format!("debug1: Server accepts key: {path} {kind} {fp} explicit\n")
+    }
+
+    // Lines as OpenSSH 10.5p1 writes them to the -E log, trimmed.
     #[test]
     fn verified_needs_our_key_accepted_last() {
-        let ok = format!(
-            "debug1: Server accepts key: /k/new key ED25519 {NEW} explicit\n\
-             Authenticated to 127.0.0.1 ([127.0.0.1]:22022) using \"publickey\".\n"
-        );
-        assert_eq!(classify(Some(0), &ok, &new_key()), VerifyStatus::Verified);
-        // The remote command's exit code does not matter.
-        assert_eq!(classify(Some(1), &ok, &new_key()), VerifyStatus::Verified);
+        let ok = accepts("/k/new key", "ED25519", NEW) + AUTH;
+        assert_eq!(c(0, &ok), VerifyStatus::Verified);
+        // The command is `true`: another exit code is not a clean login.
+        assert!(matches!(
+            c(1, &ok),
+            VerifyStatus::Error(VerifyError::Other(_))
+        ));
+        let old = accepts("/k/old", "ED25519", OLD) + AUTH;
+        assert_eq!(c(0, &old), VerifyStatus::Missing);
+        let not_usable = accepts("/k/new key", "ED25519", NEW) + &old;
         assert_eq!(
-            classify(Some(0), &old_key_logged_in(), &new_key()),
-            VerifyStatus::Missing
-        );
-        let not_usable = format!(
-            "debug1: Server accepts key: /k/new ED25519 {NEW} explicit\n\
-             debug1: Server accepts key: /k/old ED25519 {OLD} explicit\n\
-             Authenticated to 127.0.0.1 ([127.0.0.1]:22022) using \"publickey\".\n"
-        );
-        assert_eq!(
-            classify(Some(0), &not_usable, &new_key()),
+            c(0, &not_usable),
             VerifyStatus::Error(VerifyError::KeyNotUsable)
         );
         assert!(matches!(
-            classify(Some(0), "", &new_key()),
+            c(0, ""),
+            VerifyStatus::Error(VerifyError::Other(_))
+        ));
+        let not_key = "Authenticated to h ([127.0.0.1]:22) using \"password\".\n";
+        assert!(matches!(
+            c(0, &(accepts("/k/new key", "ED25519", NEW) + not_key)),
             VerifyStatus::Error(VerifyError::Other(_))
         ));
     }
 
     #[test]
-    fn stderr_mapping() {
-        let k = new_key();
+    fn certificate_and_partial_success_are_not_verified() {
+        let cert = accepts("/k/new key", "ED25519-CERT", NEW) + AUTH;
         assert_eq!(
-            classify(
-                Some(255),
-                "dev@127.0.0.1: Permission denied (publickey).\n",
-                &k
-            ),
+            c(0, &cert),
+            VerifyStatus::Error(VerifyError::CertificateUsed)
+        );
+        let partial = accepts("/k/new key", "ED25519", NEW)
+            + "Authenticated using \"publickey\" with partial success.\n"
+            + &accepts("/k/old", "ED25519", OLD)
+            + AUTH;
+        assert_eq!(
+            c(0, &partial),
+            VerifyStatus::Error(VerifyError::MoreThanOneKey)
+        );
+    }
+
+    #[test]
+    fn accepted_line_must_match_path_and_end() {
+        let k = Fingerprint::Ssh(NEW.into());
+        let id = Path::new("/k/new key");
+        let ours = |rest: &str| matches!(parse_accepted(rest, id, &k), Accepted::Ours);
+        assert!(ours(&format!("/k/new key ED25519 {NEW} explicit")));
+        assert!(ours(&format!("/k/new key ED25519 {NEW} explicit agent")));
+        assert!(ours(&format!("/k/new key ED25519 {NEW}")));
+        assert!(!ours(&format!("/k/new ED25519 {NEW} explicit")));
+        assert!(!ours(&format!("/k/other ED25519 {NEW} explicit")));
+        assert!(!ours(&format!("/k/new key ED25519 {OLD} explicit")));
+        // An agent key whose comment copies our line.
+        assert!(!ours(&format!(
+            "/k/new key ED25519 {NEW} ED25519 {OLD} agent"
+        )));
+    }
+
+    #[test]
+    fn stderr_mapping() {
+        assert_eq!(
+            c(255, "dev@127.0.0.1: Permission denied (publickey).\n"),
             VerifyStatus::Missing
         );
         let unknown = "No ED25519 host key is known for [127.0.0.1]:22022 and you have \
                        requested strict checking.\nHost key verification failed.\n";
         assert_eq!(
-            classify(Some(255), unknown, &k),
+            c(255, unknown),
             VerifyStatus::Error(VerifyError::UnknownHostKey)
         );
         let changed = "@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @\n\
                        Host key verification failed.\n";
         assert_eq!(
-            classify(Some(255), changed, &k),
+            c(255, changed),
             VerifyStatus::Error(VerifyError::HostKeyChanged)
         );
         let refused = "debug1: Connecting to 127.0.0.1 [127.0.0.1] port 1.\n\
                        ssh: connect to host 127.0.0.1 port 1: Connection refused\n";
         assert_eq!(
-            classify(Some(255), refused, &k),
+            c(255, refused),
             VerifyStatus::Error(VerifyError::Unreachable(
                 "ssh: connect to host 127.0.0.1 port 1: Connection refused".into()
             ))
         );
         assert_eq!(
-            classify(Some(255), "debug1: x\nsomething odd\ndebug1: y\n", &k),
+            c(255, "debug1: x\nsomething odd\ndebug1: y\n"),
             VerifyStatus::Error(VerifyError::Other("something odd".into()))
         );
     }
 
     #[test]
-    fn accepted_key_path_may_hold_spaces() {
-        let line = format!("debug1: Server accepts key: /k/a SHA256:x b ED25519 {NEW} agent\n");
-        assert_eq!(accepted_keys(&line), vec![NEW]);
+    fn stderr_never_decides_the_result() {
+        let fake = accepts("/k/new key", "ED25519", NEW) + AUTH;
+        let got = classify(
+            Some(255),
+            "",
+            &(fake + "dev@h: Permission denied (publickey).\n"),
+            Path::new("/k/new key"),
+            &Fingerprint::Ssh(NEW.into()),
+        );
+        assert_eq!(
+            got,
+            VerifyStatus::Error(VerifyError::Other(
+                "dev@h: Permission denied (publickey).".into()
+            ))
+        );
     }
 
     #[test]
@@ -409,7 +558,7 @@ mod tests {
             .with_config("/t/cfg")
             .with_known_hosts("/t/k h");
         let args: Vec<String> = p
-            .verify_args("-oProxyCommand=x", Path::new("/k/id"))
+            .verify_args("-oProxyCommand=x", Path::new("/k/id"), Path::new("/p/log"))
             .into_iter()
             .map(|a| a.into_string().unwrap())
             .collect();
@@ -418,17 +567,32 @@ mod tests {
             "-F /t/cfg",
             "-o UserKnownHostsFile=\"/t/k h\"",
             "-v",
+            "-E /p/log",
             "-o BatchMode=yes",
             "-o IdentitiesOnly=yes",
             "-o ConnectTimeout=10",
             "-o StrictHostKeyChecking=yes",
             "-o FingerprintHash=sha256",
             "-o ControlPath=none",
+            "-o AddKeysToAgent=no",
+            "-o ForwardAgent=no",
+            "-o PreferredAuthentications=publickey",
             "-i /k/id",
         ] {
             assert!(joined.contains(want), "{want} not in {joined}");
         }
         // The alias comes after `--`, so it can never be read as an option.
         assert_eq!(&args[args.len() - 3..], ["--", "-oProxyCommand=x", "true"]);
+    }
+
+    #[test]
+    fn log_file_is_private() {
+        use std::os::unix::fs::MetadataExt;
+        let (dir, path) = private_log_file().unwrap();
+        assert_eq!(std::fs::metadata(dir.path()).unwrap().mode() & 0o777, 0o700);
+        assert_eq!(std::fs::metadata(&path).unwrap().mode() & 0o777, 0o600);
+        let d = dir.path().to_path_buf();
+        drop(dir);
+        assert!(!d.exists());
     }
 }
