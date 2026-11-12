@@ -6,3 +6,8 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+identity-core = { path = "../../../crates/identity-core" }
+thiserror = "2"
+
+[dev-dependencies]
+test-support = { path = "../test-support" }
