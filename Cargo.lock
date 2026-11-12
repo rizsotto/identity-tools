@@ -2690,6 +2690,10 @@ dependencies = [
 [[package]]
 name = "resolver"
 version = "0.1.0"
+dependencies = [
+ "identity-core",
+ "thiserror 2.0.21",
+]
 
 [[package]]
 name = "rfc6979"
