@@ -1,7 +1,7 @@
 # 0001: How to share identity-core between Key Steward and Send Secret
 
-- Status: proposed
-- Blocks: Key Steward M1, Send Secret M1
+- Status: deferred (research done, decide when the second app needs the crate)
+- Blocks: nothing in M1. Each M1 builds `crates/identity-core` in its own repo.
 - SPEC refs: key-manager.md 7.1, 7.3, 8, 11, 16 (Q2: Flatpak or host package first); send-secret.md 7, 8, 11
 
 ## Question

@@ -7,7 +7,7 @@ process is in `../workflow.md`, "Blocked on a decision".
 
 | ID | Title | Status | Blocks |
 |---|---|---|---|
-| [0001](0001-identity-core-sharing.md) | How to share identity-core with Send Secret | proposed | final home of `identity-core` (not M1) |
+| [0001](0001-identity-core-sharing.md) | How to share identity-core with Send Secret | deferred | when the second app needs the crate (M1 builds it in this repo) |
 | [0002](0002-ssh-test-servers.md) | How integration tests get real SSH servers | proposed | M1 T10, M2 |
 
 ## Pending (no record yet)
