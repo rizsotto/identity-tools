@@ -28,7 +28,7 @@ use super::authorized_keys::{AuthorizedKeys, EditError, MAX_FILE};
 use super::remote::{self, ApplyReply, Cksum, ProtocolError, ReadReply, Script};
 use super::{RUN_TIMEOUT, SshServer, Workdir, config, read_capped, render_command};
 use crate::error::ProviderError;
-use crate::provider::{KeyRef, Provider, PublicKeyRef, VerifyError, VerifyStatus};
+use crate::provider::{KeyRef, PublicKeyRef, RemoveOpts, VerifyError, VerifyStatus};
 
 /// Most bytes kept from the script's stdout. More than the read script
 /// may send, so a longer answer is refused as too large.
@@ -37,13 +37,15 @@ const MAX_STDOUT: usize = MAX_FILE + 4096;
 const MAX_STDERR: usize = 64 * 1024;
 
 /// Why reading or editing `authorized_keys` on a server failed. Nothing
-/// was changed on the server unless the text says so.
+/// was changed on the server, except after [`NotConfirmed`] (the file
+/// was replaced) and [`MayHaveWritten`] (not known): list to check.
+///
+/// [`NotConfirmed`]: AuthorizedKeysError::NotConfirmed
+/// [`MayHaveWritten`]: AuthorizedKeysError::MayHaveWritten
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AuthorizedKeysError {
     #[error("no key to log in with was given")]
     NoLoginKey,
-    #[error("{0}")]
-    Unsupported(&'static str),
     /// A local problem before ssh ran (temp dir, config, starting ssh).
     #[error("{0}")]
     Setup(String),
@@ -76,6 +78,17 @@ pub enum AuthorizedKeysError {
         "the server reports a different file than the one sent; check ~/.ssh/authorized_keys there"
     )]
     NotConfirmed,
+    /// ssh logged in, then the run ended without a clear answer (timeout,
+    /// lost connection). Only a read script ran, so nothing changed.
+    #[error("the connection ended while the script ran on the server: {0}")]
+    Interrupted(String),
+    /// Like [`AuthorizedKeysError::Interrupted`] or a garbled answer, but
+    /// for the apply script: the file may have been written.
+    #[error(
+        "the edit of ~/.ssh/authorized_keys gave no clear answer ({0}); \
+         the file may have been written; list the keys to check"
+    )]
+    MayHaveWritten(String),
 }
 
 /// The result of [`SshServer::remove_key`].
@@ -97,8 +110,9 @@ pub enum OldKeyCheck {
     /// The server still accepts the old key (alone, or as one of several
     /// keys). Do not retire it.
     StillAccepted,
-    /// No answer (host unreachable, host key, ...).
-    Unknown(VerifyStatus),
+    /// No proof either way (host unreachable, host key, key not offered,
+    /// a log ssh wrote in a way we do not know). The reason, for the user.
+    Unknown(String),
 }
 
 impl From<ProtocolError> for ProviderError {
@@ -116,7 +130,9 @@ impl From<EditError> for ProviderError {
 fn login_reason(s: &VerifyStatus) -> String {
     match s.to_status() {
         Status::Error(why) => why,
-        Status::Missing => "the server does not accept the key".into(),
+        Status::Missing => "the server does not accept the key (a `from=` option on its \
+                            line in authorized_keys may refuse this client)"
+            .into(),
         other => format!("{other:?}"),
     }
 }
@@ -140,16 +156,22 @@ impl SshServer {
         Ok(true)
     }
 
-    /// Drops every login key line of `old`, logging in with `keep`, which
-    /// must stay in the file. The login fails (and nothing changes) if
-    /// `keep` cannot log in and run the script, for example because its
+    /// Drops every login key line of `old`, logging in with `opts.keep`,
+    /// which must stay in the file. The login fails (and nothing changes)
+    /// if `keep` cannot log in and run the script, for example because its
     /// line has a forced command.
     pub async fn remove_key(
         &self,
         target: &Target,
         old: &Fingerprint,
-        keep: &KeyRef,
+        opts: &RemoveOpts,
     ) -> Result<SshRemoved, ProviderError> {
+        if opts.purpose != Purpose::SshAuth {
+            return Err(ProviderError::Unsupported(
+                "an SSH server holds only login keys".into(),
+            ));
+        }
+        let keep = opts.keep.as_ref().ok_or(AuthorizedKeysError::NoLoginKey)?;
         let (content, sum) = self.read_file(target, keep).await?;
         let removed = AuthorizedKeys::parse(&content)?.remove(old, &keep.fingerprint)?;
         let changed = removed.bytes != content;
@@ -163,21 +185,36 @@ impl SshServer {
     }
 
     /// After a removal: logs in with the old key through the same pinned
-    /// config and expects the server to refuse it. A key the server
-    /// accepts but ssh cannot use, or accepts as one of several, counts as
-    /// still accepted.
+    /// config. `Refused` needs proof in the log that ssh offered the key
+    /// and the server said no ([`super::classify::refused`]). A key the
+    /// server accepts but ssh cannot use, accepts as one of several, or
+    /// accepts through a certificate counts as still accepted.
     pub async fn check_old_key(
         &self,
         target: &Target,
         old: &KeyRef,
     ) -> Result<OldKeyCheck, ProviderError> {
-        Ok(match self.verify(target, old).await? {
-            VerifyStatus::Missing => OldKeyCheck::Refused,
+        let Target::Ssh(host) = target else {
+            return Err(ProviderError::WrongTarget {
+                kind: LocationKind::SshServer,
+            });
+        };
+        self.check_commands()?;
+        let (status, refused) = self.run(target, &host.alias, old).await;
+        Ok(match status {
             VerifyStatus::Verified
-            | VerifyStatus::Error(VerifyError::KeyNotUsable | VerifyError::MoreThanOneKey) => {
-                OldKeyCheck::StillAccepted
-            }
-            other => OldKeyCheck::Unknown(other),
+            | VerifyStatus::Error(
+                VerifyError::KeyNotUsable
+                | VerifyError::MoreThanOneKey
+                | VerifyError::CertificateUsed,
+            ) => OldKeyCheck::StillAccepted,
+            VerifyStatus::Missing if refused => OldKeyCheck::Refused,
+            VerifyStatus::Missing => OldKeyCheck::Unknown(
+                "ssh did not show the server refusing the key (is the private key file \
+                 there and readable?)"
+                    .into(),
+            ),
+            other => OldKeyCheck::Unknown(login_reason(&other)),
         })
     }
 
@@ -188,10 +225,18 @@ impl SshServer {
         old: Cksum,
         new: &[u8],
     ) -> Result<(), ProviderError> {
-        let out = self
+        let unclear = |why: String| ProviderError::from(AuthorizedKeysError::MayHaveWritten(why));
+        let out = match self
             .run_script(target, login, remote::APPLY, remote::apply_stdin(old, new))
-            .await?;
-        let err = match remote::parse_apply(&out)? {
+            .await
+        {
+            Err(ProviderError::AuthorizedKeys(AuthorizedKeysError::Interrupted(why))) => {
+                return Err(unclear(why));
+            }
+            other => other?,
+        };
+        let reply = remote::parse_apply(&out).map_err(|e| unclear(e.to_string()))?;
+        let err = match reply {
             ApplyReply::Done(sum) if sum == remote::cksum(new) => return Ok(()),
             ApplyReply::Done(_) => AuthorizedKeysError::NotConfirmed,
             ApplyReply::Changed => AuthorizedKeysError::Changed,
@@ -321,7 +366,7 @@ impl SshServer {
                 let _ = input.write_all(&stdin).await;
                 let _ = input.shutdown().await;
             };
-            let ((), (stdout, _), (stderr, _)) = tokio::join!(
+            let ((), stdout, stderr) = tokio::join!(
                 write,
                 read_capped_async(output, MAX_STDOUT),
                 read_capped_async(errors, MAX_STDERR),
@@ -331,17 +376,15 @@ impl SshServer {
         let (status, stdout, stderr) = match tokio::time::timeout(RUN_TIMEOUT, run).await {
             Err(_) => {
                 record("timed out".into());
-                return Err(AuthorizedKeysError::Login(VerifyStatus::Error(
-                    VerifyError::Unreachable(format!(
-                        "no answer within {} seconds",
-                        RUN_TIMEOUT.as_secs()
-                    )),
+                return Err(AuthorizedKeysError::Interrupted(format!(
+                    "no answer within {} seconds",
+                    RUN_TIMEOUT.as_secs()
                 ))
                 .into());
             }
             Ok((Err(e), ..)) => {
                 record("could not wait".into());
-                return Err(setup(format!("ssh failed: {e}")));
+                return Err(AuthorizedKeysError::Interrupted(format!("ssh failed: {e}")).into());
             }
             Ok((Ok(status), stdout, stderr)) => (status, stdout, stderr),
         };
@@ -357,6 +400,10 @@ impl SshServer {
         let code = code.map_or("killed".to_string(), |c| format!("exit {c}"));
         if login_status != VerifyStatus::Verified {
             record(format!("{code}, login {}", super::describe(&login_status)));
+            // After a login the remote command may have run.
+            if log.lines().any(|l| l.starts_with("Authenticated to ")) {
+                return Err(AuthorizedKeysError::Interrupted(login_reason(&login_status)).into());
+            }
             return Err(AuthorizedKeysError::Login(login_status).into());
         }
         record(format!(
@@ -368,20 +415,18 @@ impl SshServer {
     }
 }
 
-/// Reads to the end, keeps at most `cap` bytes; true if there was more.
-async fn read_capped_async<R: AsyncRead + Unpin>(mut r: R, cap: usize) -> (Vec<u8>, bool) {
+/// Reads to the end, keeps at most `cap` bytes.
+async fn read_capped_async<R: AsyncRead + Unpin>(mut r: R, cap: usize) -> Vec<u8> {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 8192];
-    let mut over = false;
     loop {
         match r.read(&mut chunk).await {
             Ok(0) | Err(_) => break,
             Ok(n) => {
                 let room = cap.saturating_sub(buf.len());
-                over |= n > room;
                 buf.extend_from_slice(&chunk[..n.min(room)]);
             }
         }
     }
-    (buf, over)
+    buf
 }

@@ -79,6 +79,13 @@ fn assert_log_clean(log: &NetLog, keys: &[&Path]) {
     }
 }
 
+fn keep(key: &Path) -> RemoveOpts {
+    RemoveOpts {
+        purpose: Purpose::SshAuth,
+        keep: Some(key_ref(key)),
+    }
+}
+
 fn ak_err(e: ProviderError) -> AuthorizedKeysError {
     match e {
         ProviderError::AuthorizedKeys(e) => e,
@@ -114,16 +121,8 @@ async fn list_against_test_sshd() {
     assert_eq!(got[1].remote_id.as_deref(), Some("5"));
     assert_eq!(got[1].title.as_deref(), Some("otherkey"));
 
-    // The trait method logs in with the key from `with_login`.
-    let via_trait = provider(&sshd, &log)
-        .with_login(key_ref(&login))
-        .list(&target(&sshd))
-        .await
-        .unwrap();
-    assert_eq!(via_trait, got);
-
     let entries = log.entries();
-    assert_eq!(entries.len(), 2, "{}", log.render());
+    assert_eq!(entries.len(), 1, "{}", log.render());
     for part in [
         "BatchMode=yes",
         "StrictHostKeyChecking=yes",
@@ -344,7 +343,7 @@ async fn fixtures_end_to_end_against_sshd() {
     for (name, input, want) in fixtures("remove", &keys) {
         write_keys(&sshd, &input);
         clear_backups(&sshd);
-        let got = p.remove_key(&t, &fpr(&keys.old), &key_ref(&keys.new)).await;
+        let got = p.remove_key(&t, &fpr(&keys.old), &keep(&keys.new)).await;
         let file = fs::read(sshd.authorized_keys()).unwrap();
         match (&want, got) {
             (Some(want), Ok(removed)) => {
@@ -448,10 +447,7 @@ async fn remove_logs_in_with_new_key() {
         public(&new).encoded
     );
     write_keys(&sshd, forced.as_bytes());
-    let err = p
-        .remove_key(&t, &fpr(&old), &key_ref(&new))
-        .await
-        .unwrap_err();
+    let err = p.remove_key(&t, &fpr(&old), &keep(&new)).await.unwrap_err();
     assert_eq!(
         ak_err(err),
         AuthorizedKeysError::Protocol(ProtocolError::NoMarker)
@@ -462,10 +458,7 @@ async fn remove_logs_in_with_new_key() {
     // key would log in.
     let only_old = format!("{}\n", public(&old).encoded);
     write_keys(&sshd, only_old.as_bytes());
-    let err = p
-        .remove_key(&t, &fpr(&old), &key_ref(&new))
-        .await
-        .unwrap_err();
+    let err = p.remove_key(&t, &fpr(&old), &keep(&new)).await.unwrap_err();
     assert_eq!(
         ak_err(err),
         AuthorizedKeysError::Login(VerifyStatus::Missing)
@@ -483,7 +476,7 @@ async fn remove_logs_in_with_new_key() {
         OldKeyCheck::StillAccepted
     );
     let removed = p
-        .remove_key(&t, &fpr(&old), &key_ref(&new))
+        .remove_key(&t, &fpr(&old), &keep(&new))
         .await
         .unwrap_or_else(|e| panic!("{e}\n{}", log.render()));
     assert_eq!(
@@ -601,7 +594,7 @@ async fn add_and_remove_need_the_right_options() {
         )
         .await
         .unwrap_err();
-    assert!(matches!(ak_err(e), AuthorizedKeysError::Unsupported(_)));
+    assert!(matches!(e, ProviderError::Unsupported(_)), "{e:?}");
     let e = p
         .remove(
             &t,
@@ -641,4 +634,83 @@ async fn apply_answer_must_match_content_sent() {
         "{}",
         log.render()
     );
+}
+
+/// Proof only: a key ssh never offered (its file is gone) is not
+/// "refused", even though the login fails.
+#[tokio::test]
+async fn check_old_key_needs_proof_of_refusal() {
+    let sshd = Sshd::start(BASE);
+    let gone = sshd.new_key("gone");
+    let gone_ref = key_ref(&gone);
+    fs::remove_file(&gone).unwrap();
+    fs::remove_file(gone.with_extension("pub")).unwrap();
+    // Installed, but only the public half is left: the server accepts the
+    // key, ssh cannot sign. Still accepted.
+    let half = sshd.new_key("half");
+    sshd.authorize(&half);
+    let half_ref = key_ref(&half);
+    fs::remove_file(&half).unwrap();
+    let stranger = sshd.new_key("stranger");
+    let log = NetLog::new();
+    let p = provider(&sshd, &log);
+    let t = target(&sshd);
+    assert!(
+        matches!(
+            p.check_old_key(&t, &gone_ref).await.unwrap(),
+            OldKeyCheck::Unknown(_)
+        ),
+        "{}",
+        log.render()
+    );
+    assert_eq!(
+        p.check_old_key(&t, &key_ref(&stranger)).await.unwrap(),
+        OldKeyCheck::Refused
+    );
+    assert_eq!(
+        p.check_old_key(&t, &half_ref).await.unwrap(),
+        OldKeyCheck::StillAccepted
+    );
+    assert_eq!(
+        p.check_old_key(&t, &key_ref(&sshd.client_key()))
+            .await
+            .unwrap(),
+        OldKeyCheck::StillAccepted
+    );
+    let mut stopped = sshd;
+    stopped.stop();
+    assert!(matches!(
+        p.check_old_key(&t, &key_ref(&stranger)).await.unwrap(),
+        OldKeyCheck::Unknown(_)
+    ));
+}
+
+/// The apply script ran, but its answer is lost: the error says the file
+/// may have been written, never that nothing changed.
+#[tokio::test]
+async fn unclear_apply_answer_may_have_written() {
+    let sshd = Sshd::start(BASE);
+    let new = sshd.new_key("new");
+    let wrapper = sshd.dir().join("ssh-wrapper");
+    let script = format!(
+        "#!/bin/sh\ncase \"$*\" in *\"count={} \"*) ssh \"$@\" >/dev/null; echo garbled; exit ;; esac\nexec ssh \"$@\"\n",
+        providers::remote::APPLY.body.len(),
+    );
+    fs::write(&wrapper, script).unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
+    let log = NetLog::new();
+    let err = provider(&sshd, &log)
+        .with_program(wrapper)
+        .add_key(&target(&sshd), &public(&new), &key_ref(&sshd.client_key()))
+        .await
+        .unwrap_err();
+    let text = err.to_string();
+    assert!(
+        matches!(ak_err(err), AuthorizedKeysError::MayHaveWritten(_)),
+        "{}",
+        log.render()
+    );
+    assert!(text.contains("may have been written"), "{text}");
+    // It was written here.
+    assert_eq!(backups(&sshd).len(), 1);
 }

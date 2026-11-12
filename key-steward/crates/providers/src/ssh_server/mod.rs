@@ -97,7 +97,6 @@ pub struct SshServer {
     home: Option<PathBuf>,
     no_agent: bool,
     allow_commands: bool,
-    login: Option<KeyRef>,
     netlog: NetLog,
 }
 
@@ -110,7 +109,6 @@ impl SshServer {
             home: None,
             no_agent: false,
             allow_commands: false,
-            login: None,
             netlog,
         }
     }
@@ -150,13 +148,6 @@ impl SshServer {
     /// we cannot check). Set it only after the user agreed. Default: false.
     pub fn with_allow_commands(mut self, allow: bool) -> Self {
         self.allow_commands = allow;
-        self
-    }
-
-    /// The key [`Provider::list`] logs in with. Without it, `list` fails
-    /// with [`AuthorizedKeysError::NoLoginKey`]; see [`SshServer::list_as`].
-    pub fn with_login(mut self, key: KeyRef) -> Self {
-        self.login = Some(key);
         self
     }
 
@@ -305,8 +296,10 @@ impl SshServer {
         Ok(text)
     }
 
-    async fn run(&self, target: &Target, alias: &str, key: &KeyRef) -> VerifyStatus {
-        let fail = |why: String| VerifyStatus::Error(VerifyError::Other(why));
+    /// The check, and whether the log proves the server refused the key
+    /// ([`classify::refused`]).
+    async fn run(&self, target: &Target, alias: &str, key: &KeyRef) -> (VerifyStatus, bool) {
+        let fail = |why: String| (VerifyStatus::Error(VerifyError::Other(why)), false);
         let Some(identity) = &key.identity_file else {
             return fail("No private key file is known for this key.".into());
         };
@@ -342,7 +335,7 @@ impl SshServer {
                     "no answer within {} seconds",
                     RUN_TIMEOUT.as_secs()
                 )));
-                (s, "timed out".to_string())
+                ((s, false), "timed out".to_string())
             }
             Ok(Err(e)) => (
                 fail(format!("Cannot run {}: {e}", self.program.display())),
@@ -358,11 +351,14 @@ impl SshServer {
                     &work.identity,
                     &key.fingerprint,
                 );
+                let refused =
+                    classify::refused(out.status.code(), &log, &work.identity, &key.fingerprint);
                 let code = match out.status.code() {
                     Some(c) => format!("exit {c}"),
                     None => "killed".to_string(),
                 };
-                (s.clone(), format!("{code}, {}", describe(&s)))
+                let outcome = format!("{code}, {}", describe(&s));
+                ((s, refused), outcome)
             }
         };
         self.netlog
@@ -453,10 +449,10 @@ impl Provider for SshServer {
         LocationKind::SshServer
     }
 
-    /// Logs in with the key from [`SshServer::with_login`].
-    async fn list(&self, target: &Target) -> Result<Vec<PublicKeyRef>, ProviderError> {
-        let login = self.login.as_ref().ok_or(AuthorizedKeysError::NoLoginKey)?;
-        self.list_as(target, login).await
+    /// Fails with [`AuthorizedKeysError::NoLoginKey`]: listing needs a
+    /// login key, see [`SshServer::list_as`].
+    async fn list(&self, _target: &Target) -> Result<Vec<PublicKeyRef>, ProviderError> {
+        Err(AuthorizedKeysError::NoLoginKey.into())
     }
 
     /// See [`SshServer::add_key`]. Needs `opts.like` (the login key).
@@ -467,14 +463,14 @@ impl Provider for SshServer {
         opts: &AddOpts,
     ) -> Result<(), ProviderError> {
         if opts.purpose != Purpose::SshAuth {
-            return Err(
-                AuthorizedKeysError::Unsupported("an SSH server holds only login keys").into(),
-            );
+            return Err(ProviderError::Unsupported(
+                "an SSH server holds only login keys".into(),
+            ));
         }
         let PublicKey::Ssh(key) = key else {
-            return Err(
-                AuthorizedKeysError::Unsupported("only SSH keys go into authorized_keys").into(),
-            );
+            return Err(ProviderError::Unsupported(
+                "only SSH keys go into authorized_keys".into(),
+            ));
         };
         let like = opts.like.as_ref().ok_or(AuthorizedKeysError::NoLoginKey)?;
         self.add_key(target, key, like).await.map(|_| ())
@@ -489,13 +485,7 @@ impl Provider for SshServer {
         key: &Fingerprint,
         opts: &RemoveOpts,
     ) -> Result<(), ProviderError> {
-        if opts.purpose != Purpose::SshAuth {
-            return Err(
-                AuthorizedKeysError::Unsupported("an SSH server holds only login keys").into(),
-            );
-        }
-        let keep = opts.keep.as_ref().ok_or(AuthorizedKeysError::NoLoginKey)?;
-        self.remove_key(target, key, keep).await.map(|_| ())
+        self.remove_key(target, key, opts).await.map(|_| ())
     }
 
     /// Errors with [`ProviderError::CommandsNeedConsent`] if the config can
@@ -507,7 +497,7 @@ impl Provider for SshServer {
             });
         };
         self.check_commands()?;
-        Ok(self.run(target, &host.alias, key).await)
+        Ok(self.run(target, &host.alias, key).await.0)
     }
 }
 
