@@ -92,6 +92,7 @@ Today, GNOME's key app (Seahorse) is barely maintained and has no rotation workf
 
 ### Functional
 - **FR-1** Key list: name/comment, type, bits/curve, fingerprint, created, expiry, number of locations, warnings.
+  SSH keys have no creation time. For them, "created" is the file date: the modification time of the private key file, else of the `.pub` file, labeled as the file date (`identity_core::scan_ssh_dir`, M1 T04).
 - **FR-2** Location model: each location has a kind, a target, the key it holds, a status (`verified`, `unverified`, `missing`, `error`) and a `last_checked` time.
 - **FR-3** SSH server check: run `ssh -o BatchMode=yes -o IdentitiesOnly=yes -i <key> -o ConnectTimeout=10 <host> true`. Exit code 0 means verified. Never ask for passwords in batch mode.
 - **FR-4** Forge check: list keys through the API and compare fingerprints.

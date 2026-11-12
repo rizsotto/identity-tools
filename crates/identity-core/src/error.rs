@@ -14,6 +14,10 @@ pub enum KeyError {
     UnsupportedFormat(&'static str),
     #[error("cannot read key file: {0}")]
     Io(#[from] std::io::Error),
+    #[error("expected exactly one key")]
+    NotOneKey,
+    #[error(transparent)]
+    Line(#[from] LineError),
 }
 
 /// Why one line of a key list was skipped. Fixed text, never the input.
