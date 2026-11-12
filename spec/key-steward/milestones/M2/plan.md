@@ -60,7 +60,7 @@ rotation: Planned → NewKeyGenerated → Installing → Verifying → ConfigUpd
           → RemovingOld → Retired → Done
           any → Failed(step, location, error) → Retry | Skip | Abort
 location: Pending → Installed → Verified → OldRemoved
-          Pending|Installed → Skipped        (user skipped; old key kept)
+          Pending|Installed|Verified → Skipped (user skipped; old key kept)
           Installed|Verified → RolledBack    (abort; new key removed, old kept)
 ```
 
@@ -82,10 +82,11 @@ Each step writes `start` (commit), runs, then writes `done` or `failed`
 | `generate` | `ssh-keygen` into a temp dir in the ssh dir, then hard link `id` and `id.pub` to `new_path` (fails if the name exists), then remove the temp names. | Both final files exist: read `.pub`, record `new_fpr`, done. Only the private file: move it to `~/.ssh/retired/`, run again. Neither: move temp leftovers to `retired/`, run again. Never overwrite, never delete (S-2). |
 | `install(L)` | Add the new key at L. SSH: log in with the old key. | List L. New key there: done. Not there: run again. |
 | `verify(L)` | The M1 verify with the new key. Read-only. | Run again. |
-| `remove_old(L)` | Fresh verify of the new key at L, then remove the old key. SSH: log in with the new key. | List L. Old key gone: done. Still there: run again (with a fresh verify first). |
+| `remove_old(L)` | Fresh verify of the new key at L, then remove the old key. SSH: log in with the new key. | List L. Old key gone: done. Still there: run again (with a fresh verify first). SSH, old key gone: run the gated removal again (it changes nothing) to learn the `cert-authority` lines; during an abort: done, flagged "cert-authority lines not checked". |
 | `rollback(L)` | Remove the new key at L. SSH: log in with the old key. | List L. New key gone: done. Else run again. |
-| `config` | Rewrite matching `IdentityFile` lines (opt in). | Compare files with the planned result; done if equal, else run again from the backup. |
-| `retire` | Move old key files to `~/.ssh/retired/` (0700). | Files at the target: done. Else move again. |
+| `config` | Rewrite matching `IdentityFile` lines (opt in). | Run again: the apply skips files that already hold the planned result and checks the others against the backup. |
+| `rollback` (no location) | Abort: put the config backups back (`restore_config`). | Run again (files already restored are left alone). |
+| `retire` | Move old key files to `~/.ssh/retired/` (0700). | Move again (files already moved are skipped). No new question: the `start` entry means the user said yes. |
 
 For SSH, "list L" logs in with the key the step logs in with: the old key
 while settling `install` and `rollback`, the new key while settling
@@ -132,6 +133,12 @@ location in phase `OldRemoved`.
 - Abort after install: offer `rollback(L)` for every location in `Installed`
   or `Verified`. Locations in `OldRemoved` keep the new key. The default
   answer is "keep the new key where it works".
+- Abort with rollback sets the rotation state `aborting`. A resume then
+  goes on with the abort, never forward. Abort without rollback ends an
+  `aborting` rotation too (the new key stays where a rollback failed).
+- A failure is "the last journal entry of that location (or of the
+  rotation itself) is `failed`". A settle that cannot list the location
+  writes nothing and flags it for this run only.
 - A rotation that is not `Done` or aborted stays open. Start refuses a new
   rotation while one is open.
 

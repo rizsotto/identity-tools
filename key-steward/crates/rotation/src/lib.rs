@@ -5,7 +5,9 @@ mod engine;
 mod files;
 mod gate;
 mod hooks;
+mod invariants;
 mod keygen;
+mod lock;
 mod sites;
 
 pub use config::{
@@ -17,8 +19,10 @@ pub use engine::{
 };
 pub use files::{Moved, RETIRED_DIR, retire};
 pub use hooks::{Confirm, Crash, Hooks, JournalPoint, NoHooks, Point};
+pub use invariants::{KeyPresence, check_invariants};
 pub use keygen::{
     GEN_DIR_PREFIX, Generated, KeyType, KeygenError, KeygenRequest, Passphrase, Recovered,
     generate, recover,
 };
+pub use lock::{LockError, RotationLock};
 pub use sites::{ProviderMap, Providers, Removed};

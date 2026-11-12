@@ -6,7 +6,7 @@
 //! else changes state. Order: generate, every install, every verify, the
 //! config update, every removal, retire.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::SystemTime;
 
@@ -16,6 +16,11 @@ use inventory::{
     Status, Step, StepEntry, Store, StoreError, Target,
 };
 use providers::{AddOpts, Provider, VerifyStatus};
+
+use crate::config::restore_config;
+use crate::gate::{listed, may_roll_back, roll_back};
+use crate::keygen::{Recovered, recover};
+use crate::lock::RotationLock;
 
 use crate::config::{apply_config_update, plan_config_update};
 use crate::files::{pub_path, retire};
@@ -62,6 +67,8 @@ pub struct Ctx<'a> {
     pub hooks: &'a dyn Hooks,
     pub confirm: &'a dyn Confirm,
     pub env: &'a EngineEnv,
+    /// Proof that this process holds the rotation lock.
+    pub lock: &'a RotationLock,
 }
 
 /// Rotation state (SPEC 7.2), kept in `rotations.state` as a cache of the
@@ -78,6 +85,10 @@ pub enum RotationState {
     Done,
     /// A step failed; Retry, Skip location or Abort.
     Stopped,
+    /// Abort with rollback asked; rollbacks still to run. A resume goes
+    /// on with the abort, never forward.
+    Aborting,
+    Aborted,
 }
 
 impl RotationState {
@@ -92,6 +103,8 @@ impl RotationState {
             RotationState::Retired => "retired",
             RotationState::Done => "done",
             RotationState::Stopped => "stopped",
+            RotationState::Aborting => "aborting",
+            RotationState::Aborted => "aborted",
         }
     }
 }
@@ -118,6 +131,8 @@ pub enum Ending {
     Done,
     /// A step failed. The rotation stays open: Retry, Skip or Abort.
     Stopped,
+    /// Aborted. The rotation is finished.
+    Aborted,
 }
 
 /// A step whose last entry is `failed`: the user decides what next.
@@ -142,6 +157,31 @@ pub struct Summary {
 pub(crate) struct Journal(pub(crate) Vec<StepEntry>);
 
 impl Journal {
+    fn last(&self, step: Step, loc: Option<LocationId>) -> Option<&StepEntry> {
+        self.0
+            .iter()
+            .rev()
+            .find(|e| e.step == step && e.location_id == loc)
+    }
+
+    /// Steps whose last entry is `start`: they began and have no end.
+    fn open_starts(&self) -> Vec<(Step, Option<LocationId>)> {
+        let mut seen = Vec::new();
+        let mut out = Vec::new();
+        for e in self.0.iter().rev() {
+            let k = (e.step, e.location_id);
+            if seen.contains(&k) {
+                continue;
+            }
+            seen.push(k);
+            if e.event == Event::Start {
+                out.push(k);
+            }
+        }
+        out.reverse();
+        out
+    }
+
     fn last_at(&self, loc: Option<LocationId>) -> Option<&StepEntry> {
         self.0.iter().rev().find(|e| e.location_id == loc)
     }
@@ -201,7 +241,21 @@ pub struct Engine<'a> {
     /// Locations (or `None`, the rotation itself) whose last failure the
     /// user asked to retry. Cleared when their next step starts.
     retry: HashSet<Option<LocationId>>,
+    /// Steps found with a `start` and no end that could not be settled in
+    /// this run (the location could not be listed). Not written: the next
+    /// run tries again.
+    unsettled: HashMap<Option<LocationId>, String>,
     retire_declined: bool,
+}
+
+/// What settling a `start` with no end found.
+enum Settled {
+    /// The action took effect: write its `done` entry.
+    Done(End),
+    /// It did not, or running it again is safe: the run does it again.
+    RunAgain,
+    /// The location could not be looked at.
+    Unsettled(String),
 }
 
 impl<'a> Engine<'a> {
@@ -244,6 +298,7 @@ impl<'a> Engine<'a> {
             rot,
             new_key: None,
             retry: HashSet::new(),
+            unsettled: HashMap::new(),
             retire_declined: false,
         };
         if engine.rot.new_fingerprint.is_some() {
@@ -260,6 +315,10 @@ impl<'a> Engine<'a> {
     /// location, not the others.
     pub async fn run(&mut self) -> Result<Summary, EngineError> {
         self.refresh()?;
+        self.settle_all().await?;
+        if self.aborting() {
+            return self.continue_abort().await;
+        }
         if self.rot.new_fingerprint.is_none() {
             if !self.flagged(&self.journal()?, None) {
                 self.generate().await?;
@@ -308,7 +367,8 @@ impl<'a> Engine<'a> {
                 self.rot.old_key_path.clone(),
                 pub_path(&self.rot.old_key_path),
             ];
-            if self.ctx.confirm.retire(&files) {
+            // A `start` with no end: the user said yes before the restart.
+            if j.has(Step::Retire, None, Event::Start) || self.ctx.confirm.retire(&files) {
                 self.retire().await?;
             } else {
                 self.retire_declined = true;
@@ -347,7 +407,20 @@ impl<'a> Engine<'a> {
     /// The last entry for this location (or the rotation itself) is a
     /// failure, and the user has not asked to retry it.
     fn flagged(&self, j: &Journal, loc: Option<LocationId>) -> bool {
-        !self.retry.contains(&loc) && j.last_at(loc).is_some_and(|e| e.event == Event::Failed)
+        !self.retry.contains(&loc)
+            && (self.unsettled.contains_key(&loc)
+                || j.last_at(loc).is_some_and(|e| e.event == Event::Failed))
+    }
+
+    /// Like [`Engine::flagged`], for one step only (abort mode).
+    fn flagged_step(&self, j: &Journal, step: Step, loc: Option<LocationId>) -> bool {
+        !self.retry.contains(&loc)
+            && (self.unsettled.contains_key(&loc)
+                || j.last(step, loc).is_some_and(|e| e.event == Event::Failed))
+    }
+
+    fn aborting(&self) -> bool {
+        self.rot.state == RotationState::Aborting.as_str()
     }
 
     fn load_new_key(&mut self) -> Result<(), EngineError> {
@@ -399,6 +472,16 @@ impl<'a> Engine<'a> {
     /// Writes the `done` or `failed` entry with its changes.
     fn end(&mut self, step: Step, loc: Option<LocationId>, end: End) -> Result<(), EngineError> {
         self.hook(Point::AfterAction, step, loc)?;
+        self.write_end(step, loc, end)?;
+        self.hook(Point::AfterDone, step, loc)
+    }
+
+    fn write_end(
+        &mut self,
+        step: Step,
+        loc: Option<LocationId>,
+        end: End,
+    ) -> Result<(), EngineError> {
         let id = self.rot.id;
         let event = if end.failed {
             Event::Failed
@@ -423,8 +506,7 @@ impl<'a> Engine<'a> {
             tx.set_state(id, s.as_str())?;
         }
         tx.commit()?;
-        self.refresh()?;
-        self.hook(Point::AfterDone, step, loc)
+        self.refresh()
     }
 
     fn keygen_request(&self) -> Result<KeygenRequest, String> {
@@ -682,17 +764,337 @@ impl<'a> Engine<'a> {
         self.end(Step::Retire, None, end)
     }
 
+    /// Settles every step that has a `start` and no end (a crash or a
+    /// kill). The entry is not trusted: the location is looked at.
+    async fn settle_all(&mut self) -> Result<(), EngineError> {
+        self.unsettled.clear();
+        for (step, loc) in self.journal()?.open_starts() {
+            match self.settle(step, loc).await? {
+                Settled::Done(end) => {
+                    let end = End {
+                        detail: Some(match end.detail {
+                            Some(d) => format!("settled after a restart: {d}"),
+                            None => "settled after a restart".into(),
+                        }),
+                        ..end
+                    };
+                    self.write_end(step, loc, end)?;
+                    if step == Step::Generate && self.rot.new_fingerprint.is_some() {
+                        self.load_new_key()?;
+                    }
+                }
+                Settled::RunAgain => {}
+                Settled::Unsettled(reason) => {
+                    let reason = format!("cannot check what happened before the restart: {reason}");
+                    self.unsettled.insert(loc, reason);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn settle(
+        &mut self,
+        step: Step,
+        loc: Option<LocationId>,
+    ) -> Result<Settled, EngineError> {
+        let rl = match loc {
+            Some(l) => match self.locations()?.into_iter().find(|r| r.location_id == l) {
+                Some(r) => Some(r),
+                None => return Ok(Settled::Unsettled(format!("no rotation location {l}"))),
+            },
+            None => None,
+        };
+        Ok(match (step, rl) {
+            (Step::Generate, _) => {
+                let req = match self.keygen_request() {
+                    Ok(r) => r,
+                    Err(e) => return Ok(Settled::Unsettled(e)),
+                };
+                match recover(&req) {
+                    Ok(Recovered::Done(g)) if g.fingerprint == self.rot.old_fingerprint => {
+                        Settled::Done(End::failed(
+                            "the new key has the same fingerprint as the old key",
+                        ))
+                    }
+                    Ok(Recovered::Done(g)) => Settled::Done(End {
+                        detail: Some(g.fingerprint.to_string()),
+                        new_fpr: Some(g.fingerprint),
+                        state: Some(RotationState::NewKeyGenerated),
+                        ..End::done()
+                    }),
+                    Ok(Recovered::RunAgain { .. }) => Settled::RunAgain,
+                    Err(e) => Settled::Unsettled(e.to_string()),
+                }
+            }
+            (Step::Install, Some(rl)) => {
+                let Some(new) = self.rot.new_fingerprint.clone() else {
+                    return Ok(Settled::RunAgain);
+                };
+                match self.list(&rl).await {
+                    Err(e) => Settled::Unsettled(e),
+                    Ok(keys) if listed(&keys, &new, rl.purpose) => {
+                        Settled::Done(End::done().phase(Phase::Installed))
+                    }
+                    Ok(_) => Settled::RunAgain,
+                }
+            }
+            (Step::RemoveOld, Some(rl)) => match self.list(&rl).await {
+                Err(e) => Settled::Unsettled(e),
+                Ok(keys) if listed(&keys, &self.rot.old_fingerprint, rl.purpose) => {
+                    Settled::RunAgain
+                }
+                // SSH: run the gated removal again (it changes nothing
+                // now) to learn about `cert-authority` lines.
+                Ok(_) if rl.kind == inventory::LocationKind::SshServer && !self.aborting() => {
+                    Settled::RunAgain
+                }
+                Ok(_) => Settled::Done(End {
+                    reason: (rl.kind == inventory::LocationKind::SshServer).then(|| {
+                        "old key removed before a restart; cert-authority lines not checked".into()
+                    }),
+                    remove_row: Some(rl.location_id),
+                    ..End::done().phase(Phase::OldRemoved)
+                }),
+            },
+            (Step::Rollback, Some(rl)) => {
+                let Some(new) = self.rot.new_fingerprint.clone() else {
+                    return Ok(Settled::RunAgain);
+                };
+                match self.list(&rl).await {
+                    Err(e) => Settled::Unsettled(e),
+                    Ok(keys) if listed(&keys, &new, rl.purpose) => Settled::RunAgain,
+                    Ok(_) => Settled::Done(End {
+                        remove_row: self.new_row(&rl)?,
+                        ..End::done().phase(Phase::RolledBack)
+                    }),
+                }
+            }
+            // Verify only reads. Config, the config restore and retire
+            // skip what is already done when run again.
+            _ => Settled::RunAgain,
+        })
+    }
+
+    async fn list(&self, loc: &RotationLocation) -> Result<Vec<providers::PublicKeyRef>, String> {
+        let p = self.provider(loc)?;
+        p.list(&loc.target)
+            .await
+            .map_err(|e| format!("cannot list the keys at {}: {e}", loc.target.label()))
+    }
+
+    /// The location row of the new key that `verify` added for `loc`.
+    fn new_row(&self, loc: &RotationLocation) -> Result<Option<LocationId>, EngineError> {
+        let Some(new) = &self.rot.new_fingerprint else {
+            return Ok(None);
+        };
+        Ok(self
+            .store
+            .list_for_key(new)?
+            .into_iter()
+            .find(|r| {
+                r.kind == loc.kind
+                    && r.purpose == loc.purpose
+                    && r.target.label() == loc.target.label()
+            })
+            .map(|r| r.id))
+    }
+
+    /// The user's answer to a failed location: leave it. The old key stays
+    /// there and keeps its location row, so the old key is not retired.
+    pub async fn skip(&mut self, location: LocationId) -> Result<Summary, EngineError> {
+        self.refresh()?;
+        if self.aborting() {
+            return Err(EngineError::Refused("the rotation is being aborted".into()));
+        }
+        self.settle_all().await?;
+        let Some(loc) = self
+            .locations()?
+            .into_iter()
+            .find(|l| l.location_id == location)
+        else {
+            return Err(EngineError::Refused(format!(
+                "no location {location} in this rotation"
+            )));
+        };
+        if !matches!(
+            loc.phase,
+            Phase::Pending | Phase::Installed | Phase::Verified
+        ) {
+            return Err(EngineError::Refused(format!(
+                "location {location} is {}; it cannot be skipped",
+                loc.phase.as_str()
+            )));
+        }
+        let mut tx = self.store.journal_tx()?;
+        tx.set_phase(
+            self.rot.id,
+            location,
+            Phase::Skipped,
+            Some("skipped by the user"),
+        )?;
+        tx.commit()?;
+        self.run().await
+    }
+
+    /// Stops the rotation. Without `rollback`, or before any install, it
+    /// ends here: the new key stays where it was added and its files stay.
+    /// With `rollback`: first the ssh config goes back to its backup (if
+    /// the config step ran), then the new key is removed wherever the old
+    /// key is still listed and still logs in. Locations in `OldRemoved`
+    /// keep the new key.
+    pub async fn abort(&mut self, rollback: bool) -> Result<Summary, EngineError> {
+        self.refresh()?;
+        self.settle_all().await?;
+        if rollback && self.journal()?.started_anywhere(Step::Install) {
+            let mut tx = self.store.journal_tx()?;
+            tx.set_state(self.rot.id, RotationState::Aborting.as_str())?;
+            tx.commit()?;
+            self.refresh()?;
+            return self.continue_abort().await;
+        }
+        self.finish_aborted()
+    }
+
+    /// Locations whose new key a rollback removes: an install began there
+    /// and the old key was not removed.
+    fn rollback_candidates(&self, j: &Journal) -> Result<Vec<RotationLocation>, EngineError> {
+        Ok(self
+            .locations()?
+            .into_iter()
+            .filter(|l| {
+                matches!(
+                    l.phase,
+                    Phase::Pending | Phase::Installed | Phase::Verified | Phase::Skipped
+                ) && j.has(Step::Install, Some(l.location_id), Event::Start)
+            })
+            .collect())
+    }
+
+    async fn continue_abort(&mut self) -> Result<Summary, EngineError> {
+        let j = self.journal()?;
+        // The config first, so it never names a key no location accepts.
+        if j.has(Step::Config, None, Event::Start) && !j.has(Step::Rollback, None, Event::Done) {
+            if !self.flagged_step(&j, Step::Rollback, None) {
+                self.restore_config().await?;
+            }
+            if !self.journal()?.has(Step::Rollback, None, Event::Done) {
+                return self.stop();
+            }
+        }
+        for loc in self.rollback_candidates(&self.journal()?)? {
+            if !self.flagged_step(&self.journal()?, Step::Rollback, Some(loc.location_id)) {
+                self.rollback(&loc).await?;
+            }
+        }
+        if !self.rollback_candidates(&self.journal()?)?.is_empty() {
+            return self.stop();
+        }
+        self.finish_aborted()
+    }
+
+    async fn restore_config(&mut self) -> Result<(), EngineError> {
+        self.begin(Step::Rollback, None, RotationState::Aborting)?;
+        let env = self.ctx.env;
+        let end = match restore_config(
+            &env.config_files,
+            &self.rot.old_key_path,
+            &self.rot.new_key_path,
+            &env.home,
+            &self.stamp(),
+        ) {
+            Ok(files) => End {
+                detail: Some(format!("{} config files restored", files.len())),
+                ..End::done()
+            },
+            Err(e) => End::failed(e.to_string()),
+        };
+        self.end(Step::Rollback, None, end)
+    }
+
+    async fn rollback(&mut self, loc: &RotationLocation) -> Result<(), EngineError> {
+        let l = Some(loc.location_id);
+        self.begin(Step::Rollback, l, RotationState::Aborting)?;
+        let end = match self.provider(loc) {
+            Err(e) => End::failed(e),
+            Ok(p) => match may_roll_back(p, &self.rot, loc).await {
+                Err(reason) => End::failed(reason),
+                Ok(permit) => match roll_back(self.ctx.providers, permit, &self.rot, loc).await {
+                    Err(e) => End::failed(e.to_string()),
+                    Ok(_) => End {
+                        remove_row: self.new_row(loc)?,
+                        ..End::done().phase(Phase::RolledBack)
+                    },
+                },
+            },
+        };
+        let end = if end.failed {
+            end.phase(loc.phase)
+        } else {
+            end
+        };
+        self.end(Step::Rollback, l, end)
+    }
+
+    fn finish_aborted(&mut self) -> Result<Summary, EngineError> {
+        let mut summary = self.summary(Ending::Aborted)?;
+        let kept: Vec<String> = summary
+            .locations
+            .iter()
+            .filter(|l| l.phase == Phase::OldRemoved)
+            .map(|l| l.target.label())
+            .collect();
+        if !kept.is_empty() {
+            summary.notes.push(format!(
+                "the new key stays at {}: the old key is already gone there",
+                kept.join(", ")
+            ));
+            if self.journal()?.has(Step::Rollback, None, Event::Done) {
+                summary.notes.push(format!(
+                    "the ssh config names the old key again; fix the entries for {} by hand",
+                    kept.join(", ")
+                ));
+            }
+        }
+        let mut tx = self.store.journal_tx()?;
+        tx.set_state(self.rot.id, RotationState::Aborted.as_str())?;
+        tx.finish(self.rot.id)?;
+        tx.commit()?;
+        self.retry.clear();
+        Ok(summary)
+    }
+
     fn failures(&self, j: &Journal) -> Result<Vec<Failure>, EngineError> {
+        // A skipped, rolled back or finished location is no failure.
+        let open = |p: Phase| match p {
+            Phase::Pending | Phase::Installed | Phase::Verified => true,
+            Phase::Skipped => self.aborting(),
+            Phase::OldRemoved | Phase::RolledBack => false,
+        };
         let mut keys: Vec<Option<LocationId>> = vec![None];
-        keys.extend(self.locations()?.iter().map(|l| Some(l.location_id)));
+        keys.extend(
+            self.locations()?
+                .iter()
+                .filter(|l| open(l.phase))
+                .map(|l| Some(l.location_id)),
+        );
         Ok(keys
             .into_iter()
-            .filter(|k| self.flagged(j, *k))
-            .filter_map(|k| j.last_at(k))
-            .map(|e| Failure {
+            .filter(|k| {
+                if self.aborting() {
+                    self.flagged_step(j, Step::Rollback, *k)
+                } else {
+                    self.flagged(j, *k)
+                }
+            })
+            .filter_map(|k| j.last_at(k).map(|e| (k, e)))
+            .map(|(k, e)| Failure {
                 step: e.step,
                 location: e.location_id,
-                reason: e.detail.clone().unwrap_or_default(),
+                reason: match self.unsettled.get(&k) {
+                    Some(r) => r.clone(),
+                    None => e.detail.clone().unwrap_or_default(),
+                },
             })
             .collect())
     }
@@ -732,8 +1134,13 @@ impl<'a> Engine<'a> {
     }
 
     fn stop(&mut self) -> Result<Summary, EngineError> {
+        let state = if self.aborting() {
+            RotationState::Aborting
+        } else {
+            RotationState::Stopped
+        };
         let mut tx = self.store.journal_tx()?;
-        tx.set_state(self.rot.id, RotationState::Stopped.as_str())?;
+        tx.set_state(self.rot.id, state.as_str())?;
         tx.commit()?;
         self.retry.clear();
         self.summary(Ending::Stopped)

@@ -17,8 +17,8 @@ use inventory::{
 };
 use providers::{AddOpts, KeyRef, Provider, ProviderError, PublicKeyRef, RemoveOpts, VerifyStatus};
 use rotation::{
-    Confirm, Crash, Ctx, Engine, EngineEnv, EngineError, Hooks, JournalPoint, Passphrase,
-    Providers, Removed, Summary,
+    Confirm, Crash, Ctx, Engine, EngineEnv, EngineError, Hooks, JournalPoint, KeyPresence,
+    Passphrase, Providers, Removed, RotationLock, Summary,
 };
 use test_support::TempHome;
 
@@ -560,6 +560,10 @@ impl Fixture {
         }
     }
 
+    pub fn lock_path(&self) -> PathBuf {
+        self.db.with_file_name("rotation.lock")
+    }
+
     pub fn store(&self) -> Store {
         Store::open(&self.db).unwrap()
     }
@@ -574,11 +578,13 @@ impl Fixture {
         self.world.restart();
         let providers = MockProviders::new(&self.world);
         let mut store = self.store();
+        let lock = RotationLock::acquire(&self.lock_path()).unwrap();
         let ctx = Ctx {
             providers: &providers,
             hooks,
             confirm: &Answer(confirm),
             env: &self.env,
+            lock: &lock,
         };
         let mut engine = Engine::start(&mut store, &self.new_rotation(), ctx)?;
         engine.run().await
@@ -595,13 +601,47 @@ impl Fixture {
         self.world.restart();
         let providers = MockProviders::new(&self.world);
         let mut store = self.store();
+        let lock = RotationLock::acquire(&self.lock_path()).unwrap();
         let ctx = Ctx {
             providers: &providers,
             hooks,
             confirm: &Answer(confirm),
             env: &self.env,
+            lock: &lock,
         };
         let mut engine = Engine::open(&mut store, id, ctx)?;
         f(&mut engine).await
+    }
+}
+
+impl KeyPresence for World {
+    fn has_key(&self, loc: &inventory::RotationLocation, key: &Fingerprint) -> bool {
+        self.has(&loc.target.label(), key, loc.purpose)
+    }
+}
+
+/// Every removal of the old key comes right after a verify of the new key
+/// at that site and purpose that said `Verified`, in the same process, and
+/// after the verify step of that location.
+pub fn assert_removals_after_fresh_verify(calls: &[Call], old: &str) {
+    for (i, c) in calls.iter().enumerate() {
+        if c.op != Op::Remove || c.key != old {
+            continue;
+        }
+        let fresh = calls[..i]
+            .iter()
+            .rev()
+            .take_while(|p| p.epoch == c.epoch)
+            .any(|p| {
+                p.op == Op::Verify
+                    && p.ok
+                    && p.site == c.site
+                    && p.purpose == c.purpose
+                    && p.key != old
+            });
+        assert!(
+            fresh,
+            "removal {i} {c:?} without a fresh verify in the same process"
+        );
     }
 }

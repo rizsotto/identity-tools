@@ -4,7 +4,7 @@ mod common;
 
 use std::fs;
 
-use common::{Call, Fixture, Op, Recorder};
+use common::{Fixture, Op, Recorder, assert_removals_after_fresh_verify};
 use inventory::{Event, LocationKind, Phase, Purpose, SshHost, Step, Target};
 use rotation::{CA_REASON, Ending, NoHooks, Point};
 
@@ -107,32 +107,6 @@ async fn rotation_runs_all_steps_with_mocks() {
         let text = fs::read_to_string(p).unwrap();
         let blob = text.split_whitespace().nth(1).unwrap();
         assert!(!db.windows(blob.len()).any(|w| w == blob.as_bytes()));
-    }
-}
-
-/// Every removal of the old key comes right after a verify of the new key
-/// at that site and purpose that said `Verified`, in the same process, and
-/// after the verify step of that location.
-pub fn assert_removals_after_fresh_verify(calls: &[Call], old: &str) {
-    for (i, c) in calls.iter().enumerate() {
-        if c.op != Op::Remove || c.key != old {
-            continue;
-        }
-        let fresh = calls[..i]
-            .iter()
-            .rev()
-            .take_while(|p| p.epoch == c.epoch)
-            .any(|p| {
-                p.op == Op::Verify
-                    && p.ok
-                    && p.site == c.site
-                    && p.purpose == c.purpose
-                    && p.key != old
-            });
-        assert!(
-            fresh,
-            "removal {i} {c:?} without a fresh verify in the same process"
-        );
     }
 }
 
