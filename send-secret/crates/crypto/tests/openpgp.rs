@@ -103,7 +103,10 @@ fn enc_keyid(file: &str) -> String {
 }
 
 fn colons(file: &str, record: &str) -> String {
+    let home = Home::with(&[]);
     let out = Command::new("gpg")
+        .arg("--homedir")
+        .arg(home.path())
         .args(["--batch", "--with-colons", "--show-keys"])
         .arg(fixture(&format!("openpgp/{file}")))
         .output()
@@ -207,6 +210,26 @@ fn signer_is_the_default_key_not_another_secret_key() {
         found.signer.unwrap().fingerprint.as_str(),
         fpr("sender.asc")
     );
+}
+
+#[test]
+fn self_copy_uses_default_key_not_another_secret_key() {
+    // Two secret keys, bob-rsa first; gpg.conf names sender as default-key.
+    let home = Home::with(&["bob-rsa.sec.asc", "sender.sec.asc"]);
+    std::fs::write(
+        home.path().join("gpg.conf"),
+        format!("default-key {}\n", fpr("sender.asc")),
+    )
+    .unwrap();
+    let user = openpgp_user(Some(home.path())).unwrap();
+    let me = crypto::Sender {
+        openpgp: user.self_key,
+        age: None,
+    };
+    let (self_copy, _) = self_plan(&me, None).unwrap();
+    assert_eq!(self_copy.format, Format::OpenPgp);
+    let ct = encrypt_to(&self_copy, &home.opts(false));
+    assert_eq!(packet_keyids(&ct), [enc_keyid("sender.asc")]);
 }
 
 #[test]

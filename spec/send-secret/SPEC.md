@@ -340,7 +340,7 @@ send-secret/
 4. Default clipboard clear time (proposed 60 s).
 5. Is a web decryptor for recipients without the app worth doing early? It helps adoption a lot.
 6. gpg.conf `comment` / `emit-version` armor headers: answered, keep what gpg writes. See [decision 0003](decisions/0003-openpgp-armor-headers.md).
-7. S-5 and the `age` crate: its encrypting `StreamWriter` does not zero its last plaintext chunk (up to 64 KiB) when it drops (SPEC 15 item 1). Accept this for v1, or report it upstream and carry a patch? We must not write our own stream code (section 14).
+7. S-5 and the `age` crate: its encrypting `StreamWriter` does not zero its last plaintext chunk (up to 64 KiB) when it drops (SPEC 15 item 1). Accept this for v1, or report it upstream and carry a patch? We must not write our own stream code (section 14). The same holds for OpenPGP: plaintext passes through gpgme's and gpg's own buffers, which we can not zero (found in M1 T14). M1 acceptance waits for this answer.
 
 ---
 
