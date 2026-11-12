@@ -5,12 +5,18 @@
 //! `ssh -G -F <config> <alias>`, so OpenSSH's own logic decides what a host
 //! really resolves to. Private key files are never opened (S-1): keys are
 //! matched by path against keys the caller already scanned.
+//!
+//! `ssh -G` runs `Match exec` commands from the config. Import refuses to
+//! run `ssh -G` on such a config unless the caller sets
+//! [`ImportOptions::allow_commands`] after the user agreed (S-7). Every
+//! `ssh -G` run has a time limit.
 
 use std::collections::HashSet;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use identity_core::Fingerprint;
 
@@ -20,6 +26,7 @@ use crate::store::{Added, Store, StoreError};
 /// OpenSSH's own limit on nested `Include`.
 const MAX_INCLUDE_DEPTH: usize = 16;
 const MAX_CONFIG_BYTES: u64 = 1_000_000;
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, thiserror::Error)]
 pub enum ImportError {
@@ -29,6 +36,10 @@ pub enum ImportError {
     IncludeDepth(PathBuf),
     #[error("cannot run ssh: {0}")]
     Spawn(String),
+    /// The config can make `ssh -G` run commands. Ask the user, then set
+    /// [`ImportOptions::allow_commands`].
+    #[error("the ssh config can run commands when it is read: {}", .0.join("; "))]
+    CommandsNeedConsent(Vec<String>),
     #[error(transparent)]
     Store(#[from] StoreError),
 }
@@ -51,6 +62,11 @@ pub struct ImportOptions {
     pub home: PathBuf,
     /// The `ssh` binary.
     pub ssh: PathBuf,
+    /// Run `ssh -G` even if the config has `Match exec` (or an `Include`
+    /// we cannot check). Set it only after the user agreed. Default: false.
+    pub allow_commands: bool,
+    /// Time limit for each `ssh -G` run.
+    pub timeout: Duration,
 }
 
 impl ImportOptions {
@@ -59,6 +75,8 @@ impl ImportOptions {
             config: config.into(),
             home: home.into(),
             ssh: PathBuf::from("ssh"),
+            allow_commands: false,
+            timeout: DEFAULT_TIMEOUT,
         }
     }
 }
@@ -91,8 +109,12 @@ pub fn import_ssh_config(
     opts: &ImportOptions,
     keys: &[KnownKey],
 ) -> Result<ImportReport, ImportError> {
+    let scan = scan_config(&opts.config, &opts.home)?;
+    if !scan.runs_commands.is_empty() && !opts.allow_commands {
+        return Err(ImportError::CommandsNeedConsent(scan.runs_commands));
+    }
     let mut report = ImportReport::default();
-    for alias in host_aliases(&opts.config, &opts.home)? {
+    for alias in scan.aliases {
         let resolved = match resolve(opts, &alias)? {
             Ok(r) => r,
             Err(why) => {
@@ -127,28 +149,43 @@ pub fn import_ssh_config(
     Ok(report)
 }
 
-/// Concrete aliases from `Host` lines, in order, without duplicates.
-/// Follows `Include` (also inside `Host` and `Match` blocks). Skips
-/// patterns with `*` or `?` and negated (`!`) patterns.
-pub fn host_aliases(config: &Path, home: &Path) -> Result<Vec<String>, ImportError> {
-    let mut out = Vec::new();
+/// What reading the config files found.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConfigScan {
+    /// Concrete aliases from `Host` lines, in order, without duplicates.
+    pub aliases: Vec<String>,
+    /// Why `ssh -G` may run commands: each `Match exec` (file and line), and
+    /// each `Include` whose files we cannot list. Empty if none.
+    pub runs_commands: Vec<String>,
+}
+
+/// Reads the config and its `Include` files (also inside `Host` and
+/// `Match` blocks). Skips alias patterns with `*` or `?` and negated (`!`)
+/// patterns. Finds `Match exec`.
+pub fn scan_config(config: &Path, home: &Path) -> Result<ConfigScan, ImportError> {
+    let mut scan = ConfigScan::default();
     let mut seen = HashSet::new();
-    collect(config, home, 0, &mut out, &mut seen)?;
-    Ok(out)
+    collect(config, home, 0, &mut scan, &mut seen)?;
+    Ok(scan)
+}
+
+/// The aliases of [`scan_config`].
+pub fn host_aliases(config: &Path, home: &Path) -> Result<Vec<String>, ImportError> {
+    Ok(scan_config(config, home)?.aliases)
 }
 
 fn collect(
     path: &Path,
     home: &Path,
     depth: usize,
-    out: &mut Vec<String>,
+    scan: &mut ConfigScan,
     seen: &mut HashSet<String>,
 ) -> Result<(), ImportError> {
     if depth > MAX_INCLUDE_DEPTH {
         return Err(ImportError::IncludeDepth(path.to_path_buf()));
     }
     let text = read_config(path)?;
-    for line in text.lines() {
+    for (n, line) in text.lines().enumerate() {
         let Some((keyword, args)) = split_line(line) else {
             continue;
         };
@@ -157,14 +194,35 @@ fn collect(
                 for pat in args {
                     let concrete = !pat.contains(['*', '?']) && !pat.starts_with('!');
                     if concrete && seen.insert(pat.clone()) {
-                        out.push(pat);
+                        scan.aliases.push(pat);
                     }
+                }
+            }
+            "match" => {
+                if args
+                    .iter()
+                    .any(|a| a.trim_start_matches('!').eq_ignore_ascii_case("exec"))
+                {
+                    scan.runs_commands.push(format!(
+                        "Match exec in {} line {}",
+                        path.display(),
+                        n + 1
+                    ));
                 }
             }
             "include" => {
                 for arg in args {
-                    for file in include_files(&arg, home) {
-                        collect(&file, home, depth + 1, out, seen)?;
+                    match include_files(&arg, home) {
+                        Some(files) => {
+                            for file in files {
+                                collect(&file, home, depth + 1, scan, seen)?;
+                            }
+                        }
+                        None => scan.runs_commands.push(format!(
+                            "cannot check Include {arg} in {} line {}",
+                            path.display(),
+                            n + 1
+                        )),
                     }
                 }
             }
@@ -235,9 +293,14 @@ fn split_line(line: &str) -> Option<(String, Vec<String>)> {
 }
 
 /// The files an `Include` argument names. `~` is the home dir; relative
-/// paths are under `<home>/.ssh/` (ssh_config(5), user config). `*` and `?`
-/// work in the last path component. Missing files are skipped, as ssh does.
-fn include_files(arg: &str, home: &Path) -> Vec<PathBuf> {
+/// paths are under `<home>/.ssh/` (ssh_config(5), user config). `*`, `?`
+/// and `[...]` work in the last path component. Missing files are skipped,
+/// as ssh does. `None` if we cannot list the files (a glob in a directory
+/// name, or a `~user` path); the caller must then assume the worst.
+fn include_files(arg: &str, home: &Path) -> Option<Vec<PathBuf>> {
+    if arg.starts_with('~') && !arg.starts_with("~/") {
+        return None;
+    }
     let path = if let Some(rest) = arg.strip_prefix("~/") {
         home.join(rest)
     } else if Path::new(arg).is_absolute() {
@@ -245,21 +308,21 @@ fn include_files(arg: &str, home: &Path) -> Vec<PathBuf> {
     } else {
         home.join(".ssh").join(arg)
     };
-    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-        return Vec::new();
-    };
-    if !name.contains(['*', '?']) {
-        return if path.is_file() {
-            vec![path]
+    let is_glob = |s: &str| s.contains(['*', '?', '[']);
+    let name = path.file_name()?.to_str()?;
+    let dir = path.parent()?;
+    if is_glob(&dir.to_string_lossy()) {
+        return None;
+    }
+    if !is_glob(name) {
+        return Some(if path.is_file() {
+            vec![path.clone()]
         } else {
             Vec::new()
-        };
+        });
     }
-    let Some(dir) = path.parent() else {
-        return Vec::new();
-    };
     let Ok(entries) = fs::read_dir(dir) else {
-        return Vec::new();
+        return Some(Vec::new());
     };
     let mut files: Vec<PathBuf> = entries
         .filter_map(|e| e.ok())
@@ -272,15 +335,45 @@ fn include_files(arg: &str, home: &Path) -> Vec<PathBuf> {
         .filter(|p| p.is_file())
         .collect();
     files.sort();
-    files
+    Some(files)
 }
 
 fn glob_match(pattern: &str, name: &str) -> bool {
+    /// Matches `[...]` at the start of `p` against `c`. Returns the rest of
+    /// the pattern and whether it matched, or `None` if there is no `]`.
+    fn class(p: &[char], c: char) -> Option<(&[char], bool)> {
+        let mut i = 1;
+        let negate = matches!(p.get(1), Some('!') | Some('^'));
+        if negate {
+            i += 1;
+        }
+        let mut hit = false;
+        let mut first = true;
+        while i < p.len() {
+            if p[i] == ']' && !first {
+                return Some((&p[i + 1..], hit != negate));
+            }
+            if i + 2 < p.len() && p[i + 1] == '-' && p[i + 2] != ']' {
+                hit |= p[i] <= c && c <= p[i + 2];
+                i += 3;
+            } else {
+                hit |= p[i] == c;
+                i += 1;
+            }
+            first = false;
+        }
+        None
+    }
     fn go(p: &[char], n: &[char]) -> bool {
         match p.split_first() {
             None => n.is_empty(),
             Some(('*', rest)) => (0..=n.len()).any(|i| go(rest, &n[i..])),
             Some(('?', rest)) => !n.is_empty() && go(rest, &n[1..]),
+            Some(('[', _)) if !n.is_empty() => match class(p, n[0]) {
+                Some((rest, true)) => go(rest, &n[1..]),
+                Some((_, false)) => false,
+                None => n[0] == '[' && go(&p[1..], &n[1..]),
+            },
             Some((c, rest)) => n.first() == Some(c) && go(rest, &n[1..]),
         }
     }
@@ -292,7 +385,7 @@ fn glob_match(pattern: &str, name: &str) -> bool {
 /// Runs `ssh -G -F <config> -- <alias>`. The outer error is for "could not
 /// run ssh"; the inner one is ssh's own error text for this alias.
 pub fn resolve(opts: &ImportOptions, alias: &str) -> Result<Result<Resolved, String>, ImportError> {
-    let out = Command::new(&opts.ssh)
+    let mut child = Command::new(&opts.ssh)
         .arg("-G")
         .arg("-F")
         .arg(&opts.config)
@@ -301,22 +394,52 @@ pub fn resolve(opts: &ImportOptions, alias: &str) -> Result<Result<Resolved, Str
         .env("HOME", &opts.home)
         .env_remove("SSH_AUTH_SOCK")
         .stdin(Stdio::null())
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| ImportError::Spawn(format!("{}: {e}", opts.ssh.display())))?;
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
+    let stdout = read_in_thread(child.stdout.take());
+    let stderr = read_in_thread(child.stderr.take());
+    let deadline = Instant::now() + opts.timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                // A command from the config may still hold the pipes open;
+                // do not wait for the reader threads.
+                return Ok(Err(format!(
+                    "ssh -G took longer than {} seconds; stopped",
+                    opts.timeout.as_secs_f32()
+                )));
+            }
+            Err(e) => return Err(ImportError::Spawn(e.to_string())),
+        }
+    };
+    let stdout = stdout.join().unwrap_or_default();
+    let stderr = stderr.join().unwrap_or_default();
+    if !status.success() {
+        let err = String::from_utf8_lossy(&stderr);
         let err = err
             .lines()
             .filter(|l| !l.starts_with("Pseudo-terminal will not be allocated"))
             .collect::<Vec<_>>()
             .join(" ");
-        return Ok(Err(format!(
-            "ssh -G failed ({}): {}",
-            out.status,
-            err.trim()
-        )));
+        return Ok(Err(format!("ssh -G failed ({status}): {}", err.trim())));
     }
-    Ok(Ok(parse_g_output(&String::from_utf8_lossy(&out.stdout))))
+    Ok(Ok(parse_g_output(&String::from_utf8_lossy(&stdout))))
+}
+
+fn read_in_thread<R: Read + Send + 'static>(pipe: Option<R>) -> std::thread::JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(p) = pipe {
+            let _ = p.take(MAX_CONFIG_BYTES).read_to_end(&mut buf);
+        }
+        buf
+    })
 }
 
 fn parse_g_output(text: &str) -> Resolved {
@@ -493,8 +616,8 @@ mod tests {
     fn host_aliases_follow_include_and_skip_wildcards() {
         let f = fixture();
         let aliases = host_aliases(&f.config, &f.home).unwrap();
-        // `[0-9]*` is not a glob we expand (only `*` and `?`), so 10-git and
-        // 20-other come in through `??-*`.
+        // `[0-9]*` and `??-*` both name 10-git and 20-other; each alias
+        // is listed once.
         assert_eq!(
             aliases,
             vec!["git.example.org", "pi", "build", "build-alias", "bastion"]
@@ -633,5 +756,109 @@ mod tests {
         assert_eq!(report.failed.len(), 1, "{report:?}");
         assert_eq!(report.failed[0].0, "-oProxyCommand=x");
         assert_eq!(report.added.len(), 1);
+    }
+
+    #[test]
+    fn glob_classes() {
+        assert!(glob_match("[0-9]*", "10-git"));
+        assert!(!glob_match("[0-9]*", "a10"));
+        assert!(glob_match("[!a]x", "bx"));
+        assert!(!glob_match("[!a]x", "ax"));
+        assert!(glob_match("a[]]b", "a]b"));
+        assert!(glob_match("a[b", "a[b"));
+        assert!(glob_match("*.conf", "x.conf"));
+        assert!(!glob_match("*.conf", "x.conf~"));
+    }
+
+    fn exec_fixture(cmd: &str) -> (Fixture, PathBuf) {
+        let f = fixture();
+        let inc = f.home.join(".ssh/conf.d/30-exec");
+        fs::write(&inc, format!("Match exec \"{cmd}\"\n  User nobody\n")).unwrap();
+        let cfg = f.home.join(".ssh/config_exec");
+        fs::write(
+            &cfg,
+            format!("Include {}\nHost pi\n  HostName 192.0.2.7\n", inc.display()),
+        )
+        .unwrap();
+        (f, cfg)
+    }
+
+    #[test]
+    fn match_exec_is_refused_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("EXEC_RAN");
+        let (f, cfg) = exec_fixture(&format!("touch {}", marker.display()));
+        let mut store = Store::open_in_memory().unwrap();
+        let opts = ImportOptions::new(&cfg, &f.home);
+        let err =
+            import_ssh_config(&mut store, &opts, std::slice::from_ref(&f.personal)).unwrap_err();
+        let ImportError::CommandsNeedConsent(why) = &err else {
+            panic!("{err}");
+        };
+        assert_eq!(why.len(), 1, "{why:?}");
+        assert!(why[0].contains("30-exec line 1"), "{why:?}");
+        assert!(!marker.exists(), "ssh -G ran the Match exec command");
+        assert!(store.list().unwrap().is_empty());
+
+        // `!exec` is a command too.
+        let cfg2 = f.home.join(".ssh/config_notexec");
+        fs::write(&cfg2, "Match !exec \"true\" host x\n").unwrap();
+        assert_eq!(scan_config(&cfg2, &f.home).unwrap().runs_commands.len(), 1);
+    }
+
+    #[test]
+    fn match_exec_runs_only_with_consent() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("EXEC_RAN");
+        let (f, cfg) = exec_fixture(&format!("touch {}", marker.display()));
+        let mut store = Store::open_in_memory().unwrap();
+        let mut opts = ImportOptions::new(&cfg, &f.home);
+        opts.allow_commands = true;
+        let report =
+            import_ssh_config(&mut store, &opts, std::slice::from_ref(&f.personal)).unwrap();
+        assert_eq!(report.added.len(), 1, "{report:?}");
+        assert!(marker.exists());
+    }
+
+    #[test]
+    fn ssh_g_has_a_time_limit() {
+        let (f, cfg) = exec_fixture("sleep 5");
+        let mut store = Store::open_in_memory().unwrap();
+        let mut opts = ImportOptions::new(&cfg, &f.home);
+        opts.allow_commands = true;
+        opts.timeout = Duration::from_millis(300);
+        let start = Instant::now();
+        let report =
+            import_ssh_config(&mut store, &opts, std::slice::from_ref(&f.personal)).unwrap();
+        assert!(
+            start.elapsed() < Duration::from_secs(4),
+            "{:?}",
+            start.elapsed()
+        );
+        assert_eq!(report.failed.len(), 1, "{report:?}");
+        assert!(report.failed[0].1.contains("took longer"), "{report:?}");
+    }
+
+    #[test]
+    fn include_we_cannot_list_needs_consent() {
+        let f = fixture();
+        let cfg = f.home.join(".ssh/config_dirglob");
+        fs::write(
+            &cfg,
+            format!(
+                "Include {}/*/x\nInclude ~other/cfg\nHost a\n",
+                f.home.display()
+            ),
+        )
+        .unwrap();
+        let scan = scan_config(&cfg, &f.home).unwrap();
+        assert_eq!(scan.aliases, vec!["a"]);
+        assert_eq!(scan.runs_commands.len(), 2, "{:?}", scan.runs_commands);
+        let mut store = Store::open_in_memory().unwrap();
+        let opts = ImportOptions::new(&cfg, &f.home);
+        assert!(matches!(
+            import_ssh_config(&mut store, &opts, &[]),
+            Err(ImportError::CommandsNeedConsent(_))
+        ));
     }
 }

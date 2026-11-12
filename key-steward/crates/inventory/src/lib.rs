@@ -11,7 +11,7 @@ pub use location::{
     Location, LocationId, LocationKind, NewLocation, Purpose, SshHost, Status, Target,
 };
 pub use ssh_config::{
-    ImportError, ImportOptions, ImportReport, KnownKey, Resolved, host_aliases, import_ssh_config,
-    resolve,
+    ConfigScan, ImportError, ImportOptions, ImportReport, KnownKey, Resolved, host_aliases,
+    import_ssh_config, resolve, scan_config,
 };
 pub use store::{Added, Store, StoreError};
