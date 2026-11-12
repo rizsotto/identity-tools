@@ -4,14 +4,16 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use identity_core::{Fingerprint, PublicKey};
+use identity_core::{Fingerprint, PublicKey, SshPublicKey};
 use inventory::{LocationKind, Purpose, Target};
+use serde_json::{Value, json};
 
+use super::write::{self, ForgeWrites, Op};
 use super::{
     ForgeCore, Listing, OpenPgpReader, base_url, check_objects, check_owner, text_bytes, title,
 };
 use crate::error::ProviderError;
-use crate::http::AuthStyle;
+use crate::http::{AuthStyle, HttpClient};
 use crate::netlog::NetLog;
 use crate::provider::{AddOpts, KeyRef, Provider, PublicKeyRef, RemoveOpts, VerifyStatus};
 use crate::token::TokenSource;
@@ -55,31 +57,8 @@ impl GitHub {
     }
 
     async fn listing(&self, target: &Target) -> Result<Listing, ProviderError> {
-        let client = self
-            .core
-            .client(
-                KIND,
-                target,
-                &self.api_url(target)?,
-                AuthStyle::Bearer,
-                &[
-                    ("accept", "application/vnd.github+json"),
-                    ("x-github-api-version", API_VERSION),
-                ],
-            )
-            .await?;
-        check_owner(KIND, &client, target, "login").await?;
-        let mut out = Listing::default();
-        for (path, purpose) in [
-            ("/user/keys?per_page=100", Purpose::SshAuth),
-            ("/user/ssh_signing_keys?per_page=100", Purpose::SshSigning),
-        ] {
-            let items = client.get_all_pages(path).await?;
-            check_objects(KIND, &items)?;
-            for item in &items {
-                out.add_ssh(item, &[purpose], title(item, "title"));
-            }
-        }
+        let client = self.session(target).await?;
+        let mut out = self.ssh_keys(&client).await?;
         let items = client.get_all_pages("/user/gpg_keys?per_page=100").await?;
         check_objects(KIND, &items)?;
         for item in &items {
@@ -95,6 +74,93 @@ impl GitHub {
     }
 }
 
+/// The SSH key lists: auth keys and signing keys are separate objects.
+const SSH_LISTS: [(&str, Purpose); 2] = [
+    ("/user/keys", Purpose::SshAuth),
+    ("/user/ssh_signing_keys", Purpose::SshSigning),
+];
+
+fn list_path(purpose: Purpose) -> &'static str {
+    match purpose {
+        Purpose::SshSigning => SSH_LISTS[1].0,
+        _ => SSH_LISTS[0].0,
+    }
+}
+
+#[async_trait]
+impl ForgeWrites for GitHub {
+    fn kind(&self) -> LocationKind {
+        KIND
+    }
+
+    async fn session(&self, target: &Target) -> Result<HttpClient, ProviderError> {
+        let client = self
+            .core
+            .client(
+                KIND,
+                target,
+                &self.api_url(target)?,
+                AuthStyle::Bearer,
+                &[
+                    ("accept", "application/vnd.github+json"),
+                    ("x-github-api-version", API_VERSION),
+                ],
+            )
+            .await?;
+        check_owner(KIND, &client, target, "login").await?;
+        Ok(client)
+    }
+
+    async fn ssh_keys(&self, client: &HttpClient) -> Result<Listing, ProviderError> {
+        let mut out = Listing::default();
+        for (path, purpose) in SSH_LISTS {
+            let items = client
+                .get_all_pages(&format!("{path}?per_page=100"))
+                .await?;
+            check_objects(KIND, &items)?;
+            for item in &items {
+                out.add_ssh(item, &[purpose], title(item, "title"));
+            }
+        }
+        Ok(out)
+    }
+
+    fn add_request(
+        &self,
+        key: &SshPublicKey,
+        title: &str,
+        purpose: Purpose,
+        _like: Option<&KeyRef>,
+        _listing: &Listing,
+    ) -> (String, Value) {
+        (
+            list_path(purpose).to_string(),
+            json!({ "title": title, "key": key.encoded }),
+        )
+    }
+
+    fn delete_path(&self, purpose: Purpose, id: &str) -> String {
+        format!("{}/{id}", list_path(purpose))
+    }
+
+    fn scopes(&self, op: Op, purpose: Purpose) -> String {
+        let (classic, fine) = match (op, purpose) {
+            (Op::Add, Purpose::SshSigning) => ("write:ssh_signing_key", "SSH signing keys"),
+            (Op::Remove, Purpose::SshSigning) => ("admin:ssh_signing_key", "SSH signing keys"),
+            (Op::Add, _) => ("write:public_key", "Git SSH keys"),
+            (Op::Remove, _) => ("admin:public_key", "Git SSH keys"),
+        };
+        format!(
+            "the classic scope {classic}, or for a fine-grained token \"{fine}\" with write access"
+        )
+    }
+
+    /// The docs state no limit.
+    fn max_title(&self) -> Option<usize> {
+        None
+    }
+}
+
 #[async_trait]
 impl Provider for GitHub {
     fn kind(&self) -> LocationKind {
@@ -107,20 +173,20 @@ impl Provider for GitHub {
 
     async fn add(
         &self,
-        _target: &Target,
-        _key: &PublicKey,
-        _opts: &AddOpts,
+        target: &Target,
+        key: &PublicKey,
+        opts: &AddOpts,
     ) -> Result<(), ProviderError> {
-        Err(ProviderError::NotYet("adding a key to GitHub"))
+        write::add(self, target, key, opts).await
     }
 
     async fn remove(
         &self,
-        _target: &Target,
-        _key: &Fingerprint,
-        _opts: &RemoveOpts,
+        target: &Target,
+        key: &Fingerprint,
+        opts: &RemoveOpts,
     ) -> Result<(), ProviderError> {
-        Err(ProviderError::NotYet("removing a key from GitHub"))
+        write::remove(self, target, key, opts).await
     }
 
     async fn verify(&self, target: &Target, key: &KeyRef) -> Result<VerifyStatus, ProviderError> {
