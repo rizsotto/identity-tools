@@ -10,7 +10,9 @@ use async_trait::async_trait;
 use tokio::time::Instant;
 use url::Url;
 
-use crate::found::{SplitBlob, need_net, openpgp_found, source_of, split_blob, ssh_list};
+use crate::found::{
+    SplitBlob, need_net, openpgp_found, source_of, split_blob, ssh_list, valid_user_ids,
+};
 use crate::model::{Found, KeySource, SourceError, SourceKind};
 use crate::net::Net;
 use crate::query::Query;
@@ -111,11 +113,15 @@ async fn ssh_keys(
 async fn gpg_keys(net: &Net, url: &Url, deadline: Instant) -> Result<Found, SourceError> {
     let fetched = net.get(url, deadline).await?;
     let source = source_of(SourceKind::GitHub, &fetched);
+    let armor = starts_with_armor(&fetched.body);
     let mut found = Found::default();
     match split_blob(fetched.body, &source, deadline).await? {
+        SplitBlob::Keys(keys) if keys.is_empty() && !armor => {
+            return Err(SourceError::Malformed("no key in the answer".into()));
+        }
         SplitBlob::Keys(keys) => {
             for (key, bytes) in keys {
-                let shown = key.user_ids.clone();
+                let shown = valid_user_ids(&key);
                 found.keys.push(openpgp_found(key, bytes, &source, shown));
             }
         }
@@ -124,33 +130,42 @@ async fn gpg_keys(net: &Net, url: &Url, deadline: Instant) -> Result<Found, Sour
     Ok(found)
 }
 
-/// Both answers together. 404 on one is fine; both 404 is "not found". An
-/// error is only reported when nothing was found: a part that failed must
-/// not look like "this user has no key".
+/// GitHub's answer for a user with no key is an armor block with no
+/// packets. Zero keys means "no key" only for such an answer; anything
+/// else (a captive portal page, junk) is malformed.
+fn starts_with_armor(body: &[u8]) -> bool {
+    let body = body.strip_prefix("\u{feff}".as_bytes()).unwrap_or(body);
+    body.trim_ascii_start()
+        .starts_with(b"-----BEGIN PGP PUBLIC KEY BLOCK-----")
+}
+
+/// Both answers together. 404 on one is fine; both 404 is "not found".
+/// When one part fails with another error and the other found keys, the
+/// keys are returned with the error in [`Found::incomplete`], so missing
+/// keys are never read as removed. With no key at all the error is
+/// returned: a failed part must not look like "this user has no key".
 fn combine(
     keys: Result<Found, SourceError>,
     gpg: Result<Found, SourceError>,
 ) -> Result<Found, SourceError> {
     let mut found = Found::default();
-    let mut error = None;
     let mut not_found = 0;
     for part in [keys, gpg] {
         match part {
             Ok(f) => {
                 found.keys.extend(f.keys);
                 found.rejected.extend(f.rejected);
+                found.incomplete.extend(f.incomplete);
             }
             Err(SourceError::NotFound) => not_found += 1,
-            Err(e) => {
-                error.get_or_insert(e);
-            }
+            Err(e) => found.incomplete.push(e),
         }
     }
     if not_found == 2 {
         return Err(SourceError::NotFound);
     }
-    match error {
-        Some(e) if found.keys.is_empty() => Err(e),
-        _ => Ok(found),
+    if found.keys.is_empty() && !found.incomplete.is_empty() {
+        return Err(found.incomplete.swap_remove(0));
     }
+    Ok(found)
 }

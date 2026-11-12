@@ -136,7 +136,7 @@ async fn other_user_ids_are_not_shown() {
         identity_core::PublicKey::OpenPgp(p) => p.user_ids.len(),
         other => panic!("{other:?}"),
     };
-    assert_eq!(all, 2);
+    assert_eq!(all, 1, "other user IDs are dropped from the summary");
     assert_eq!(k.shown_user_ids.len(), 1);
     assert!(k.shown_user_ids[0].has_email("olivia@example.org"));
 }

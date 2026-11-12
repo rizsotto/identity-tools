@@ -153,27 +153,53 @@ async fn github_junk_keys_is_malformed() {
 }
 
 #[tokio::test]
-async fn github_html_junk_and_broken_gpg_hold_no_key() {
-    for body in [
-        "mock-sources/not-found.html",
-        "mock-sources/junk.bin",
-        "mock-sources/broken-armor.asc",
-    ] {
+async fn github_gpg_without_armor_header_is_malformed() {
+    for body in ["mock-sources/not-found.html", "mock-sources/junk.bin"] {
         let server = github(status(404), ok(data(body))).await;
-        assert_eq!(github_lookup(&server).await, Ok(Found::default()), "{body}");
+        assert!(
+            matches!(github_lookup(&server).await, Err(SourceError::Malformed(_))),
+            "{body}"
+        );
     }
 }
 
 #[tokio::test]
-async fn github_html_keys_lines_are_rejected_lines() {
+async fn github_gpg_armor_with_no_readable_key_is_no_key() {
+    let server = github(status(404), ok(data("mock-sources/broken-armor.asc"))).await;
+    assert_eq!(github_lookup(&server).await, Ok(Found::default()));
+}
+
+#[tokio::test]
+async fn github_html_keys_is_malformed() {
     let server = github(ok(data("mock-sources/not-found.html")), status(404)).await;
+    assert!(matches!(
+        github_lookup(&server).await,
+        Err(SourceError::Malformed(_))
+    ));
+}
+
+#[tokio::test]
+async fn github_empty_keys_list_is_no_key() {
+    let server = github(ok(Vec::new()), ok(data("mock-sources/github-empty.gpg"))).await;
+    assert_eq!(github_lookup(&server).await, Ok(Found::default()));
+}
+
+#[tokio::test]
+async fn github_gpg_shows_only_valid_user_ids() {
+    let server = github(
+        status(404),
+        ok(data("fixtures/openpgp/rita-revoked-uid.asc")),
+    )
+    .await;
     let found = github_lookup(&server).await.unwrap();
-    assert!(found.keys.is_empty());
-    assert!(!found.rejected.is_empty());
-    for r in &found.rejected {
-        assert!(matches!(r.reason, RejectReason::BadLine { .. }));
-        assert_eq!(r.fingerprint, None);
-    }
+    let k = &found.keys[0];
+    assert!(!k.shown_user_ids.is_empty());
+    assert!(k.shown_user_ids.iter().all(|u| !u.revoked && !u.invalid));
+    assert!(
+        !k.shown_user_ids
+            .iter()
+            .any(|u| u.uid.contains("rita@example.org"))
+    );
 }
 
 #[tokio::test]
@@ -213,10 +239,34 @@ async fn github_429_is_rate_limited() {
 }
 
 #[tokio::test]
-async fn github_one_part_failing_keeps_the_other_parts_keys() {
+async fn github_one_part_failing_keeps_the_other_parts_keys_marked_incomplete() {
     let server = github(ok(data("fixtures/ssh/erin_ed25519.pub")), status(500)).await;
     let found = github_lookup(&server).await.unwrap();
     assert_eq!(found.keys.len(), 1);
+    assert_eq!(found.incomplete, vec![SourceError::Http(500)]);
+}
+
+#[tokio::test]
+async fn github_rate_limited_part_keeps_retry_after() {
+    let server = github(
+        status(429).insert_header("retry-after", "30"),
+        ok(data("fixtures/openpgp/alice.asc")),
+    )
+    .await;
+    let found = github_lookup(&server).await.unwrap();
+    assert_eq!(found.keys.len(), 1);
+    assert_eq!(
+        found.incomplete,
+        vec![SourceError::RateLimited {
+            retry_after: Some(Duration::from_secs(30))
+        }]
+    );
+}
+
+#[tokio::test]
+async fn github_complete_answer_is_not_incomplete() {
+    let server = github(status(404), ok(data("fixtures/openpgp/alice.asc"))).await;
+    assert!(github_lookup(&server).await.unwrap().incomplete.is_empty());
 }
 
 #[tokio::test]

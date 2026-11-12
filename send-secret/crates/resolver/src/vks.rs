@@ -68,6 +68,8 @@ impl KeySource for VksSource {
 
 /// The by-email URL. The address is fully escaped (only `[A-Za-z0-9-._~@%]`
 /// is left), so appending it can not change anything but the last segment.
+/// `path_segments_mut().push()` is not used: it leaves `+` as is, and it
+/// would escape the `%` of an already escaped value again.
 fn by_email_url(address: &str) -> Result<Url, SourceError> {
     let escaped = utf8_percent_encode(address, EMAIL_SEGMENT).to_string();
     Url::parse(&format!("{BASE}{escaped}"))
