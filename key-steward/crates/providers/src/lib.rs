@@ -9,6 +9,7 @@ mod forge;
 mod http;
 mod netlog;
 mod provider;
+mod secret_service;
 mod ssh_server;
 mod token;
 
@@ -19,5 +20,6 @@ pub use http::{AuthStyle, HttpClient};
 pub use inventory::{LocationKind, Purpose, SshHost, Target};
 pub use netlog::{NetLog, NetLogEntry};
 pub use provider::{AddOpts, KeyRef, Provider, PublicKeyRef, VerifyError, VerifyStatus};
+pub use secret_service::SecretServiceTokens;
 pub use ssh_server::SshServer;
 pub use token::{InMemoryTokenSource, Token, TokenError, TokenKey, TokenSource};
