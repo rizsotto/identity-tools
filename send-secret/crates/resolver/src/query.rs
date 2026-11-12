@@ -178,6 +178,9 @@ impl Email {
             DomainError::Ip => QueryError::IpLiteral,
             DomainError::Bad(why) => QueryError::BadEmail(why),
         })?;
+        if is_local_host_name(&domain) {
+            return Err(QueryError::BadEmail("localhost is not allowed"));
+        }
         Ok(Email {
             local: local.to_string(),
             domain,
@@ -225,9 +228,10 @@ impl Host {
             DomainError::Ip => QueryError::IpLiteral,
             DomainError::Bad(why) => QueryError::BadHost(why),
         })?;
-        if name == "localhost" || name.ends_with(".localhost") {
+        if is_local_host_name(&name) {
             return Err(QueryError::BadHost("localhost is not allowed"));
         }
+        let port = port.filter(|&p| p != 443);
         Ok(Host { name, port })
     }
 
@@ -310,6 +314,12 @@ fn parse_domain(d: &str) -> Result<String, DomainError> {
         return Err(DomainError::Ip);
     }
     Ok(d)
+}
+
+/// `localhost` or a name under it (RFC 6761), with or without the final dot.
+pub(crate) fn is_local_host_name(host: &str) -> bool {
+    let h = host.trim_end_matches('.').to_ascii_lowercase();
+    h == "localhost" || h.ends_with(".localhost")
 }
 
 fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
@@ -577,6 +587,8 @@ mod tests {
                 matches!(e, BadHost(_))
             }),
             ("gitlab:localhost/alice", |e| matches!(e, BadHost(_))),
+            ("alice@localhost.localhost", |e| matches!(e, BadEmail(_))),
+            ("alice@a.LOCALHOST", |e| matches!(e, BadEmail(_))),
             ("gitlab:a.localhost/alice", |e| matches!(e, BadHost(_))),
             ("gitlab:intranet/alice", |e| matches!(e, BadHost(_))),
             ("gitlab:/alice", |e| matches!(e, BadHost(_))),
@@ -608,6 +620,22 @@ mod tests {
     }
 
     #[test]
+    fn local_host_names() {
+        for h in [
+            "localhost",
+            "LocalHost",
+            "a.localhost",
+            "localhost.",
+            "a.localhost.",
+        ] {
+            assert!(is_local_host_name(h), "{h}");
+        }
+        for h in ["example.org", "localhost.example.org", "mylocalhost"] {
+            assert!(!is_local_host_name(h), "{h}");
+        }
+    }
+
+    #[test]
     fn contact_key_is_canonical() {
         let key = |s: &str| parse_query(s).unwrap().contact_key();
         assert_eq!(
@@ -620,6 +648,14 @@ mod tests {
         );
         assert_eq!(key("GitHub:Alice").as_deref(), Some("github:alice"));
         assert_eq!(key("gitlab:Alice").as_deref(), Some("gitlab:alice"));
+        assert_eq!(
+            key("gitlab:gitlab.com:443/alice").as_deref(),
+            Some("gitlab:alice")
+        );
+        assert_eq!(
+            key("gitlab:git.example.org:443/alice").as_deref(),
+            Some("gitlab:git.example.org/alice")
+        );
         assert_eq!(
             key("gitlab:GitLab.com/Alice").as_deref(),
             Some("gitlab:alice")

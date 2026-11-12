@@ -38,7 +38,9 @@ pub struct Resolution {
     pub rejected: Vec<Rejected>,
     /// Per source, in SPEC 4 order. Shown, never fatal alone.
     pub errors: Vec<(SourceKind, SourceError)>,
-    /// Every DNS check and HTTP request of this lookup (NFR-2).
+    /// Every DNS check and HTTP request of this lookup (NFR-2): the
+    /// resolver's `NetLog` entries added while it ran. Lookups that run at
+    /// the same time on one `Net` mix their entries here.
     pub requests: Vec<NetLogEntry>,
 }
 
@@ -102,14 +104,19 @@ impl Resolver {
 }
 
 /// Adds one source's result. Sources come in rank order, so the first copy
-/// of a fingerprint is the best ranked one.
+/// of a fingerprint is the best ranked one. A usable copy replaces an
+/// unusable better ranked one (an expired key in the keyring, renewed on
+/// WKD); every source stays listed (S-3).
 fn merge(out: &mut Resolution, found: Found) {
     for key in found.keys {
         let fpr = key.fingerprint();
         match out.candidates.iter_mut().find(|c| c.fingerprint == fpr) {
             Some(c) => {
                 if !c.sources.contains(&key.source) {
-                    c.sources.push(key.source);
+                    c.sources.push(key.source.clone());
+                }
+                if c.key.usable.is_err() && key.usable.is_ok() {
+                    c.key = key;
                 }
             }
             None => out.candidates.push(Candidate {

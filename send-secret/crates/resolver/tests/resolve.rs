@@ -314,6 +314,48 @@ async fn unusable_keys_kept_with_notes() {
 }
 
 #[tokio::test]
+async fn usable_copy_wins_over_better_ranked_unusable_one() {
+    use SourceKind::*;
+    let mut expired = pgp(FPR_A, Keyring);
+    expired.usable = Err(Unusable::Expired);
+    let mut also_expired = pgp(FPR_A, Contacts);
+    also_expired.usable = Err(Unusable::Expired);
+    let resolver = Resolver::new(
+        cfg(),
+        Some(mock_net()),
+        vec![
+            Fake::new(Vks, vec![pgp(FPR_A, Vks)]).boxed(),
+            Fake::new(Keyring, vec![expired]).boxed(),
+            Fake::new(Contacts, vec![also_expired]).boxed(),
+            Fake::new(Wkd, vec![pgp(FPR_A, Wkd)]).boxed(),
+        ],
+    );
+    let r = resolver.resolve(&q(), Mode::Full).await;
+    assert_eq!(r.candidates.len(), 1);
+    let c = &r.candidates[0];
+    assert_eq!(c.key.usable, Ok(()));
+    assert_eq!(c.key.source.kind, Wkd);
+    assert_eq!(kinds(&c.sources), [Contacts, Keyring, Wkd, Vks]);
+
+    // All copies unusable: the best ranked one stays.
+    let mut k1 = pgp(FPR_A, Keyring);
+    k1.usable = Err(Unusable::Expired);
+    let mut k2 = pgp(FPR_A, Wkd);
+    k2.usable = Err(Unusable::Revoked);
+    let resolver = Resolver::new(
+        cfg(),
+        Some(mock_net()),
+        vec![
+            Fake::new(Wkd, vec![k2]).boxed(),
+            Fake::new(Keyring, vec![k1]).boxed(),
+        ],
+    );
+    let r = resolver.resolve(&q(), Mode::Full).await;
+    assert_eq!(r.candidates[0].key.source.kind, Keyring);
+    assert_eq!(r.candidates[0].key.usable, Err(Unusable::Expired));
+}
+
+#[tokio::test]
 async fn rejected_and_errors_in_rank_order() {
     use SourceKind::*;
     let mut vks = Fake::new(Vks, Vec::new());

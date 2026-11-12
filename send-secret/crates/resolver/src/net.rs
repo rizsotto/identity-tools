@@ -11,7 +11,11 @@
 //! - Rate limits: a 429, or a 403 with `x-ratelimit-remaining: 0`, puts the
 //!   host on a cooldown for the life of this `Net`. Never an automatic retry.
 //! - The WKD DNS check ([`Net::host_has_address`]) keeps its answer, and
-//!   the request to that host uses it (no second lookup).
+//!   the request to that host uses it (no second lookup). Not so when an
+//!   `HTTPS_PROXY` or `ALL_PROXY` from the environment is in use: the proxy
+//!   then resolves the name itself.
+//! - Redirects to IP addresses, `localhost` or `*.localhost` are refused
+//!   (same rule as typed GitLab hosts).
 
 use std::collections::HashMap;
 use std::fmt;
@@ -29,6 +33,7 @@ use url::{Position, Url};
 
 use crate::ResolverConfig;
 use crate::netlog::NetLog;
+use crate::query::is_local_host_name;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const USER_AGENT: &str = concat!("send-secret/", env!("CARGO_PKG_VERSION"));
@@ -62,6 +67,8 @@ pub enum NetError {
     TooManyRedirects(u8),
     #[error("a redirect without a valid Location")]
     BadRedirect,
+    #[error("refused: a redirect to {0}, which is an IP address or localhost")]
+    BadRedirectHost(String),
     #[error("no mock server for {0}; request not sent")]
     Unmapped(String),
     #[error("{0}")]
@@ -214,20 +221,16 @@ impl Net {
         let result = match &self.inner.mode {
             Mode::Mock(map) => Ok(map.map.keys().any(|(h, _)| *h == host)),
             Mode::Real => {
+                lock(&self.inner.dns).remove(&host);
                 let name = host.clone();
                 let lookup = tokio::task::spawn_blocking(move || system_lookup(&name));
-                match timeout_at(deadline, lookup).await {
+                let answer = match timeout_at(deadline, lookup).await {
                     Err(_) => Err(NetError::Timeout),
                     Ok(Err(e)) => Err(NetError::Dns(e.to_string())),
-                    Ok(Ok(Err(e))) => Err(e),
-                    Ok(Ok(Ok(addrs))) => {
-                        let found = !addrs.is_empty();
-                        if found {
-                            lock(&self.inner.dns).insert(host.clone(), addrs);
-                        }
-                        Ok(found)
-                    }
-                }
+                    Ok(Ok(r)) => r,
+                };
+                store_answer(&self.inner.dns, &host, &answer);
+                answer.map(|addrs| !addrs.is_empty())
             }
         };
         let outcome = match &result {
@@ -317,6 +320,15 @@ impl Net {
                 .ok_or(NetError::BadRedirect)?;
             if next.scheme() != "https" {
                 return Err(NetError::NotHttps(next.to_string()));
+            }
+            let local = match next.host() {
+                Some(url::Host::Domain(d)) => is_local_host_name(d),
+                _ => true,
+            };
+            if local {
+                return Err(NetError::BadRedirectHost(
+                    next.host_str().unwrap_or_default().to_string(),
+                ));
             }
             return Ok((status.as_u16(), Hop::Redirect(next)));
         }
@@ -422,6 +434,19 @@ fn system_lookup(host: &str) -> Result<Vec<IpAddr>, NetError> {
             "{} (try again later)",
             std::io::Error::from(e)
         ))),
+    }
+}
+
+/// Keeps a DNS answer with addresses; drops the entry for anything else.
+fn store_answer(cache: &DnsCache, host: &str, answer: &Result<Vec<IpAddr>, NetError>) {
+    let mut cache = lock(cache);
+    match answer {
+        Ok(addrs) if !addrs.is_empty() => {
+            cache.insert(host.to_string(), addrs.clone());
+        }
+        _ => {
+            cache.remove(host);
+        }
     }
 }
 
@@ -597,6 +622,30 @@ mod tests {
         let reset = retry_after(&h(&[("x-ratelimit-reset", (now + 30).to_string())])).unwrap();
         assert!((29..=30).contains(&reset.as_secs()), "{reset:?}");
         assert_eq!(retry_after(&HeaderMap::new()), None);
+    }
+
+    #[tokio::test]
+    async fn dns_check_replaces_old_answer() {
+        let net = Net::new(&ResolverConfig::default()).unwrap();
+        let stale: IpAddr = "192.0.2.1".parse().unwrap();
+        lock(&net.inner.dns).insert("localhost".into(), vec![stale]);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        assert!(net.host_has_address("localhost", deadline).await.unwrap());
+        let now = lock(&net.inner.dns).get("localhost").cloned().unwrap();
+        assert!(!now.contains(&stale), "{now:?}");
+    }
+
+    #[test]
+    fn dns_answer_without_address_or_error_drops_cache_entry() {
+        let cache = DnsCache::default();
+        let ip: IpAddr = "192.0.2.1".parse().unwrap();
+        store_answer(&cache, "h.example.org", &Ok(vec![ip]));
+        assert_eq!(lock(&cache).get("h.example.org"), Some(&vec![ip]));
+        store_answer(&cache, "h.example.org", &Ok(Vec::new()));
+        assert_eq!(lock(&cache).get("h.example.org"), None);
+        store_answer(&cache, "h.example.org", &Ok(vec![ip]));
+        store_answer(&cache, "h.example.org", &Err(NetError::Timeout));
+        assert_eq!(lock(&cache).get("h.example.org"), None);
     }
 
     #[test]

@@ -281,6 +281,61 @@ async fn redirect_to_http_refused() {
 }
 
 #[tokio::test]
+async fn redirect_to_ip_or_localhost_refused() {
+    for target in [
+        "https://127.0.0.1/k",
+        "https://10.0.0.1/k",
+        "https://[::1]/k",
+        "https://localhost/k",
+        "https://LOCALHOST./k",
+        "https://evil.localhost/k",
+    ] {
+        let a = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(302).insert_header("location", target))
+            .mount(&a)
+            .await;
+        let net = net(&[("https://a.example.org", *a.address())]);
+        let err = net
+            .get(&url("https://a.example.org/k"), soon())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, NetError::BadRedirectHost(_)),
+            "{target}: {err:?}"
+        );
+        assert_eq!(net.log().len(), 1, "{target}");
+    }
+}
+
+#[tokio::test]
+async fn slow_body_after_fast_headers_times_out() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; 4096];
+        let _ = sock.read(&mut buf).await;
+        let _ = sock
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nfirst part")
+            .await;
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let _ = sock.write_all(&[b'a'; 90]).await;
+    });
+    let net = net(&[("https://example.org", addr)]);
+    let start = Instant::now();
+    let err = net
+        .get(
+            &url("https://example.org/k"),
+            Instant::now() + cfg().source_timeout,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err, NetError::Timeout);
+    assert!(start.elapsed() < Duration::from_millis(1500));
+}
+
+#[tokio::test]
 async fn redirect_without_location_is_an_error() {
     let a = serve(302, b"").await;
     let net = net(&[("https://a.example.org", *a.address())]);
