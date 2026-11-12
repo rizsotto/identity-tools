@@ -11,4 +11,5 @@ rusqlite = "0.42.0"
 thiserror = "2"
 
 [dev-dependencies]
+test-support = { path = "../test-support" }
 tempfile = "3"

@@ -156,7 +156,8 @@ pub trait Provider: Send + Sync {
   entry (time, provider, target, method/command, result). Tokens are never
   written. (NFR-2, S-4)
 - Tokens come in through a `TokenSource` trait. Tests use an in-memory one.
-  The `oo7` impl is task T18.
+  The `oo7` impl is `SecretServiceTokens` (T18). It only reads tokens;
+  storing one comes with the UI that asks for it.
 
 ### ssh_server verify (FR-3, S-5)
 
