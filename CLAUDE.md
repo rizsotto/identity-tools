@@ -8,7 +8,7 @@ rules) are binding.
 
 - Format: `cargo fmt --all`
 - Lint: `cargo clippy --workspace --all-targets -- -D warnings`
-- Test: `xvfb-run -a cargo test --workspace`
+- Test: `cargo test --workspace`
 
 ## Rules
 

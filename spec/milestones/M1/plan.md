@@ -141,3 +141,13 @@ Items 2 to 6 of SPEC 15 are for M2 to M4.
 - F3 fails: importing into the user's keyring is a side effect the user did
   not ask for. Needs a decision record.
 - gpg-agent in CI: use loopback pinentry and passphrase-free keys.
+
+## Devcontainer packages to add
+
+The devcontainer starts minimal (Rust only). Add these Fedora packages to
+`.devcontainer/Containerfile` in the task that first needs them:
+
+`gpgme-devel gnupg2 openssh-clients age sqlite-devel`
+
+Also add `gtk4-devel libadwaita-devel` and `xvfb-run` for GTK tests when the
+first GTK crate gets real code.

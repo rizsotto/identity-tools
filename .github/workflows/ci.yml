@@ -1,0 +1,18 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: devcontainers/ci@v0.3
+        with:
+          configFile: .github/ci/devcontainer.json
+          runCmd: |
+            cargo fmt --all -- --check
+            cargo clippy --workspace --all-targets -- -D warnings
+            cargo test --workspace

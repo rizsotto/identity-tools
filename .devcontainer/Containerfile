@@ -1,0 +1,15 @@
+FROM registry.fedoraproject.org/fedora:45
+
+# Minimal Rust environment. Project packages are added per milestone
+# (see spec/milestones/*/plan.md).
+RUN dnf -y install gcc git sudo && dnf clean all
+
+ARG USERNAME=dev
+ARG USER_UID=1000
+RUN useradd -m -u ${USER_UID} -s /bin/bash ${USERNAME} \
+    && echo "${USERNAME} ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/${USERNAME}
+
+USER ${USERNAME}
+ENV PATH=/home/${USERNAME}/.cargo/bin:${PATH}
+RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal \
+        --default-toolchain stable --component rustfmt,clippy
