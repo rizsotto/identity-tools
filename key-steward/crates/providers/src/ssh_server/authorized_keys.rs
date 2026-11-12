@@ -32,6 +32,17 @@ pub enum EditError {
     OldKeyInUnknownLine,
 }
 
+/// The result of [`AuthorizedKeys::remove`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Removed {
+    /// The new file.
+    pub bytes: Vec<u8>,
+    /// Line numbers (from 1) of `cert-authority` lines that hold the old
+    /// key. They are kept, but the old private key can still sign a user
+    /// certificate that logs in here: tell the user.
+    pub ca_lines_with_old_key: Vec<usize>,
+}
+
 /// One login key line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyLine {
@@ -165,7 +176,8 @@ impl AuthorizedKeys {
     /// really lets the new key log in is not checked here. Refuses if a
     /// line it does not understand still holds `old`, since sshd might
     /// accept that line. If `old` is not there, the file stays as it is.
-    pub fn remove(&self, old: &Fingerprint, keep: &Fingerprint) -> Result<Vec<u8>, EditError> {
+    /// CA lines with `old` are kept and listed in the result.
+    pub fn remove(&self, old: &Fingerprint, keep: &Fingerprint) -> Result<Removed, EditError> {
         if old == keep {
             return Err(EditError::SameKey);
         }
@@ -184,7 +196,15 @@ impl AuthorizedKeys {
             out.extend_from_slice(&l.text);
             out.extend_from_slice(l.ending);
         }
-        cap(out)
+        let ca_lines_with_old_key = self
+            .keys()
+            .filter(|k| k.cert_authority && &k.key.fingerprint == old)
+            .map(|k| k.line)
+            .collect();
+        Ok(Removed {
+            bytes: cap(out)?,
+            ca_lines_with_old_key,
+        })
     }
 }
 

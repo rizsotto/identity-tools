@@ -11,7 +11,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use identity_core::{Fingerprint, PublicKey, SshPublicKey, parse_public_keys};
-use providers::authorized_keys::{AuthorizedKeys, EditError};
+use providers::authorized_keys::{AuthorizedKeys, EditError, Removed};
 
 const OLD: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOP3xJfcaGYrwTcdoje/Ka7JhNrATYv7RJIjLUBvVJAq old@example.org";
 const NEW: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHWibp60yBURS/kgHeSClf48V14E1uwNw+NlNW+YCrh2 new@example.org";
@@ -74,6 +74,7 @@ fn remove(input: &[u8]) -> Result<Vec<u8>, EditError> {
     AuthorizedKeys::parse(input)
         .unwrap()
         .remove(&fpr(OLD), &fpr(NEW))
+        .map(|r| r.bytes)
 }
 
 fn show(b: &[u8]) -> String {
@@ -263,5 +264,30 @@ fn remove_refuses_if_an_unknown_line_holds_the_old_key() {
         show(&fill_bytes(
             b"# {OLD} off\ncert-authority {OLD} ca\n{NEW} new\n"
         ))
+    );
+}
+
+#[test]
+fn remove_reports_ca_lines_with_old_key() {
+    let input = fill_bytes(
+        b"# cert-authority {OLD} off\ncert-authority,principals=\"a\" {OLD} ca\n{OLD} old\n{NEW} new\nCERT-AUTHORITY {OLD} ca2\n",
+    );
+    let file = AuthorizedKeys::parse(&input).unwrap();
+    assert_eq!(
+        file.remove(&fpr(OLD), &fpr(NEW)).unwrap(),
+        Removed {
+            bytes: fill_bytes(
+                b"# cert-authority {OLD} off\ncert-authority,principals=\"a\" {OLD} ca\n{NEW} new\nCERT-AUTHORITY {OLD} ca2\n"
+            ),
+            ca_lines_with_old_key: vec![2, 5],
+        }
+    );
+    let plain = AuthorizedKeys::parse(&fill_bytes(b"{OLD} old\n{NEW} new\n")).unwrap();
+    assert!(
+        plain
+            .remove(&fpr(OLD), &fpr(NEW))
+            .unwrap()
+            .ca_lines_with_old_key
+            .is_empty()
     );
 }

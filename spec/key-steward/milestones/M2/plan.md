@@ -546,6 +546,12 @@ test sshd (byte compare of the server file).
   the removal is refused and the old key stays.
 - After `parse_apply` gives `Done(sum)`, compare `sum` with
   `cksum(content sent)`; a mismatch is an error, not success.
+- `remove` returns `Removed { bytes, ca_lines_with_old_key }`. A
+  `cert-authority` line with the old key is kept (it may be intended),
+  but the old private key can still sign a user certificate that logs
+  in. T06 passes the line numbers up; T12 shows "the old key is still
+  trusted as a certificate authority on this server" in the summary and
+  keeps the location flagged (not plain `Removed`).
 - `remove` refuses with `OldKeyInUnknownLine` if a line it cannot parse
   still holds the old key (sshd might accept it). Show the user the
   reason; do not retry.
