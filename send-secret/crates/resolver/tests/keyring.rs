@@ -185,3 +185,36 @@ async fn past_deadline_is_timeout() {
         .unwrap_err();
     assert_eq!(err, SourceError::Timeout);
 }
+
+#[tokio::test]
+async fn disabled_key_is_kept_with_note() {
+    let home = home_with(&["alice.asc"], "");
+    let fpr = fpr_of("alice.asc");
+    let out = Command::new("gpg")
+        .arg("--homedir")
+        .arg(home.path())
+        .args([
+            "--batch",
+            "--quiet",
+            "--edit-key",
+            fpr.as_str(),
+            "disable",
+            "save",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let found = lookup(home.path(), "alice@example.org").await.unwrap();
+    assert_eq!(found.keys[0].usable, Err(Unusable::Disabled));
+}
+
+#[tokio::test]
+async fn subkey_fingerprint_does_not_match() {
+    let home = home_with(&["alice.asc"], "");
+    let keys = Gpg::with_home(home.path()).unwrap().public_keys().unwrap();
+    let sub = keys[0].subkeys[1].fingerprint.as_str().to_string();
+    assert_eq!(
+        lookup(home.path(), &sub).await.unwrap_err(),
+        SourceError::NotFound
+    );
+}

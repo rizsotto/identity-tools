@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use identity_core::{Fingerprint, Gpg, KeyKind};
+use identity_core::{Fingerprint, Gpg, KeyKind, LineError};
 use resolver::{
     KeyBytes, KeySource, PastedSource, Query, RejectReason, SourceError, SourceKind, Unusable,
     parse_query,
@@ -149,15 +149,97 @@ async fn junk_is_malformed() {
 }
 
 #[tokio::test]
-async fn bad_line_names_its_number_not_its_text() {
+async fn bad_line_is_rejected_next_to_good_keys() {
     let mut body = fixture("fixtures/age/dave.pub");
     body.extend_from_slice(b"\nnot-a-key SECRETLOOKINGTEXT\n");
+    let found = paste(body).await.unwrap();
+    assert_eq!(found.keys.len(), 1);
+    assert_eq!(found.keys[0].key.kind(), KeyKind::Age);
+    assert_eq!(found.rejected.len(), 1);
+    let r = &found.rejected[0];
+    assert!(
+        matches!(
+            r.reason,
+            RejectReason::BadLine {
+                error: LineError::UnknownType,
+                ..
+            }
+        ),
+        "{r:?}"
+    );
+    let msg = r.reason.to_string();
+    assert!(msg.starts_with("line "), "{msg}");
+    assert!(!msg.contains("SECRETLOOKINGTEXT"));
+}
+
+fn joined(parts: &[&[u8]]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for p in parts {
+        out.extend_from_slice(p);
+        out.push(b'\n');
+    }
+    out
+}
+
+#[tokio::test]
+async fn armored_key_and_ssh_lines_give_both() {
+    let body = joined(&[
+        &fixture("fixtures/ssh/erin_ed25519.pub"),
+        &fixture("fixtures/openpgp/alice.asc"),
+        &fixture("fixtures/age/dave.pub"),
+    ]);
+    let found = paste(body).await.unwrap();
+    let kinds: Vec<_> = found.keys.iter().map(|k| k.key.kind()).collect();
+    assert_eq!(kinds, [KeyKind::OpenPgp, KeyKind::Ssh, KeyKind::Age]);
+    assert_eq!(
+        found.keys[0].fingerprint(),
+        fpr_of("fixtures/openpgp/alice.asc")
+    );
+    assert!(found.rejected.is_empty());
+}
+
+#[tokio::test]
+async fn armored_key_and_bad_line_next_to_ssh_key() {
+    let body = joined(&[
+        &fixture("fixtures/openpgp/alice.asc"),
+        &fixture("fixtures/ssh/erin_ed25519.pub"),
+        b"not-a-key x",
+    ]);
+    let found = paste(body).await.unwrap();
+    assert_eq!(found.keys.len(), 2);
+    assert_eq!(found.rejected.len(), 1);
+    assert!(matches!(
+        found.rejected[0].reason,
+        RejectReason::BadLine { .. }
+    ));
+}
+
+#[tokio::test]
+async fn armored_key_with_text_that_is_no_key_is_refused() {
+    let body = joined(&[
+        b"Hi, here is my key:",
+        &fixture("fixtures/openpgp/alice.asc"),
+    ]);
     let err = paste(body).await.unwrap_err();
     let SourceError::Malformed(msg) = &err else {
         panic!("{err:?}");
     };
-    assert!(msg.starts_with("line "), "{msg}");
-    assert!(!msg.contains("SECRETLOOKINGTEXT"));
+    assert!(msg.contains("not a key"), "{msg}");
+    assert!(!msg.contains("Hi, here"));
+}
+
+#[tokio::test]
+async fn byte_order_mark_is_ignored() {
+    let mut ssh = "\u{feff}".as_bytes().to_vec();
+    ssh.extend(fixture("fixtures/ssh/erin_ed25519.pub"));
+    let found = paste(ssh).await.unwrap();
+    assert_eq!(found.keys.len(), 1);
+    assert_eq!(found.keys[0].key.kind(), KeyKind::Ssh);
+
+    let mut pgp = "\u{feff}".as_bytes().to_vec();
+    pgp.extend(fixture("fixtures/openpgp/alice.asc"));
+    let found = paste(pgp).await.unwrap();
+    assert_eq!(found.keys[0].key.kind(), KeyKind::OpenPgp);
 }
 
 #[tokio::test]

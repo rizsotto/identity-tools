@@ -8,7 +8,6 @@ mod keyring;
 mod model;
 mod net;
 mod netlog;
-mod openpgp;
 mod pasted;
 mod query;
 mod resolve;

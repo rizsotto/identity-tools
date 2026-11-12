@@ -8,15 +8,13 @@
 //!   only those user IDs are shown. Other keys are rejected.
 
 use async_trait::async_trait;
-use identity_core::{PublicKey, WkdUrls};
+use identity_core::WkdUrls;
 use tokio::time::Instant;
 use url::Url;
 
-use crate::model::{
-    Found, FoundKey, KeyBytes, KeySource, RejectReason, Rejected, Source, SourceError, SourceKind,
-};
+use crate::found::{SplitBlob, keep_matching, need_net, source_of, split_blob};
+use crate::model::{Found, KeySource, SourceError, SourceKind};
 use crate::net::Net;
-use crate::openpgp::{Split, split_blob, usable};
 use crate::query::Query;
 
 /// Looks up an email address in the Web Key Directory of its domain.
@@ -48,7 +46,7 @@ impl KeySource for WkdSource {
         let Query::Email(email) = q else {
             return Err(SourceError::NotFound);
         };
-        let net = net.ok_or_else(|| SourceError::Net("network lookups are off for WKD".into()))?;
+        let net = need_net(net)?;
         let address = email.address();
         let urls = WkdUrls::for_address(&address).map_err(|e| SourceError::Net(e.to_string()))?;
         let advanced_host = format!("openpgpkey.{}", email.domain());
@@ -59,24 +57,14 @@ impl KeySource for WkdSource {
         };
         let url = Url::parse(&url).map_err(|_| SourceError::Net("bad WKD URL".into()))?;
         let fetched = net.get(&url, deadline).await?;
-        let source = Source {
-            kind: SourceKind::Wkd,
-            location: fetched.url.to_string(),
-            first_url: (fetched.url != fetched.first_url).then(|| fetched.first_url.to_string()),
-        };
+        let source = source_of(SourceKind::Wkd, &fetched);
 
-        let keys = match split_blob(fetched.body, deadline).await? {
-            Split::Keys(keys) => keys,
-            Split::TooManyKeys => {
-                return Ok(Found {
-                    keys: Vec::new(),
-                    rejected: vec![Rejected {
-                        fingerprint: None,
-                        source,
-                        reason: RejectReason::TooManyKeys,
-                    }],
-                    ..Found::default()
-                });
+        let mut found = Found::default();
+        let keys = match split_blob(fetched.body, &source, deadline).await? {
+            SplitBlob::Keys(keys) => keys,
+            SplitBlob::TooMany(rejected) => {
+                found.rejected.push(rejected);
+                return Ok(found);
             }
         };
         if keys.is_empty() {
@@ -84,33 +72,7 @@ impl KeySource for WkdSource {
                 "no OpenPGP key in the answer".into(),
             ));
         }
-
-        let mut found = Found::default();
-        for (mut key, bytes) in keys {
-            let matching: Vec<_> = key
-                .user_ids
-                .iter()
-                .filter(|u| u.has_email(&address))
-                .cloned()
-                .collect();
-            if matching.is_empty() {
-                found.rejected.push(Rejected {
-                    fingerprint: Some(key.fingerprint.clone()),
-                    source: source.clone(),
-                    reason: RejectReason::EmailMismatch,
-                });
-                continue;
-            }
-            // Other user IDs are never shown, not even from the summary.
-            key.user_ids = matching.clone();
-            found.keys.push(FoundKey {
-                usable: usable(&key),
-                key: PublicKey::OpenPgp(key),
-                bytes: KeyBytes::OpenPgp(bytes),
-                source: source.clone(),
-                shown_user_ids: matching,
-            });
-        }
+        keep_matching(keys, &address, &source, &mut found);
         Ok(found)
     }
 }

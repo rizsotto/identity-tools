@@ -1,19 +1,20 @@
 //! GnuPG keyring source (SPEC 4 item 2, plan.md "Sources").
 //!
 //! Finds keys whose valid user ID has the queried email, or whose primary
-//! fingerprint is the query. Reads only; never imports. gpgme contexts are
+//! fingerprint is the query (a subkey fingerprint does not match). No
+//! match is `NotFound`. Reads only; never imports. gpgme contexts are
 //! not `Send`, so all gpgme work runs on a blocking thread under the
 //! source's deadline.
 
 use std::path::PathBuf;
 
 use async_trait::async_trait;
-use identity_core::{Gpg, OpenPgpBackend, PublicKey};
+use identity_core::{Gpg, OpenPgpBackend};
 use tokio::time::{Instant, timeout_at};
 
-use crate::model::{Found, FoundKey, KeyBytes, KeySource, Source, SourceError, SourceKind};
+use crate::found::{openpgp_found, valid_user_ids};
+use crate::model::{Found, KeySource, Source, SourceError, SourceKind};
 use crate::net::Net;
-use crate::openpgp::{usable, valid_user_ids};
 use crate::query::Query;
 
 /// The user's GnuPG keyring, or the one in a given home dir.
@@ -104,13 +105,8 @@ fn search(home: Option<PathBuf>, wanted: &Wanted) -> Result<Found, SourceError> 
     let mut found = Found::default();
     for key in matches {
         let bytes = gpg.export_key(key.fingerprint.as_str()).map_err(err)?;
-        found.keys.push(FoundKey {
-            usable: usable(&key),
-            shown_user_ids: valid_user_ids(&key),
-            key: PublicKey::OpenPgp(key),
-            bytes: KeyBytes::OpenPgp(bytes),
-            source: source.clone(),
-        });
+        let shown = valid_user_ids(&key);
+        found.keys.push(openpgp_found(key, bytes, &source, shown));
     }
     Ok(found)
 }
