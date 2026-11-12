@@ -168,13 +168,14 @@ pub trait Provider {
 ### 7.2 SSH rotation state machine
 ```
 Planned → NewKeyGenerated → Installing(i/n) → Installed → Verifying(i/n)
-        → Verified → RemovingOld(i/n) → OldRemoved → ConfigUpdated → Done
+        → Verified → ConfigUpdated → RemovingOld(i/n) → OldRemoved → Done
 Any step → Failed(step, error) → (user: Retry | Skip location | Abort)
 Abort after Installed: offer to remove the new key from where it was added.
 ```
 - The journal is stored in SQLite (`rotation_steps` table). The app resumes from the last finished step on restart.
 - **Invariant:** the old key is never removed from a location until the new key is verified at **that** location.
 - **Invariant:** the old private key is never deleted automatically.
+- `ConfigUpdated` runs before any removal, and only if every location verified the new key. Otherwise the config is left alone (the old key still works where it was not replaced).
 
 ### 7.3 Shared with Send Secret
 Send Secret lives in the same repository. Both apps use `crates/identity-core/` at the repo root, see `spec/decisions/0001-identity-core-sharing.md`.

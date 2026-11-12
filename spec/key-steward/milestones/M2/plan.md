@@ -56,8 +56,8 @@ Rotation states follow SPEC 7.2. They are derived from per-location
 phases, so one slow or failed location does not hold back the others:
 
 ```
-rotation: Planned → NewKeyGenerated → Installing → Verifying → RemovingOld
-          → ConfigUpdated → Retired → Done
+rotation: Planned → NewKeyGenerated → Installing → Verifying → ConfigUpdated
+          → RemovingOld → Retired → Done
           any → Failed(step, location, error) → Retry | Skip | Abort
 location: Pending → Installed → Verified → OldRemoved
           Pending|Installed → Skipped        (user skipped; old key kept)
@@ -68,7 +68,7 @@ location: Pending → Installed → Verified → OldRemoved
 counts over the location phases. All installs run before any verify, and
 all verifies before any removal, as in SPEC 7.2. A location that failed
 verify stays `Installed` and is flagged; the others go on to removal.
-`ConfigUpdated` and `Retired` run once, after the last removal. SPEC 7.2
+`ConfigUpdated` runs once, after the last verify and before any removal. `Retired` runs once, after the last removal. SPEC 7.2
 has no `Retired` state; T12 adds it to SPEC 7.2 (SPEC 6 step 5 already
 names the archive step).
 
@@ -184,14 +184,21 @@ line byte-for-byte. Show a diff in the plan. Write each file through a temp
 file and `rename`, keep a backup `<file>.keysteward-<timestamp>`, keep the
 mode. Lines with other `%` tokens are listed, not changed.
 
-Order: SPEC 7.2 puts `ConfigUpdated` after `OldRemoved`. Between the two,
-`ssh <host>` with the old config uses the old key, which may already be
-gone from that host. This is short and local, and the user still has the
-new key. Kept as in the SPEC; the dry-run says it.
+Order: `ConfigUpdated` runs after every verify and before any removal.
+If config were updated after removal, `ssh <host>` would use the old key
+while it is already gone from that host, and a crash or a paused rotation
+would leave that state open. Rule: config is updated only if every
+location of the old key is `Verified`. If any location failed verify or
+was skipped, the config step is skipped and the dry-run and summary say
+why: the old key still works there and the old config keeps working
+everywhere. Changed from the first draft of SPEC 7.2 (orchestrator, 2026-11-12).
+Abort with rollback after `ConfigUpdated`: restore the config files from the
+backups before any `rollback(L)` removes the new key, so the config never
+points at a key that no location accepts.
 
 ### Retire
 
-After `config`, if every location of the old key is `OldRemoved` (none
+After the last removal, if every location of the old key is `OldRemoved` (none
 skipped or failed): ask, then move `old_path` and `old_path.pub` to
 `~/.ssh/retired/<name>` (dir 0700, no overwrite; add `-1`, `-2` on a
 clash). Never delete (S-2). If any location still holds the old key, skip
