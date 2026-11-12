@@ -28,7 +28,7 @@ every SSH task waits for its harness to pass in GitHub CI.
 | T16 | **Done, commit eb00577; review fixes 5ee1ad7, 4905d98.** Forgejo `list` and `verify` (Gitea, Codeberg). | providers | T01b, T13 | `forgejo_list_against_mock`, `forgejo_verify_by_fingerprint` |
 | T17 | **Done, commit 6af4114, `providers::CheckRunner`.** Check runner: verify all locations of a key, write status and `last_checked` to the store. Lives in `providers` (or `rotation`): `providers` depends on `inventory`, so it cannot go in `inventory`. | providers | T08, T12, T14 | `check_all_updates_status` |
 | T18 | **Done, commit 2ba03f6, `providers::SecretServiceTokens`; manual GNOME check still open.** `oo7` `TokenSource` impl. Verify SPEC 15 fact 6 first. Refuse cleanly when no Secret Service. | providers | T11 | `no_secret_service_gives_clear_error` (unit), manual check on GNOME |
-| T19 | M1 acceptance: end-to-end test, tick every box in `spec.md` with evidence, update SPEC.md. | all | T01a to T18 | `m1_acceptance` |
+| T19 | **Test done, commit 2aa1d1d; acceptance check: 19 of 21 boxes ticked, M1 not accepted yet (gaps in `spec.md`: GitHub CI run on the PR, the `GET /user` scope and Forgejo `link` facts).** M1 acceptance: end-to-end test, tick every box in `spec.md` with evidence, update SPEC.md. | all | T01a to T18 | `m1_acceptance` |
 
 ## Parallel lanes (after their "Needs" merge)
 
