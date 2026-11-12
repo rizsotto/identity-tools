@@ -46,6 +46,17 @@ setup. Accepted in decision 0002, now in SPEC 11.
   `Other(String)`.
 - `PublicKey { kind: Ssh | OpenPgp, algo, fingerprint, comment, created:
   Option<Timestamp>, expiry: Option<Timestamp>, subkeys: Vec<SubKey>, source }`.
+- Built in the core lane (T02), after review: `PublicKey` is an enum,
+  `Ssh(SshPublicKey)`, `Age(AgeRecipient)`, `OpenPgp(OpenPgpKey)`, with
+  `kind()`, `algo()` and `fingerprint()` accessors. Reason: the families
+  have different fields (SSH: comment and encoded line; OpenPGP: dates,
+  user IDs, subkeys; age: only the recipient). A flat struct would carry
+  fields that are always empty for some kinds; the enum makes the compiler
+  check each case. Decision 0001 suggested it. T05 adds user IDs and
+  subkeys to `OpenPgpKey`; the caller keeps the source (file path).
+  `KeyAlgo` also has `SkEd25519`, `SkEcdsa(curve)` and `X25519` (age).
+  `parse_public_keys` gives one result per line; show
+  `SshPublicKey::comment_display()`, not the raw comment.
 - SSH keys have no creation time. Use the file mtime and label it as the file
   date. This is a gap in FR-1; add a note to SPEC when T04 lands.
 - SSH scan takes the SSH dir as a parameter. It never calls `dirs::home_dir()`
@@ -214,8 +225,7 @@ Facts 2 (VKS), 3 (`--quick-set-expire`), 4 (Flatpak sockets) and 5
 New facts to add to SPEC 15 (proposed, not added yet):
 
 - The `gpgme` Rust crate builds and works against Fedora 45's gpgme 2.0.x.
-  gpgme 2.0 removed old APIs, so this is not certain. If it fails, options are
-  a newer fork or calling `gpg --with-colons`. (T01a)
+  (T01a) Verified and added to SPEC 15: it works with gpgme 2.0.1.
 - `ssh -G` output fields and how `Include` and `Match` behave with `-F`. (T09)
 - The exact stderr text from OpenSSH 10.x for denied auth and unknown host
   keys. (T12)

@@ -15,6 +15,30 @@ No GTK in any of these. No network.
 
 ## identity-core
 
+Built in the core lane (T05), after review. Shared API:
+
+- `PublicKey` is an enum with one variant per key family:
+  `Ssh(SshPublicKey)`, `Age(AgeRecipient)`, `OpenPgp(OpenPgpKey)`. Common
+  accessors: `kind()`, `algo()`, `fingerprint()`, `is_age_recipient()`.
+- Why an enum and not one flat struct: the families have different fields
+  (SSH has a comment and an `authorized_keys` encoding, age has only the
+  recipient, OpenPGP has dates, user IDs and subkeys). A flat struct would
+  carry fields that are always empty for some kinds, and code would have
+  to check `kind` before trusting them. With the enum the compiler makes
+  each caller handle each family. Decision 0001 suggested this too.
+- `parse_public_keys(bytes)` returns one `ParsedLine { line, key:
+  Result<PublicKey, LineError> }` per key line, so bad or unknown lines are
+  skipped with a note (FR-4) and good ones still work. Whole-input errors
+  (over 1,000,000 bytes, not UTF-8, OpenPGP armor, private key) are
+  `KeyError`. Error text is fixed and never echoes the input.
+- `is_age_recipient()`: age X25519, SSH Ed25519, SSH RSA 2048 to 4096 bits.
+- `SshPublicKey::comment_display()` drops control and bidi characters.
+  The raw `comment` is kept.
+- `OpenPgpKey` only has algo, fingerprint, created and expiry so far. T06
+  fills it from gpgme and adds what it needs.
+
+The sketch below is the first draft.
+
 ```rust
 pub enum PublicKey {
     OpenPgp { fingerprint: String, armored: Vec<u8> },
@@ -139,8 +163,15 @@ pub fn detect_format(head: &[u8]) -> Detection;  // format: OpenPgpArmor, AgeArm
 ### OpenPGP backend
 
 - gpgme, user's normal keyring and gpg-agent for signing and decrypting.
-- Encrypt to a key file without importing it into the user's keyring (see
-  fact F3). If that is not possible, stop and open a decision record.
+- Encrypt to a key file without importing it into the user's keyring (fact
+  F3, verified): `gpgme_op_encrypt_sign_ext` with `--file\n<path>`, one
+  `unsafe` call into `gpgme-sys`. The recipient string is an injection point
+  (a newline adds recipients or keywords such as `--hidden`). So the wrapper
+  takes key bytes, not a path: size check, exactly one key (`read_keys`),
+  write to a fresh 0700 temp dir as 0600 under our own name, pass that
+  absolute path, delete after. Paths from outside, if ever accepted, must be
+  absolute UTF-8 with no control characters and no leading or trailing
+  spaces. Mapped errors, no `unwrap`. Details in SPEC 15, F3.
 - Sign and encrypt in one gpgme operation, so the signature (and the
   sender's key ID) is inside the encryption. Only the recipient sees it.
 - Encrypt with `GPGME_ENCRYPT_NO_ENCRYPT_TO`, so gpg.conf `encrypt-to` or
@@ -237,8 +268,8 @@ emails only.
 | ID | Fact | Status |
 |---|---|---|
 | F1 | SPEC 15 item 1: `age` crate API for SSH recipients, armor, multiple recipients, and which SSH key types it accepts | verified (T01), `age` 0.12.1. SSH RSA only 2048 to 4096 bits. See SPEC 15. |
-| F2 | New: the Rust `gpgme` crate builds against Fedora's gpgme 2.0.x (Fedora 45 ships 2.0.1). Add to SPEC 15 | to verify (T02) |
-| F3 | New: gpgme can encrypt to a key file without importing it into the user's keyring (gpg has `--recipient-file`). Add to SPEC 15 | to verify (T02) |
+| F2 | New: the Rust `gpgme` crate builds against Fedora's gpgme 2.0.x (Fedora 45 ships 2.0.1). Add to SPEC 15 | verified, SPEC 15 (core lane) |
+| F3 | New: gpgme can encrypt to a key file without importing it into the user's keyring (gpg has `--recipient-file`). Add to SPEC 15 | verified, SPEC 15: `gpgme_op_encrypt_sign_ext` with `--file`, needs one `unsafe` call into `gpgme-sys` (core lane) |
 | F4 | New: Go `age` (Fedora `age` 1.3.x) decrypts SSH RSA and Ed25519 recipients from the `age` crate, armored and binary | checked by T10 tests |
 
 Items 2 to 6 of SPEC 15 are for M2 to M4.
