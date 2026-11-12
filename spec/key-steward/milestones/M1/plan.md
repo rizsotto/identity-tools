@@ -84,6 +84,11 @@ Use the `ssh-key` crate for public keys (`.pub` files) and fingerprints only.
 - First impl: `gpgme` crate, keylist mode local, public keys only. Never export
   secret keys.
 - Home dir comes from the caller (`GNUPGHOME` in tests).
+- Built in T05: `identity_core::Gpg` (`with_home(dir)` in tests,
+  `user_default()` in the app) implements `OpenPgpBackend`: `public_keys`,
+  `secret_keys`, `read_keys(bytes)` (no import, 1 MB limit, for forge
+  `raw_key` / `key` fields) and `default_secret_key`. `OpenPgpKey` has user
+  IDs, subkeys with algo, dates and capabilities, and status flags.
 
 ## Location model (inventory)
 

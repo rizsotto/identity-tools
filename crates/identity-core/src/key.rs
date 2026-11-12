@@ -141,14 +141,60 @@ impl AgeRecipient {
     }
 }
 
-/// Summary of an OpenPGP key. Filled by the GnuPG backend (Key Steward T05,
-/// Send Secret T06), which will add user IDs and subkeys.
+/// Summary of an OpenPGP key, from the GnuPG backend ([`crate::OpenPgpBackend`]).
+///
+/// `algo`, `created` and `expiry` are those of the primary key.
+/// `can_encrypt` and `can_sign` are true if the key as a whole has a usable
+/// subkey for that (not expired, revoked or disabled), as gpg computes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenPgpKey {
     pub algo: KeyAlgo,
     pub fingerprint: Fingerprint,
     pub created: Option<SystemTime>,
     pub expiry: Option<SystemTime>,
+    pub user_ids: Vec<UserId>,
+    /// All subkeys, the primary key first, as gpg lists them.
+    pub subkeys: Vec<OpenPgpSubkey>,
+    pub can_encrypt: bool,
+    pub can_sign: bool,
+    pub revoked: bool,
+    pub expired: bool,
+    pub disabled: bool,
+    pub invalid: bool,
+}
+
+/// One (sub)key of an OpenPGP key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenPgpSubkey {
+    pub algo: KeyAlgo,
+    pub fingerprint: Fingerprint,
+    pub created: Option<SystemTime>,
+    pub expiry: Option<SystemTime>,
+    pub can_encrypt: bool,
+    pub can_sign: bool,
+    pub can_certify: bool,
+    pub can_authenticate: bool,
+    pub revoked: bool,
+    pub expired: bool,
+}
+
+/// An OpenPGP user ID. Fields are as found and may hold control or bidi
+/// characters; use [`UserId::display`] to show it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserId {
+    /// The whole user ID, `Name (comment) <email>`.
+    pub uid: String,
+    pub name: Option<String>,
+    pub email: Option<String>,
+    pub revoked: bool,
+    pub invalid: bool,
+}
+
+impl UserId {
+    /// The user ID with control and bidi formatting characters removed.
+    pub fn display(&self) -> String {
+        display_safe(&self.uid)
+    }
 }
 
 fn display_safe(s: &str) -> String {

@@ -34,8 +34,41 @@ Built in the core lane (T05), after review. Shared API:
 - `is_age_recipient()`: age X25519, SSH Ed25519, SSH RSA 2048 to 4096 bits.
 - `SshPublicKey::comment_display()` drops control and bidi characters.
   The raw `comment` is kept.
-- `OpenPgpKey` only has algo, fingerprint, created and expiry so far. T06
-  fills it from gpgme and adds what it needs.
+- `OpenPgpKey` (T06): algo, fingerprint, created, expiry, user IDs,
+  subkeys (each with algo, dates and capabilities), `can_encrypt`,
+  `can_sign` (usable subkey, as gpg computes it), revoked, expired,
+  disabled, invalid.
+- `Gpg` (T06): a gpgme context. `Gpg::with_home(dir)` in tests, always;
+  `Gpg::user_default()` only in the app. `Gpg::home()` gives the home, so
+  `crypto` can set the same home on its own gpgme context.
+- `OpenPgpBackend` trait, implemented by `Gpg`: `public_keys`,
+  `secret_keys`, `read_keys(bytes)` (no import, 1 MB limit) and
+  `default_secret_key()`, which copies gpg 2.4's rules (checked against
+  gpg 2.4.9): read the first existing of `gpg.conf-2.4.9`, `gpg.conf-2.4`,
+  `gpg.conf-2`, `gpg.conf` (lossy UTF-8); try `default-key` values last
+  first, skipping values with no secret key or only revoked, expired,
+  disabled or invalid keys; else the first usable secret key that can
+  sign. Not `gpgconf`: it shows only the last value and does not skip
+  expired keys. The self copy uses
+  `default_secret_key()` and its `can_encrypt` to build `OpenPgpSelf`.
+- `RecipientFile` lives in `crypto` (`src/recipient_file.rs`), not in
+  identity-core: it is Send Secret only (decision 0001, review of the
+  core lane round 2). `RecipientFile::new(&mut identity_core::Gpg, bytes)`
+  checks size, exactly one key, and that it can encrypt (refuses expired
+  encryption subkeys and revoked keys), writes it 0600 in a fresh 0700 dir
+  (`$XDG_RUNTIME_DIR`, else the temp dir), and deletes it on drop.
+  `gpgme_recipients()` is the checked `--file\n<path>` string. Errors:
+  `RecipientFileError`.
+- The encrypt call is in `crypto` too: decision 0001 keeps encrypt, sign
+  and decrypt out of the core, and the call needs gpgme `Data` streams
+  and flags (sign, `NO_ENCRYPT_TO`) that only `crypto` should know. So
+  `crypto` depends on `gpgme` and `gpgme-sys`, owns its context (same home
+  as `Gpg::home()`), and makes the one `unsafe` call
+  `gpgme_op_encrypt_sign_ext` (or `gpgme_op_encrypt_ext` without signing)
+  with `RecipientFile::gpgme_recipients()`, keeping the `RecipientFile`
+  alive until the call returns. Document the `unsafe` block with a
+  `SAFETY` comment. `send-secret/crates/crypto/tests/recipient_file.rs`
+  (`encrypt_sign_to`) is the model.
 
 The sketch below is the first draft.
 
@@ -165,7 +198,8 @@ pub fn detect_format(head: &[u8]) -> Detection;  // format: OpenPgpArmor, AgeArm
 - gpgme, user's normal keyring and gpg-agent for signing and decrypting.
 - Encrypt to a key file without importing it into the user's keyring (fact
   F3, verified): `gpgme_op_encrypt_sign_ext` with `--file\n<path>`, one
-  `unsafe` call into `gpgme-sys`. The recipient string is an injection point
+  `unsafe` call into `gpgme-sys`. Build the file with `crypto::RecipientFile`
+  (see identity-core above); the `unsafe` call is in `crypto`. The recipient string is an injection point
   (a newline adds recipients or keywords such as `--hidden`). So the wrapper
   takes key bytes, not a path: size check, exactly one key (`read_keys`),
   write to a fresh 0700 temp dir as 0600 under our own name, pass that
@@ -181,8 +215,12 @@ pub fn detect_format(head: &[u8]) -> Detection;  // format: OpenPgpArmor, AgeArm
   encryption. gpgme 2.0.1 cannot pass `--no-comments`. How to enforce it is
   decision 0003 (research). Until it is accepted, T08b builds binary
   OpenPGP output and armored output waits.
-- Sign with the default secret key. Decrypt reports signer fingerprint and
-  validity.
+- Sign with the default secret key. Set the signer explicitly
+  (`Context::add_signer`) to the key from
+  `identity_core::OpenPgpBackend::default_secret_key()`, the same key the
+  self copy uses. Never rely on gpg's own default choice, so the signer
+  and the self copy key cannot differ. Decrypt reports signer fingerprint
+  and validity.
 
 ## CLI shape (draft)
 
