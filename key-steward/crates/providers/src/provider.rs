@@ -28,9 +28,20 @@ pub struct PublicKeyRef {
 }
 
 /// Options for [`Provider::add`].
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AddOpts {
+    pub purpose: Purpose,
     pub title: Option<String>,
+    /// SSH: copy the options of this key's lines; also the login key.
+    pub like: Option<KeyRef>,
+}
+
+/// Options for [`Provider::remove`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoveOpts {
+    pub purpose: Purpose,
+    /// SSH: log in with this key, and it must stay in the file.
+    pub keep: Option<KeyRef>,
 }
 
 /// Why a check gave no answer.
@@ -117,7 +128,12 @@ pub trait Provider: Send + Sync {
         opts: &AddOpts,
     ) -> Result<(), ProviderError>;
 
-    async fn remove(&self, target: &Target, key: &Fingerprint) -> Result<(), ProviderError>;
+    async fn remove(
+        &self,
+        target: &Target,
+        key: &Fingerprint,
+        opts: &RemoveOpts,
+    ) -> Result<(), ProviderError>;
 
     /// Checks whether the key is installed at the target.
     async fn verify(&self, target: &Target, key: &KeyRef) -> Result<VerifyStatus, ProviderError>;

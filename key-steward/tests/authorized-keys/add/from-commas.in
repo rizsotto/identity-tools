@@ -1,0 +1,2 @@
+from="10.0.0.1,192.168.1.0/24,!evil.example.org",restrict,pty {OLD} old@example.org
+{OTHER} other

@@ -1,0 +1,3 @@
+from="10.0.0.0/8" {OLD} lan
+{OTHER} x
+restrict,command="uptime" {OLD} monitor

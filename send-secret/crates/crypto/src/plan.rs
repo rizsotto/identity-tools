@@ -1,4 +1,4 @@
-//! Who gets which message (FR-3, FR-11, FR-12, decision 0002). Pure: no
+//! Who gets which message (FR-3, FR-11, FR-12, decisions 0002, 0004). Pure: no
 //! I/O, so the caller can settle every message before writing any output.
 
 use std::fmt;
@@ -7,9 +7,6 @@ use identity_core::MAX_KEY_INPUT;
 
 use crate::age_backend::AgeKey;
 use crate::{Error, Format, PlanError, Result};
-
-/// The label of the self copy. The CLI refuses it as a recipient label.
-pub const SELF_LABEL: &str = "self";
 
 /// An OpenPGP public key, as the bytes of a key file. The OpenPGP backend
 /// checks it holds exactly one key that can encrypt (SPEC 15, F3).
@@ -63,12 +60,16 @@ pub struct Person {
     pub keys: Vec<Recipient>,
 }
 
-/// One message: one format, and only that person's keys of that format.
+/// One message: one format, that person's keys of that format, and the
+/// sender's own key (S-8, FR-12). No one else's.
 #[derive(Debug, Clone)]
 pub struct MessagePlan {
     pub label: String,
     pub format: Format,
     pub keys: Vec<Recipient>,
+    /// The sender's key in `format`, so the sender can read the message
+    /// back. Set by [`add_sender`]; `None` from [`plan`].
+    pub sender: Option<Recipient>,
 }
 
 /// One message per person, always (FR-11). Format per person: OpenPGP if
@@ -100,18 +101,19 @@ pub fn plan(people: &[Person], force: Option<Format>) -> Result<Vec<MessagePlan>
                 label: person.label.clone(),
                 format,
                 keys,
+                sender: None,
             })
         })
         .collect()
 }
 
-/// The sender's own keys, for the self copy (FR-12). The caller finds them
-/// before any output is written.
+/// The sender's own keys, added to each message so the sender can read it
+/// back (FR-12, decision 0004). The caller finds them before any output is
+/// written.
 pub struct Sender {
     pub openpgp: OpenPgpSelf,
-    /// From [`crate::SelfIdentity`]. Never an SSH key. `None` if the
-    /// caller knows from [`self_format`] that the self copy is OpenPGP, so
-    /// no age identity is created for nothing.
+    /// From [`crate::SelfIdentity`]. Never an SSH key. `None` if no message
+    /// is age, so no age identity is created for nothing.
     pub age: Option<age::x25519::Recipient>,
 }
 
@@ -124,60 +126,19 @@ pub enum OpenPgpSelf {
     CannotEncrypt,
 }
 
-/// Why the self copy uses age although no format was forced.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SelfNote {
-    NoSecretKey,
-    CannotEncrypt,
-}
-
-impl fmt::Display for SelfNote {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            SelfNote::NoSecretKey => "you have no OpenPGP secret key, so the self copy uses age",
-            SelfNote::CannotEncrypt => {
-                "your default OpenPGP key cannot encrypt, so the self copy uses age"
+/// Adds the sender's key of each message's format to that message. A
+/// message the sender has no such key for keeps `sender: None`; the caller
+/// says so. Never adds anything to `keys`.
+pub fn add_sender(plans: &mut [MessagePlan], sender: &Sender) {
+    for plan in plans {
+        plan.sender = match (plan.format, &sender.openpgp, &sender.age) {
+            (Format::OpenPgp, OpenPgpSelf::CanEncrypt(cert), _) => {
+                Some(Recipient::OpenPgp(cert.clone()))
             }
-        })
+            (Format::Age, _, Some(age)) => Some(Recipient::Age(AgeKey::X25519(age.clone()))),
+            _ => None,
+        };
     }
-}
-
-/// The self copy format: forced format if given, else OpenPGP if the
-/// default secret key can encrypt, else age with a note. Forced OpenPGP
-/// without such a key is an error.
-pub fn self_format(
-    openpgp: &OpenPgpSelf,
-    force: Option<Format>,
-) -> Result<(Format, Option<SelfNote>), PlanError> {
-    match (force, openpgp) {
-        (Some(Format::Age), _) => Ok((Format::Age, None)),
-        (_, OpenPgpSelf::CanEncrypt(_)) => Ok((Format::OpenPgp, None)),
-        (Some(Format::OpenPgp), _) => Err(PlanError::NoSelfKey {
-            format: Format::OpenPgp,
-        }),
-        (None, OpenPgpSelf::NoSecretKey) => Ok((Format::Age, Some(SelfNote::NoSecretKey))),
-        (None, OpenPgpSelf::CannotEncrypt) => Ok((Format::Age, Some(SelfNote::CannotEncrypt))),
-    }
-}
-
-/// The self copy: one message with only the sender's key, labeled `self`,
-/// in the format [`self_format`] picks.
-pub fn self_plan(
-    sender: &Sender,
-    force: Option<Format>,
-) -> Result<(MessagePlan, Option<SelfNote>), PlanError> {
-    let (format, note) = self_format(&sender.openpgp, force)?;
-    let key = match (format, &sender.openpgp, &sender.age) {
-        (Format::OpenPgp, OpenPgpSelf::CanEncrypt(cert), _) => Recipient::OpenPgp(cert.clone()),
-        (Format::Age, _, Some(age)) => Recipient::Age(AgeKey::X25519(age.clone())),
-        _ => return Err(PlanError::NoSelfKey { format }),
-    };
-    let plan = MessagePlan {
-        label: SELF_LABEL.into(),
-        format,
-        keys: vec![key],
-    };
-    Ok((plan, note))
 }
 
 #[cfg(test)]
@@ -303,62 +264,64 @@ mod tests {
         );
     }
 
+    fn sender_keys(plans: &[MessagePlan]) -> Vec<Option<Format>> {
+        plans
+            .iter()
+            .map(|p| p.sender.as_ref().map(Recipient::format))
+            .collect()
+    }
+
     #[test]
-    fn self_plan_format_rule() {
+    fn add_sender_adds_key_of_each_format() {
+        let people = [
+            person("alice", vec![cert_key()]),
+            person("erin", vec![ssh_key()]),
+        ];
+        let mut plans = plan(&people, None).unwrap();
+        assert_eq!(sender_keys(&plans), [None, None]);
         let s = sender(OpenPgpSelf::CanEncrypt(cert()));
-        let (p, note) = self_plan(&s, None).unwrap();
+        add_sender(&mut plans, &s);
         assert_eq!(
-            (p.label.as_str(), p.format, note),
-            ("self", Format::OpenPgp, None)
+            sender_keys(&plans),
+            [Some(Format::OpenPgp), Some(Format::Age)]
         );
-        let (p, note) = self_plan(&s, Some(Format::Age)).unwrap();
-        assert_eq!((p.format, note), (Format::Age, None));
         assert!(
-            matches!(&p.keys[..], [Recipient::Age(AgeKey::X25519(r))] if Some(r) == s.age.as_ref())
+            matches!(&plans[1].sender, Some(Recipient::Age(AgeKey::X25519(r))) if Some(r) == s.age.as_ref())
         );
-        let (p, _) = self_plan(&s, Some(Format::OpenPgp)).unwrap();
-        assert_eq!(p.format, Format::OpenPgp);
+        // The recipient's own keys are unchanged.
+        assert_eq!(
+            summary(&plans),
+            [("alice", Format::OpenPgp, 1), ("erin", Format::Age, 1)]
+        );
     }
 
     #[test]
-    fn self_plan_falls_back_to_age_with_note() {
-        for (openpgp, want) in [
-            (OpenPgpSelf::NoSecretKey, SelfNote::NoSecretKey),
-            (OpenPgpSelf::CannotEncrypt, SelfNote::CannotEncrypt),
-        ] {
-            let s = sender(openpgp);
-            let (p, note) = self_plan(&s, None).unwrap();
-            assert_eq!((p.format, note), (Format::Age, Some(want)));
-            assert_eq!(p.keys.len(), 1);
-            assert!(note.unwrap().to_string().contains("self copy uses age"));
-        }
-    }
-
-    #[test]
-    fn self_plan_forced_openpgp_without_key_errors() {
+    fn add_sender_without_openpgp_key_leaves_openpgp_messages_alone() {
         for openpgp in [OpenPgpSelf::NoSecretKey, OpenPgpSelf::CannotEncrypt] {
-            assert_eq!(
-                self_plan(&sender(openpgp), Some(Format::OpenPgp)).unwrap_err(),
-                PlanError::NoSelfKey {
-                    format: Format::OpenPgp
-                }
-            );
+            let people = [
+                person("alice", vec![cert_key()]),
+                person("dave", vec![age_key()]),
+            ];
+            let mut plans = plan(&people, None).unwrap();
+            add_sender(&mut plans, &sender(openpgp));
+            assert_eq!(sender_keys(&plans), [None, Some(Format::Age)]);
         }
     }
 
     #[test]
-    fn self_plan_without_age_key_errors_only_when_age_is_needed() {
-        let s = Sender {
+    fn add_sender_never_uses_an_ssh_key() {
+        let mut plans = plan(&[person("erin", vec![ssh_key()])], None).unwrap();
+        add_sender(&mut plans, &sender(OpenPgpSelf::NoSecretKey));
+        assert!(matches!(
+            plans[0].sender,
+            Some(Recipient::Age(AgeKey::X25519(_)))
+        ));
+        let none = Sender {
             openpgp: OpenPgpSelf::CanEncrypt(cert()),
             age: None,
         };
-        assert_eq!(self_plan(&s, None).unwrap().0.format, Format::OpenPgp);
-        assert_eq!(
-            self_plan(&s, Some(Format::Age)).unwrap_err(),
-            PlanError::NoSelfKey {
-                format: Format::Age
-            }
-        );
+        add_sender(&mut plans, &none);
+        assert!(plans[0].sender.is_none());
     }
 
     #[test]

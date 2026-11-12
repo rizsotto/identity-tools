@@ -1,0 +1,4 @@
+{OLD} old
+# {NEW} commented
+cert-authority {NEW} ca
+command="x {NEW} broken

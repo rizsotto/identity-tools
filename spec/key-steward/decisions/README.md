@@ -25,3 +25,4 @@ record when the milestone that needs it starts.
 | 5 | Talk to GNOME maintainers about Seahorse | pending, blocks nothing (before M4 release) |
 | M2 plan | New key passphrase in the GUI: `ssh-keygen` on a pty, or an askpass helper. The M2 CLI lets `ssh-keygen` ask on the terminal, so Key Steward never sees it | deferred, blocks the GUI rotation wizard |
 | M2 plan | Non-default `AuthorizedKeysFile` on a server (SPEC 9.1). M2 refuses the server in pre-flight if the old key is not in `~/.ssh/authorized_keys` | deferred, blocks nothing yet |
+| M2 review | Cleanup on the server: every apply leaves a backup `authorized_keys.keysteward-<time>-<pid>`, and a killed apply can leave `authorized_keys.keysteward-tmp.<pid>`. M2 keeps them all (FR-6 wants the backup). Keep N, ask, or offer a cleanup command? | deferred, blocks nothing yet |

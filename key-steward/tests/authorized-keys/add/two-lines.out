@@ -1,0 +1,5 @@
+from="10.0.0.0/8" {OLD} lan
+from="10.0.0.0/8" {NEW} new@example.org
+{OTHER} x
+restrict,command="uptime" {OLD} monitor
+restrict,command="uptime" {NEW} new@example.org

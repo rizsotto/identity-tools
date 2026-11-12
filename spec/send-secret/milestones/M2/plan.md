@@ -66,6 +66,8 @@ forge code itself does not carry over. What is shared:
   `crypto::RecipientFile::all`).
 - **Redirects.** Followed by hand, at most 5 hops, each hop must be `https`
   (WKD draft section 3.1: follow redirects only while every target is https).
+  A hop to an IP address, `localhost` or `*.localhost` is refused (same rule
+  as typed GitLab hosts).
   Each hop is logged. The final URL is shown as the source when it differs
   from the first. No auth is ever sent, so no origin check is needed beyond
   https. A 401 is an error (the draft says clients must not answer auth
@@ -84,12 +86,16 @@ forge code itself does not carry over. What is shared:
   `openpgpkey.<domain>` has an address. The check calls `getaddrinfo` on a
   blocking thread and tells "no such name / no address" (`EAI_NONAME`,
   `EAI_NODATA`) apart from "try again" (`EAI_AGAIN`, other errors). Only the
-  first falls back to direct. Preferred crate: `dns-lookup` (its error kind
-  exposes the EAI code; check the API in task T05 before relying on it), else
-  a small `libc::getaddrinfo` wrapper with a `SAFETY` comment. The addresses
-  found are handed to reqwest with `ClientBuilder::resolve_to_addrs`, so the
-  request uses the same answer (no second lookup). The DNS check is logged
-  (NFR-2: it is network traffic too).
+  first falls back to direct. Crate: `dns-lookup` 4.0 (checked in T06:
+  `LookupError::kind()` gives `NoName`, `NoData`, `Again`, ...). The client
+  is built once, so instead of `ClientBuilder::resolve_to_addrs` the real
+  client has a small `reqwest::dns::Resolve` that answers from the
+  addresses the check found (no second lookup) and else calls
+  `getaddrinfo` on a blocking thread. The mock client's resolver always
+  fails. With an `HTTPS_PROXY` or `ALL_PROXY` from the environment the
+  proxy resolves the name itself, so the request may then see a different
+  answer than the check. The DNS check is logged (NFR-2: it is network
+  traffic too).
 
 ### Mock endpoints (no real network in tests, ever)
 
@@ -167,7 +173,9 @@ impl Query { pub fn contact_key(&self) -> Option<String> }  // canonical form, t
 pub trait KeySource: Send + Sync {
     fn kind(&self) -> SourceKind;                     // Contacts, Keyring, Wkd, Vks, GitHub, GitLab, Pasted
     fn accepts(&self, q: &Query) -> bool;
-    async fn lookup(&self, q: &Query, net: &Net, deadline: Instant) -> Result<Found, SourceError>;
+    /// `net` is Some only for network sources in Mode::Full (T07), so a
+    /// LocalOnly resolver can be built with no Net at all.
+    async fn lookup(&self, q: &Query, net: Option<&Net>, deadline: Instant) -> Result<Found, SourceError>;
 }
 
 pub struct Found { pub keys: Vec<FoundKey>, pub rejected: Vec<Rejected> }
@@ -229,7 +237,9 @@ pub struct Candidate { pub fingerprint: Fingerprint, pub key: FoundKey /* from t
 - Merge by fingerprint. `sources` lists every source that found it, in SPEC 4
   order: contacts, keyring, WKD, keys.openpgp.org, GitHub, GitLab, pasted.
   The key bytes come from the best ranked source (for one OpenPGP key from
-  WKD and VKS, the WKD copy: the domain owner's answer). Candidates are
+  WKD and VKS, the WKD copy: the domain owner's answer), except that a
+  usable copy beats an unusable better ranked one (an expired key in the
+  keyring that WKD has renewed); all sources stay listed (S-3). Candidates are
   sorted by their best source rank, then by the order the source returned
   them.
 - A query matching a pinned contact short-cuts: by default the CLI resolves

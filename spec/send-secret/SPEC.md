@@ -260,6 +260,7 @@ send-secret/
 ## 12. Milestones and acceptance criteria
 
 ### M1: Crypto core + CLI
+Accepted 2026-11-12 (see `milestones/M1/spec.md`).
 - `send-secret encrypt --to-key alice.pub -i msg.txt` and `decrypt` work for OpenPGP and age (x25519, SSH Ed25519, SSH RSA).
 - Interop: files from our CLI decrypt with `gpg` and Go `age`, and the reverse.
 - Multiple recipients work, one message per recipient (FR-11). Each recipient's message opens with that recipient's key and with the sender's key, and holds no one else's (S-8, FR-12).

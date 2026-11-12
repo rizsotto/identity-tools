@@ -223,18 +223,23 @@ so a crash never leaves a stale lock.
    1 MB.
 2. **Edit locally** in Rust (`authorized_keys.rs`, pure, fixture tested).
 3. **Apply.** Same login, `authorized_keys_apply.sh`. Stdin: one header
-   line `<expected cksum> <expected size>`, then the new content. The script:
+   line `<old cksum> <old size> <new cksum> <new size>`, then the new
+   content. The script:
    - `cd "$HOME"` (the session starts in the passwd home, decision 0002),
      `umask 077`.
    - Refuses if `.ssh/authorized_keys` is a symlink or not a regular file.
    - Compares `cksum < .ssh/authorized_keys` with the header. Different:
      prints `changed` and exits 3, writes nothing.
    - Writes stdin to `.ssh/authorized_keys.keysteward-tmp.$$` with
-     `set -C` (no clobber: fails if the name exists).
+     `set -C` (no clobber: fails if the name exists). If the temp file's
+     `cksum` is not the new one from the header (the upload was cut),
+     removes it, prints `short` and exits 6. Without this check a broken
+     connection would install a truncated file.
    - Copies the current file to
      `.ssh/authorized_keys.keysteward-<UTC timestamp>-$$` (FR-6 backup).
-   - `mv -f` the temp file over `.ssh/authorized_keys` (rename in one dir,
-     atomic).
+   - `sync`, then `mv -f` the temp file over `.ssh/authorized_keys`
+     (rename in one dir, atomic; without the `sync` XFS can leave an
+     empty file after a power loss right after the rename).
    - Prints `done <cksum> <size>` of the new file.
 4. **Confirm.** The app compares that checksum with its own POSIX `cksum`
    of the content it sent. Then the normal verify or list confirms the
@@ -272,7 +277,10 @@ all four images. SPEC 9.1 is updated in this planning commit.
 - Options parser: comma separated, double quotes with `\"` inside, as in
   sshd(8) "AUTHORIZED_KEYS FILE FORMAT". A line whose key part does not
   parse is `unknown` and kept as is.
-- Fingerprint the key part with `identity_core::parse_public_keys`.
+- Fingerprint the key part with `identity_core::parse_public_keys`,
+  given only `<type> <base64>`: work on bytes, so options and comments
+  may hold any bytes (non-UTF-8, `PRIVATE KEY-----`) and still match,
+  as in sshd.
 - Lines with the `cert-authority` option hold a CA, not a login key. Never
   match, never change.
 - `add_like(old_fpr, new_key)`: after each line holding `old_fpr`, insert a
@@ -315,7 +323,11 @@ Endpoints and scopes: see "Facts". All three share:
   locally from the key text, never the forge's field) and purpose, `DELETE`
   each by its id. 204 is success, 404 means already gone (list again to be
   sure). Remote ids are never stored.
-- Title: the new key's comment, else `key-steward <YYYY-MM-DD>`.
+- Title: `<comment> <YYYY-MM-DD>` (the new key's comment, else
+  `key-steward`), so it differs from the old key's title. Forgejo and
+  Gitea refuse a title the user already has (422 "Key title has been
+  used"). If the title is taken in the list read before the POST, add
+  ` (2)`, ` (3)`, ... until it is free.
 - 401 and 403: fail with advice on the scopes the forge needs.
 - Every request in the `NetLog`; tokens scrubbed (M1 `HttpClient`).
   `HttpClient` gets `post_json` and `delete`.
@@ -353,8 +365,12 @@ async fn add(&self, target: &Target, key: &PublicKey, opts: &AddOpts) -> Result<
 async fn remove(&self, target: &Target, key: &Fingerprint, opts: &RemoveOpts) -> Result<(), ProviderError>;
 ```
 
-`KeyRef` already carries `identity_file`. A forge ignores `like` and
-`keep` beyond the purpose. `ssh_server.list` returns one `PublicKeyRef` per
+`KeyRef` already carries `identity_file`. A forge ignores `keep` beyond
+the purpose. GitHub and Forgejo ignore `like`; GitLab reads it on add to
+copy the old key's `usage_type` (plus the purpose). Note for T12: the
+engine passes the old key as `like` to every add, forges included. GitLab
+refuses (no `POST`) to add a key it already has for another purpose: the
+API cannot change a key's usage type. `ssh_server.list` returns one `PublicKeyRef` per
 key line (purpose `SshAuth`, `remote_id` = line number, display only).
 
 ## What SQLite stores (S-8)
@@ -529,6 +545,34 @@ test sshd (byte compare of the server file).
 - Through the test sshd: forced command (`command="echo hi"` on the login
   key) gives "refused" before any change.
 
+### Notes for T06 (from the T01/T02 review)
+
+- `remove(old, keep)` only checks that some login key line (any options,
+  CA lines not counted) holds the new key. The real guard is that the
+  removal logs in with the new key. T06 must test that a new-key line
+  with a forced `command=` makes that login fail the marker check, so
+  the removal is refused and the old key stays.
+- After `parse_apply` gives `Done(sum)`, compare `sum` with
+  `cksum(content sent)`; a mismatch is an error, not success.
+- `remove` returns `Removed { bytes, ca_lines_with_old_key }`. A
+  `cert-authority` line with the old key is kept (it may be intended),
+  but the old private key can still sign a user certificate that logs
+  in. T06 passes the line numbers up; T12 shows "the old key is still
+  trusted as a certificate authority on this server" in the summary and
+  keeps the location flagged (not plain `Removed`).
+- Negative check after removal (defense in depth, T06 and T12): after
+  `remove_old(L)` on an SSH server, the engine logs in with the OLD key
+  (still on disk until retire) through the same pinned generated config
+  and expects the login to fail. If it still logs in (a line the editor
+  missed, another `AuthorizedKeysFile`, a CA line with a certificate),
+  the location is flagged "old key still accepted" and retire is
+  blocked. CA lines from `ca_lines_with_old_key` get the same flag and
+  block retire until the user decides.
+- `remove` refuses with `OldKeyInUnknownLine` if a line it cannot parse
+  still holds the old key (sshd might accept it). Show the user the
+  reason; do not retry.
+
+
 ## Facts (SPEC 15) M2 relies on
 
 Checked 2026-11-12 in the official docs and source. Ticked in SPEC 15,
@@ -543,6 +587,7 @@ fact 1, "Add/remove part".
 | GitLab delete | `DELETE /user/keys/:key_id`; 204; 404 if not found. | same |
 | GitLab write scope | Docs do not name it. Source: the Users API allows `read_user` only for GET and HEAD (`allow_access_with_scope :read_user, if: request.get? \|\| request.head?`), so writes need `api` ("complete read and write access to the API"). Not in docs: human check 2. | [users.rb](https://gitlab.com/gitlab-org/gitlab/-/raw/master/lib/api/users.rb), [scopes](https://docs.gitlab.com/security/tokens/access_token_scopes/) |
 | Forgejo add | `POST /api/v1/user/keys` (`userCurrentPostKey`), body `CreateKeyOption` with `title` and `key` required, `read_only` optional; 201 `PublicKey`; 401, 403, 422. Same in Gitea. | Codeberg swagger (Forgejo 17.0.0), Gitea swagger (29.0.0+dev) |
+| Forgejo title rule | A key title is unique per user: a second key with a used title gives 422 "Key title has been used" (`ErrKeyNameAlreadyUsed`). A used key gives 422 "Key content has been used as non-deploy key" (`ErrKeyAlreadyExist`, checked first). GitHub and GitLab document no title rule (GitLab `Key` model: title presence and length only, [key.rb](https://gitlab.com/gitlab-org/gitlab/-/raw/master/app/models/key.rb)). | [ssh_key.go](https://codeberg.org/forgejo/forgejo/src/branch/forgejo/models/asymkey/ssh_key.go) `AddPublicKey`, [key.go](https://codeberg.org/forgejo/forgejo/src/branch/forgejo/routers/api/v1/repo/key.go) `HandleAddKeyError`; same in [Gitea](https://github.com/go-gitea/gitea/blob/main/models/asymkey/ssh_key.go), checked 2026-11-12 |
 | Forgejo delete | `DELETE /api/v1/user/keys/{id}` (`userCurrentDeleteKey`); 204; 401, 403, 404. | same |
 | Forgejo write scope | `write:user`: "read/write/delete access to user operations", routes `/user/*` and `/users/*`; write covers GET too. Not stated for keys by name: human check 3. | [token scopes](https://forgejo.org/docs/latest/user/token-scope/) |
 | Remote `sh -s` with data after the script | Does not work with dash or BusyBox sh (read-ahead). Bootstrap with `dd bs=1 count=N` works in bash, dash, BusyBox, Alpine. POSIX `cksum` output equal in all. | Spike above (new SPEC 15 item) |

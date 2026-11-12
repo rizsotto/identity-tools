@@ -8,16 +8,18 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use identity_core::{Fingerprint, PublicKey};
+use identity_core::{Fingerprint, PublicKey, SshPublicKey};
 use inventory::{LocationKind, Purpose, Target};
+use serde_json::{Value, json};
 
+use super::write::{self, ForgeWrites, Op};
 use super::{
     ForgeCore, Listing, OpenPgpReader, base_url, base64_bytes, check_objects, check_owner, title,
 };
 use crate::error::ProviderError;
-use crate::http::AuthStyle;
+use crate::http::{AuthStyle, HttpClient};
 use crate::netlog::NetLog;
-use crate::provider::{AddOpts, KeyRef, Provider, PublicKeyRef, VerifyStatus};
+use crate::provider::{AddOpts, KeyRef, Provider, PublicKeyRef, RemoveOpts, VerifyStatus};
 use crate::token::TokenSource;
 
 const KIND: LocationKind = LocationKind::Forgejo;
@@ -41,23 +43,8 @@ impl Forgejo {
     }
 
     async fn listing(&self, target: &Target) -> Result<Listing, ProviderError> {
-        let api = format!("{}/api/v1", base_url(KIND, target)?);
-        let client = self
-            .core
-            .client(KIND, target, &api, AuthStyle::TokenPrefix, &[])
-            .await?;
-        check_owner(KIND, &client, target, "login").await?;
-        let mut out = Listing::default();
-        let items = client.get_all_pages(&format!("/user/keys?{PAGE}")).await?;
-        check_objects(KIND, &items)?;
-        for item in &items {
-            // The `fingerprint` field is not used: we compute our own.
-            out.add_ssh(
-                item,
-                &[Purpose::SshAuth, Purpose::SshSigning],
-                title(item, "title"),
-            );
-        }
+        let client = self.session(target).await?;
+        let mut out = self.ssh_keys(&client).await?;
         let items = client
             .get_all_pages(&format!("/user/gpg_keys?{PAGE}"))
             .await?;
@@ -76,6 +63,66 @@ impl Forgejo {
 }
 
 #[async_trait]
+impl ForgeWrites for Forgejo {
+    fn kind(&self) -> LocationKind {
+        KIND
+    }
+
+    async fn session(&self, target: &Target) -> Result<HttpClient, ProviderError> {
+        let api = format!("{}/api/v1", base_url(KIND, target)?);
+        let client = self
+            .core
+            .client(KIND, target, &api, AuthStyle::TokenPrefix, &[])
+            .await?;
+        check_owner(KIND, &client, target, "login").await?;
+        Ok(client)
+    }
+
+    async fn ssh_keys(&self, client: &HttpClient) -> Result<Listing, ProviderError> {
+        let mut out = Listing::default();
+        let items = client.get_all_pages(&format!("/user/keys?{PAGE}")).await?;
+        check_objects(KIND, &items)?;
+        for item in &items {
+            // The `fingerprint` field is not used: we compute our own.
+            out.add_ssh(
+                item,
+                &[Purpose::SshAuth, Purpose::SshSigning],
+                title(item, "title"),
+            );
+        }
+        Ok(out)
+    }
+
+    fn add_request(
+        &self,
+        key: &SshPublicKey,
+        title: &str,
+        _purpose: Purpose,
+        _like: Option<&KeyRef>,
+        _listing: &Listing,
+    ) -> (String, Value) {
+        (
+            "/user/keys".into(),
+            json!({ "title": title, "key": key.encoded }),
+        )
+    }
+
+    fn delete_path(&self, _purpose: Purpose, id: &str) -> String {
+        format!("/user/keys/{id}")
+    }
+
+    fn scopes(&self, _op: Op, _purpose: Purpose) -> String {
+        "the write:user scope".into()
+    }
+
+    /// The API sets no limit (`CreateKeyOption`: `binding:"Required"`),
+    /// but the web form does (`AddKeyForm`: `MaxSize(50)`). Keep to it.
+    fn max_title(&self) -> Option<usize> {
+        Some(50)
+    }
+}
+
+#[async_trait]
 impl Provider for Forgejo {
     fn kind(&self) -> LocationKind {
         KIND
@@ -87,15 +134,20 @@ impl Provider for Forgejo {
 
     async fn add(
         &self,
-        _target: &Target,
-        _key: &PublicKey,
-        _opts: &AddOpts,
+        target: &Target,
+        key: &PublicKey,
+        opts: &AddOpts,
     ) -> Result<(), ProviderError> {
-        Err(ProviderError::NotYet("adding a key to Forgejo"))
+        write::add(self, target, key, opts).await
     }
 
-    async fn remove(&self, _target: &Target, _key: &Fingerprint) -> Result<(), ProviderError> {
-        Err(ProviderError::NotYet("removing a key from Forgejo"))
+    async fn remove(
+        &self,
+        target: &Target,
+        key: &Fingerprint,
+        opts: &RemoveOpts,
+    ) -> Result<(), ProviderError> {
+        write::remove(self, target, key, opts).await
     }
 
     async fn verify(&self, target: &Target, key: &KeyRef) -> Result<VerifyStatus, ProviderError> {

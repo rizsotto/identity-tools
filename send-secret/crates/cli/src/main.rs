@@ -3,7 +3,6 @@
 //! Messages never hold plaintext (S-5).
 
 use std::collections::{HashMap, HashSet};
-use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
@@ -13,7 +12,7 @@ use std::process::ExitCode;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use crypto::{
     DecryptCtx, Decrypted, EncryptOpts, Format, MessagePlan, OpenPgpCert, OpenPgpSelf, Person,
-    Recipient, SELF_LABEL, SelfIdentity, Sender, SignatureStatus, SignerValidity,
+    Recipient, SelfIdentity, Sender, SignatureStatus, SignerValidity,
 };
 use identity_core::KeyError;
 use zeroize::Zeroizing;
@@ -53,9 +52,9 @@ struct EncryptArgs {
     /// Text output (ASCII armor).
     #[arg(short = 'a', long)]
     armor: bool,
-    /// Do not write a self copy for you.
+    /// Do not add your own key to the messages (you can not read them back).
     #[arg(long)]
-    no_self_copy: bool,
+    no_self: bool,
     /// Do not sign OpenPGP messages.
     #[arg(long)]
     no_sign: bool,
@@ -153,12 +152,6 @@ fn encrypt(args: EncryptArgs) -> Result<(), Fail> {
                 path.display()
             )));
         }
-        if label == SELF_LABEL {
-            return Err(Fail::Usage(format!(
-                "{}: the label \"self\" is kept for the self copy; rename the key file",
-                path.display()
-            )));
-        }
         if !labels.insert(label.clone()) {
             return Err(Fail::Usage(format!(
                 "two key files have the label \"{label}\"; rename one"
@@ -185,73 +178,45 @@ fn encrypt(args: EncryptArgs) -> Result<(), Fail> {
     let force = args.format.map(Format::from);
     let mut plans = crypto::plan(&people, force).map_err(error)?;
 
-    let make_self = if args.no_self_copy {
-        false
-    } else if args.input.is_none() || args.output.is_none() {
-        let missing = match (&args.input, &args.output) {
-            (None, None) => "-i FILE and -o",
-            (None, _) => "-i FILE",
-            _ => "-o",
-        };
-        note(format!(
-            "no self copy written: it needs {missing} (use --no-self-copy to hide this note)"
-        ));
-        false
-    } else {
-        true
-    };
-
     let sign = !args.no_sign;
-    let need_signer = sign && plans.iter().any(|p| p.format == Format::OpenPgp);
-    let need_user = need_signer || (make_self && force != Some(Format::Age));
-    // Set if gpg can not be used at all and is only needed for the self
-    // copy: it then falls back to age, and the note says why.
-    let mut gpg_failed = None;
-    let user = if need_user {
-        match crypto::openpgp_user(None) {
-            Ok(user) => Some(user),
-            Err(e) if need_signer => return Err(error(e)),
-            Err(e) => {
-                gpg_failed = Some(e);
-                None
-            }
-        }
+    let has_openpgp = plans.iter().any(|p| p.format == Format::OpenPgp);
+    let user = if has_openpgp && (sign || !args.no_self) {
+        Some(crypto::openpgp_user(None).map_err(error)?)
     } else {
         None
     };
     let signer = user.as_ref().and_then(|u| u.signer.clone());
 
-    // Printed only once every message is checked, so a failing run does
-    // not first talk about the self copy.
-    let mut self_note = None;
-    if make_self {
-        let self_key = user.map_or(OpenPgpSelf::NoSecretKey, |u| u.self_key);
-        let (format, why) = crypto::self_format(&self_key, force)
-            .map_err(|e| Fail::Error(format!("{e}; use --no-self-copy to skip it")))?;
-        let age = match format {
-            Format::Age => {
-                let path = crypto::self_identity_path(&config_home()?);
-                Some(
-                    SelfIdentity::load_or_create(&path)
-                        .map_err(error)?
-                        .recipient(),
-                )
-            }
-            Format::OpenPgp => None,
+    // Your own key goes into every message, so you can read it back
+    // (FR-12). Notes are printed only once every message is checked, so a
+    // failing run does not first talk about them.
+    let mut notes = Vec::new();
+    if !args.no_self {
+        let age = if plans.iter().any(|p| p.format == Format::Age) {
+            let path = crypto::self_identity_path(&config_home()?);
+            Some(
+                SelfIdentity::load_or_create(&path)
+                    .map_err(error)?
+                    .recipient(),
+            )
+        } else {
+            None
         };
         let sender = Sender {
-            openpgp: self_key,
+            openpgp: user.map_or(OpenPgpSelf::NoSecretKey, |u| u.self_key),
             age,
         };
-        let (self_copy, _) = crypto::self_plan(&sender, force).map_err(error)?;
-        self_note = match (why, gpg_failed) {
-            (None, _) => None,
-            (Some(_), Some(e)) => Some(format!(
-                "GnuPG can not be used ({e}), so the self copy uses age"
-            )),
-            (Some(why), None) => Some(why.to_string()),
+        crypto::add_sender(&mut plans, &sender);
+        let why = match sender.openpgp {
+            OpenPgpSelf::CannotEncrypt => "your default OpenPGP key cannot encrypt",
+            _ => "you have no OpenPGP secret key",
         };
-        plans.push(self_copy);
+        for plan in plans.iter().filter(|p| p.sender.is_none()) {
+            notes.push(format!(
+                "{}: your own key is not in this message, so you can not read it back ({why})",
+                plan.label
+            ));
+        }
     }
 
     let paths: HashMap<String, Option<PathBuf>> = plans
@@ -295,7 +260,7 @@ fn encrypt(args: EncryptArgs) -> Result<(), Fail> {
         &opts,
     )
     .map_err(encrypt_error)?;
-    if let Some(msg) = self_note {
+    for msg in notes {
         note(msg);
     }
 
@@ -355,28 +320,17 @@ fn encrypt_error(e: crypto::Error) -> Fail {
 }
 
 /// One recipient: exact `-o OUT` (or stdout). Several: `BASE.<label>.<ext>`.
-/// Self copy: `BASE.self.<ext>`, where with one recipient BASE is OUT
-/// without a trailing `.asc`, `.gpg` or `.age`.
 fn output_path(plan: &MessagePlan, args: &EncryptArgs, several: bool) -> Option<PathBuf> {
     let out = args.output.as_ref()?;
-    let is_self = plan.label == SELF_LABEL;
-    if !several && !is_self {
+    if !several {
         return Some(out.clone());
     }
-    let base: OsString = if several {
-        out.clone().into_os_string()
-    } else {
-        match out.extension().and_then(|e| e.to_str()) {
-            Some("asc" | "gpg" | "age") => out.with_extension("").into_os_string(),
-            _ => out.clone().into_os_string(),
-        }
-    };
     let ext = match (plan.format, args.armor) {
         (Format::OpenPgp, true) => "asc",
         (Format::OpenPgp, false) => "gpg",
         (Format::Age, _) => "age",
     };
-    let mut name = base;
+    let mut name = out.clone().into_os_string();
     name.push(format!(".{}.{ext}", plan.label));
     Some(PathBuf::from(name))
 }

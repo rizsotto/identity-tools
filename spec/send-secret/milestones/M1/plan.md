@@ -49,7 +49,7 @@ Built in the core lane (T05), after review. Shared API:
   first, skipping values with no secret key or only revoked, expired,
   disabled or invalid keys; else the first usable secret key that can
   sign. Not `gpgconf`: it shows only the last value and does not skip
-  expired keys. The self copy uses
+  expired keys. Read-back (FR-12) uses
   `default_secret_key()` and its `can_encrypt` to build `OpenPgpSelf`.
 - `RecipientFile` lives in `crypto` (`src/recipient_file.rs`), not in
   identity-core: it is Send Secret only (decision 0001, review of the
@@ -113,35 +113,36 @@ pub struct EncryptOpts {
 /// One recipient. In M1, one `--to-key` file. May hold keys of both formats.
 pub struct Person { pub label: String, pub keys: Vec<Recipient> }
 
-/// One message: one format, that person's keys of that format.
-pub struct MessagePlan { pub label: String, pub format: Format, pub keys: Vec<Recipient> }
+/// One message: one format, that person's keys of that format, plus the
+/// sender's key in that format (FR-12, S-8). `plan` leaves `sender: None`.
+pub struct MessagePlan { pub label: String, pub format: Format, pub keys: Vec<Recipient>,
+                         pub sender: Option<Recipient> }
 
 /// Pure: FR-3 per person, or the forced format. Err names unreachable people.
 pub fn plan(people: &[Person], force: Option<Format>) -> Result<Vec<MessagePlan>, PlanError>;
 
-/// The sender's own keys, for the self copy (FR-12).
-/// Found before any output is written.
+/// The sender's own keys, added to each message for read-back (FR-12,
+/// decision 0004). Found before any output is written. `age` is `None`
+/// when no message is age, so no identity is made for nothing.
 pub struct Sender { pub openpgp: OpenPgpSelf, pub age: Option<age::x25519::Recipient> }
-/// The default secret key as self copy key and signer (the same key).
+/// The default secret key as read-back key and signer (the same key).
 pub struct OpenPgpUser { pub self_key: OpenPgpSelf, pub signer: Option<String> }
 pub fn openpgp_user(home: Option<&Path>) -> Result<OpenPgpUser>;
 /// The default secret key (gpg.conf `default-key`, else the first secret
 /// key) and whether it has a valid encryption subkey.
 pub enum OpenPgpSelf { CanEncrypt(OpenPgpCert), NoSecretKey, CannotEncrypt }
-/// Pure: label "self", only the sender's key. Forced format, else OpenPGP
-/// if `OpenPgpSelf::CanEncrypt`, else age plus a note saying why
-/// (`SelfNote`). Forced OpenPGP without `CanEncrypt`: `PlanError::NoSelfKey`.
-pub fn self_format(openpgp: &OpenPgpSelf, force: Option<Format>)
-    -> Result<(Format, Option<SelfNote>), PlanError>;
-pub fn self_plan(sender: &Sender, force: Option<Format>)
-    -> Result<(MessagePlan, Option<SelfNote>), PlanError>;
+/// Pure: sets `sender` on each plan to the sender's key in its format.
+/// OpenPGP without `OpenPgpSelf::CanEncrypt`: stays `None`, the caller
+/// notes it. Never touches `keys`.
+pub fn add_sender(plans: &mut [MessagePlan], sender: &Sender);
 
-/// One message, to `plan.keys` only. Never adds any other key (S-8).
+/// One message, to `plan.keys` and `plan.sender` only. Never adds any
+/// other key (S-8).
 pub fn encrypt(input: impl Read + Send, output: impl Write + Send,
                plan: &MessagePlan, opts: &EncryptOpts) -> Result<()>;
 
 /// Checks ALL plans first; Err if one fails, and then nothing is opened.
-/// Else one result per plan (recipients, then the self copy), in order.
+/// Else one result per plan, in order.
 pub struct Sent { pub label: String, pub format: Format }
 pub fn encrypt_each<R: Read + Send, W: Write + Send>(
     open_input: impl FnMut() -> io::Result<R>,
@@ -172,9 +173,9 @@ pub fn detect_format(head: &[u8]) -> Detection;  // format: OpenPgpArmor, AgeArm
   `recipient-file` or `hidden-recipient-file`, which `NO_ENCRYPT_TO` does
   not turn off, and `local-user` when signing (it adds a second signer)
   (`Error::GpgConf`, S-8). gpg takes these names only in full, at line
-  start after spaces or tabs (checked with gpg 2.4.9). `Sender.age` is an `Option` and
-  `self_format()` gives the format first, so the age self identity is
-  only created for an age self copy. `Decrypted::signer` holds the
+  start after spaces or tabs (checked with gpg 2.4.9). `Sender.age` is an
+  `Option`, so the age identity is only created when a message is age.
+  `Decrypted::signer` holds the
   fingerprint, status and validity; a bad signature is an error. Armored
   OpenPGP input is cut after the END line like age.
 - In-memory plaintext uses `secrecy`/`zeroize` (NFR-3, S-5).
@@ -185,20 +186,22 @@ pub fn detect_format(head: &[u8]) -> Detection;  // format: OpenPgpArmor, AgeArm
 - Format choice per person (FR-3): OpenPGP if the person has an OpenPGP
   key, else age with all their age/SSH keys. `force` overrides; a person
   with no key in that format is `PlanError::Unreachable` naming them.
-- `encrypt` refuses a plan whose keys are not all of `plan.format`
-  (`Error::WrongFormat`). This is a guard; `plan` never builds such a plan.
-- No sender key in a recipient's message (S-8, decision 0002
-  encrypt-to-self sub-decision). `encrypt` uses only `plan.keys`. The
-  OpenPGP backend sets `GPGME_ENCRYPT_NO_ENCRYPT_TO`, so gpg.conf
-  `encrypt-to` cannot add a key, and refuses a gpg.conf with the
-  options that flag does not cover (see "As built" above).
-- Read-back is a separate self copy (FR-12): `self_plan` gives one more
-  `MessagePlan` with only the sender's key, and `encrypt_each` runs it
-  after the recipients. One self copy per run.
+- `encrypt` refuses a plan whose keys (incl. `sender`) are not all of
+  `plan.format` (`Error::WrongFormat`). This is a guard; `plan` never builds such a plan.
+- A recipient's message holds that recipient's keys plus the sender's
+  key, no one else's (S-8, FR-12, decision 0004). `encrypt` uses only
+  `plan.keys` and `plan.sender`; the sender's key goes in through our own
+  `--file` recipient list, never through gpg.conf. The OpenPGP backend
+  sets `GPGME_ENCRYPT_NO_ENCRYPT_TO`, so gpg.conf `encrypt-to` cannot add
+  a key, and refuses a gpg.conf with the options that flag does not cover
+  (see "As built" above).
+- Read-back (FR-12): `add_sender` puts the sender's key in each plan.
+  OpenPGP: the default secret key, if it can encrypt. age: the sender's
+  own X25519 identity, never an SSH key. No separate self copy file.
 - Order: the caller builds `Sender` (asks gpgme for the default secret key
-  and its encryption subkey, loads or creates the age self identity) and
-  runs `plan` and `self_plan` before it opens any output. So a missing
-  forced self key, like an unreachable recipient, writes nothing.
+  and its encryption subkey, loads or creates the age identity if a
+  message is age) and runs `plan` and `add_sender` before it opens any
+  output.
 - Decrypt starts reading at `Detection::start`, so text before the armor
   (BOM, backticks, a header line) is skipped. Text after the END line
   (closing backticks) must not break decrypt either: T08a/T08b check how
@@ -235,8 +238,9 @@ pub fn detect_format(head: &[u8]) -> Detection;  // format: OpenPgpArmor, AgeArm
   terminal (`rpassword` or similar). The libadwaita dialog is M3.
 - Self identity: a native X25519 identity in
   `$XDG_CONFIG_HOME/send-secret/identities`, created on the first encrypt
-  that makes an age self copy, file mode 0600 (parent dir 0700). Never an
-  SSH key, so the self copy has no linkable SSH tag. Passphrase protection
+  that makes an age message (unless `--no-self`), file mode 0600 (parent
+  dir 0700). Added as one more X25519 stanza to every age message. Never
+  an SSH key, so the message has no SSH tag that links it to the sender. Passphrase protection
   is optional in the spec, not in M1. The file is opened with
   `O_NOFOLLOW | O_NONBLOCK`; a symlink, a FIFO or a file group or others
   can read is refused. An existing `send-secret` dir that is too open is
@@ -248,7 +252,8 @@ pub fn detect_format(head: &[u8]) -> Detection;  // format: OpenPgpArmor, AgeArm
   read, so a 128 KiB header took 74 s. The backend caps the header at
   16 KiB and uses `Decryptor::new_buffered` (a real header with eight SSH
   RSA keys is about 5 KiB).
-- Recipient messages hold only the recipient's keys (S-8).
+- Recipient messages hold only the recipient's keys and the sender's
+  X25519 stanza (S-8, FR-12).
 
 ### OpenPGP backend
 
@@ -266,21 +271,22 @@ pub fn detect_format(head: &[u8]) -> Detection;  // format: OpenPgpArmor, AgeArm
 - Sign and encrypt in one gpgme operation, so the signature (and the
   sender's key ID) is inside the encryption. Only the recipient sees it.
 - Encrypt with `GPGME_ENCRYPT_NO_ENCRYPT_TO`, so gpg.conf `encrypt-to` or
-  `default-recipient-self` never adds the sender key (S-8).
+  `default-recipient-self` never adds a key (S-8). The sender's own key is
+  added by us, explicitly (decision 0004).
 - Armored output: use gpg's own armor through gpgme, unchanged (decision
   0003). Header lines from the user's gpg.conf are kept.
 - Sign with the default secret key. Set the signer explicitly
   (`Context::add_signer`) to the key from
-  `identity_core::OpenPgpBackend::default_secret_key()`, the same key the
-  self copy uses. Never rely on gpg's own default choice, so the signer
-  and the self copy key cannot differ. Decrypt reports signer fingerprint
+  `identity_core::OpenPgpBackend::default_secret_key()`, the same key that is
+  added for read-back. Never rely on gpg's own default choice, so the
+  signer and the read-back key cannot differ. Decrypt reports signer fingerprint
   and validity.
 
 ## CLI shape (draft)
 
 ```
 send-secret encrypt --to-key FILE [--to-key FILE ...] [-i IN] [-o OUT]
-                    [--armor] [--no-self-copy] [--no-sign] [--format openpgp|age]
+                    [--armor] [--no-self] [--no-sign] [--format openpgp|age]
 send-secret decrypt [-i IN] [-o OUT] [--identity FILE ...]
 ```
 
@@ -294,24 +300,13 @@ send-secret decrypt [-i IN] [-o OUT] [--identity FILE ...]
   binary) or `BASE.<label>.age` (age, armored or binary). No `-o` (stdout)
   or no `-i` (stdin) is a usage error (exit 2): stdout cannot hold several
   messages, and stdin cannot be read twice without buffering plaintext.
-- Self copy (FR-12), on unless `--no-self-copy`: `BASE.self.<ext>` next to
-  the per-recipient files, same extension rules. With one recipient, BASE
-  is OUT without a trailing `.asc`, `.gpg` or `.age`, and `<ext>` follows
-  the self copy's own format and armor (`-o msg.age` or `-o msg` gives
-  `msg.self.age` for an age self copy, `msg.self.asc` for an armored
-  OpenPGP one). The self copy reads the
-  input a second time and needs a file, so it needs `-i FILE` and `-o`.
-  With one recipient and stdin or stdout, the message is still written,
-  no self copy is made, stderr prints a note naming the missing option and
-  `--no-self-copy`, and the exit code is 0. `--no-self-copy` silences it.
-- Self key problems are found before any output is written (see the
-  crypto facade). Not forced and the default secret key is missing or
-  cannot encrypt: the self copy is age and stderr says why. Forced
-  `--format openpgp` and no such key: exit 1 before writing anything; the
-  message adds "use --no-self-copy to skip it" (the hint lives in the CLI,
-  not in `crypto`).
-- The label `self` is reserved. A key file whose label is `self` is a
-  usage error (exit 2).
+- Read-back (FR-12, decision 0004), on unless `--no-self`: the sender's
+  key goes into every recipient's message. No extra file; works with
+  stdin and stdout too. If an OpenPGP message can not get the sender's
+  key (no default secret key, or it can not encrypt; also with
+  `--format openpgp`), the message is made without it and stderr prints
+  a note naming that recipient, exit 0. The note is printed only after
+  every message is checked.
 - Stderr prints one line per output: label, file, format.
 - If a write fails midway, stderr names the outputs already written and
   the exit code is 1.
@@ -323,9 +318,7 @@ send-secret decrypt [-i IN] [-o OUT] [--identity FILE ...]
 - Exit codes: 0 ok, 1 error, 2 usage. No plaintext in error messages.
 - As built (T10): encrypt refuses to overwrite: if any output file exists,
   it exits 1 before writing anything. A message that fails midway has its
-  file removed. If gpg can not be used at all and is only needed for the
-  self copy, the self copy falls back to age as if there were no secret
-  key.
+  file removed.
 
 ## Interop test harness
 
@@ -340,9 +333,10 @@ Lives in `crates/cli/tests/` (integration tests that run the built binary).
 - Round trips per format and key type, both directions:
   ours to `gpg`/`age`, and `gpg`/`age` to ours. Armored and binary.
 - Metadata checks (S-8): `gpg --list-packets` on a recipient's message
-  shows only that recipient's key IDs, even with `encrypt-to` in the temp
-  `gpg.conf`. An age recipient's message does not open with the sender's
-  self identity, and the self copy has one X25519 stanza only.
+  shows only that recipient's key IDs plus the sender's, even with
+  `encrypt-to <other>` in the temp `gpg.conf`. An age recipient's message
+  has the recipient's stanzas plus one X25519 stanza that the sender's
+  identity opens. With `--no-self`, only the recipient's keys.
 - Armor (decision 0003): armored OpenPGP output is gpg's output unchanged;
   plain `gpg --decrypt` and `gpg --verify` open it (covered by T11 interop).
 - Plaintext marker: a random string per test, so the S-4 test can scan the

@@ -5,6 +5,7 @@ FROM registry.fedoraproject.org/fedora:45
 RUN dnf -y install gcc git sudo \
         gpgme-devel libgpg-error-devel gnupg2 gnupg2-wks pkgconf-pkg-config \
         openssh-server openssh-clients age sqlite-devel strace python3 \
+        dash busybox \
     && dnf clean all
 
 ARG USERNAME=dev

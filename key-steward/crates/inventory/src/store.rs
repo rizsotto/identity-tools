@@ -26,6 +26,13 @@ pub enum StoreError {
     /// S-8: the database dir must be 0700.
     #[error("{path} is open to other users (mode {mode:o}); it must be 0700")]
     SharedDir { path: String, mode: u32 },
+    /// Only one rotation may be open per database.
+    #[error("another rotation is still open (id {0}); finish or abort it first")]
+    RotationOpen(i64),
+    #[error("no such {what}: {id}")]
+    NotFound { what: &'static str, id: i64 },
+    #[error("invalid value: {0}")]
+    Invalid(String),
 }
 
 pub type Result<T> = std::result::Result<T, StoreError>;
@@ -36,7 +43,8 @@ pub type Result<T> = std::result::Result<T, StoreError>;
 ///
 /// Keys are not stored, only where they are installed. There is no token
 /// column, and there must never be one (S-4).
-const MIGRATIONS: &[&str] = &[r#"
+pub(crate) const MIGRATIONS: &[&str] = &[
+    r#"
 CREATE TABLE locations (
     id              INTEGER PRIMARY KEY,
     kind            TEXT NOT NULL,
@@ -58,7 +66,45 @@ CREATE UNIQUE INDEX locations_unique ON locations (
     kind, ifnull(ssh_alias, ''), ifnull(base_url, ''), ifnull(account, ''),
     key_fingerprint, purpose
 );
-"#];
+"#,
+    r#"
+CREATE TABLE rotations (
+    id              INTEGER PRIMARY KEY,
+    created_at      INTEGER NOT NULL,
+    old_fingerprint TEXT NOT NULL,
+    old_key_path    TEXT NOT NULL,
+    new_key_path    TEXT NOT NULL,
+    new_key_type    TEXT NOT NULL,
+    new_fingerprint TEXT,
+    update_config   INTEGER NOT NULL,
+    state           TEXT NOT NULL,
+    finished_at     INTEGER
+);
+CREATE UNIQUE INDEX one_open_rotation ON rotations ((1)) WHERE finished_at IS NULL;
+CREATE TABLE rotation_locations (
+    rotation_id INTEGER NOT NULL REFERENCES rotations(id),
+    location_id INTEGER NOT NULL,
+    kind        TEXT NOT NULL,
+    ssh_alias   TEXT,
+    base_url    TEXT,
+    account     TEXT,
+    purpose     TEXT NOT NULL,
+    phase       TEXT NOT NULL,
+    reason      TEXT,
+    PRIMARY KEY (rotation_id, location_id)
+);
+CREATE TABLE rotation_steps (
+    id          INTEGER PRIMARY KEY,
+    rotation_id INTEGER NOT NULL REFERENCES rotations(id),
+    location_id INTEGER,
+    step        TEXT NOT NULL,
+    event       TEXT NOT NULL,
+    detail      TEXT,
+    at          INTEGER NOT NULL
+);
+CREATE INDEX rotation_steps_rotation ON rotation_steps (rotation_id, id);
+"#,
+];
 
 /// Result of [`Store::add`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,7 +124,10 @@ impl Added {
 
 /// SQLite store for locations and their check results.
 pub struct Store {
-    conn: Connection,
+    pub(crate) conn: Connection,
+    /// Known secrets (tokens, key blobs) to cut out of journal text. Held
+    /// in memory only, never written.
+    pub(crate) secrets: Vec<String>,
 }
 
 const COLUMNS: &str = "id, kind, ssh_alias, ssh_hostname, ssh_user, ssh_port, base_url, \
@@ -101,7 +150,10 @@ impl Store {
 
     fn init(conn: Connection) -> Result<Store> {
         conn.pragma_update(None, "foreign_keys", true)?;
-        let mut store = Store { conn };
+        let mut store = Store {
+            conn,
+            secrets: Vec::new(),
+        };
         store.migrate()?;
         Ok(store)
     }
@@ -129,50 +181,15 @@ impl Store {
 
     /// Adds a location as `unverified`, or returns the id of the same one.
     pub fn add(&mut self, loc: &NewLocation) -> Result<Added> {
-        check_target(loc.kind, &loc.target)?;
-        let (alias, hostname, user, port, base_url, account) = target_columns(&loc.target);
-        let (key_kind, fpr) = fingerprint_columns(&loc.key);
         let tx = self.conn.transaction()?;
-        let existing: Option<LocationId> = tx
-            .query_row(
-                "SELECT id FROM locations WHERE kind = ?1 AND ifnull(ssh_alias, '') = ?2 \
-                 AND ifnull(base_url, '') = ?3 AND ifnull(account, '') = ?4 \
-                 AND key_fingerprint = ?5 AND purpose = ?6",
-                params![
-                    loc.kind.as_str(),
-                    alias.unwrap_or(""),
-                    base_url.unwrap_or(""),
-                    account.unwrap_or(""),
-                    fpr,
-                    loc.purpose.as_str()
-                ],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if let Some(id) = existing {
-            return Ok(Added::Existing(id));
-        }
-        tx.execute(
-            "INSERT INTO locations (kind, ssh_alias, ssh_hostname, ssh_user, ssh_port, \
-             base_url, account, key_kind, key_fingerprint, purpose, status) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            params![
-                loc.kind.as_str(),
-                alias,
-                hostname,
-                user,
-                port,
-                base_url,
-                account,
-                key_kind,
-                fpr,
-                loc.purpose.as_str(),
-                Status::Unverified.as_str()
-            ],
-        )?;
-        let id = tx.last_insert_rowid();
+        let added = add_location(&tx, loc)?;
         tx.commit()?;
-        Ok(Added::New(id))
+        Ok(added)
+    }
+
+    /// Deletes a location. Returns false if there is no such location.
+    pub fn remove(&mut self, id: LocationId) -> Result<bool> {
+        remove_location(&self.conn, id)
     }
 
     pub fn get(&self, id: LocationId) -> Result<Option<Location>> {
@@ -213,16 +230,7 @@ impl Store {
         status: &Status,
         checked: SystemTime,
     ) -> Result<bool> {
-        let reason = match status {
-            Status::Error(r) => Some(r.as_str()),
-            _ => None,
-        };
-        let n = self.conn.execute(
-            "UPDATE locations SET status = ?1, status_reason = ?2, last_checked = ?3 \
-             WHERE id = ?4",
-            params![status.as_str(), reason, to_unix(checked), id],
-        )?;
-        Ok(n == 1)
+        set_status_in(&self.conn, id, status, checked)
     }
 
     #[cfg(test)]
@@ -287,6 +295,74 @@ fn check_target(kind: LocationKind, target: &Target) -> Result<()> {
     }
 }
 
+/// Adds a location as `unverified`, or returns the id of the same one.
+/// The caller commits.
+pub(crate) fn add_location(conn: &Connection, loc: &NewLocation) -> Result<Added> {
+    check_target(loc.kind, &loc.target)?;
+    let (alias, hostname, user, port, base_url, account) = target_columns(&loc.target);
+    let (key_kind, fpr) = fingerprint_columns(&loc.key);
+    let existing: Option<LocationId> = conn
+        .query_row(
+            "SELECT id FROM locations WHERE kind = ?1 AND ifnull(ssh_alias, '') = ?2 \
+             AND ifnull(base_url, '') = ?3 AND ifnull(account, '') = ?4 \
+             AND key_fingerprint = ?5 AND purpose = ?6",
+            params![
+                loc.kind.as_str(),
+                alias.unwrap_or(""),
+                base_url.unwrap_or(""),
+                account.unwrap_or(""),
+                fpr,
+                loc.purpose.as_str()
+            ],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(id) = existing {
+        return Ok(Added::Existing(id));
+    }
+    conn.execute(
+        "INSERT INTO locations (kind, ssh_alias, ssh_hostname, ssh_user, ssh_port, \
+         base_url, account, key_kind, key_fingerprint, purpose, status) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        params![
+            loc.kind.as_str(),
+            alias,
+            hostname,
+            user,
+            port,
+            base_url,
+            account,
+            key_kind,
+            fpr,
+            loc.purpose.as_str(),
+            Status::Unverified.as_str()
+        ],
+    )?;
+    Ok(Added::New(conn.last_insert_rowid()))
+}
+
+pub(crate) fn remove_location(conn: &Connection, id: LocationId) -> Result<bool> {
+    Ok(conn.execute("DELETE FROM locations WHERE id = ?1", [id])? == 1)
+}
+
+pub(crate) fn set_status_in(
+    conn: &Connection,
+    id: LocationId,
+    status: &Status,
+    checked: SystemTime,
+) -> Result<bool> {
+    let reason = match status {
+        Status::Error(r) => Some(r.as_str()),
+        _ => None,
+    };
+    let n = conn.execute(
+        "UPDATE locations SET status = ?1, status_reason = ?2, last_checked = ?3 \
+         WHERE id = ?4",
+        params![status.as_str(), reason, to_unix(checked), id],
+    )?;
+    Ok(n == 1)
+}
+
 type TargetColumns<'a> = (
     Option<&'a str>,
     Option<&'a str>,
@@ -312,7 +388,7 @@ fn target_columns(target: &Target) -> TargetColumns<'_> {
     }
 }
 
-fn fingerprint_columns(fpr: &Fingerprint) -> (&'static str, &str) {
+pub(crate) fn fingerprint_columns(fpr: &Fingerprint) -> (&'static str, &str) {
     let kind = match fpr {
         Fingerprint::Ssh(_) => "ssh",
         Fingerprint::OpenPgp(_) => "openpgp",
@@ -321,14 +397,14 @@ fn fingerprint_columns(fpr: &Fingerprint) -> (&'static str, &str) {
     (kind, fpr.as_str())
 }
 
-fn to_unix(t: SystemTime) -> i64 {
+pub(crate) fn to_unix(t: SystemTime) -> i64 {
     match t.duration_since(UNIX_EPOCH) {
         Ok(d) => d.as_secs() as i64,
         Err(e) => -(e.duration().as_secs() as i64),
     }
 }
 
-fn from_unix(secs: i64) -> SystemTime {
+pub(crate) fn from_unix(secs: i64) -> SystemTime {
     if secs >= 0 {
         UNIX_EPOCH + Duration::from_secs(secs as u64)
     } else {
@@ -502,7 +578,14 @@ mod tests {
             }
             if c.contains("key") {
                 assert!(
-                    ["key_kind", "key_fingerprint"].contains(&c.as_str()),
+                    [
+                        "key_kind",
+                        "key_fingerprint",
+                        "old_key_path",
+                        "new_key_path",
+                        "new_key_type",
+                    ]
+                    .contains(&c.as_str()),
                     "{table}.{col}: keys are referenced by fingerprint only"
                 );
             }

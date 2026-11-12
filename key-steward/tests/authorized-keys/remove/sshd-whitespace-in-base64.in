@@ -1,0 +1,6 @@
+{OTHER} other
+{OLD_TYPE} {OLD_B1}{OLD_B2}
+{OLD_TYPE} {OLD_B1}{OLD_B2} vt
+{OLD_TYPE} {OLD_B1}{OLD_B2} ff
+restrict {OLD_TYPE} {OLD_B1}{OLD_B2} opts
+{NEW} new
