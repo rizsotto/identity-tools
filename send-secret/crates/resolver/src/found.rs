@@ -127,3 +127,30 @@ fn openpgp_usable(key: &OpenPgpKey) -> Result<(), Unusable> {
     }
     Err(Unusable::NoEncryptionSubkey)
 }
+
+/// S-6 for WKD and keys.openpgp.org: keep a key only if a valid user ID has
+/// the queried email, and show only those user IDs. The rest are rejected.
+pub(crate) fn keep_matching(
+    keys: Vec<(OpenPgpKey, Vec<u8>)>,
+    email: &str,
+    source: &Source,
+    found: &mut Found,
+) {
+    for (key, bytes) in keys {
+        let shown: Vec<_> = key
+            .user_ids
+            .iter()
+            .filter(|u| u.has_email(email))
+            .cloned()
+            .collect();
+        if shown.is_empty() {
+            found.rejected.push(Rejected {
+                fingerprint: Some(key.fingerprint.clone()),
+                source: source.clone(),
+                reason: RejectReason::EmailMismatch,
+            });
+        } else {
+            found.keys.push(openpgp_found(key, bytes, source, shown));
+        }
+    }
+}
